@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════
-# Easy Proxies 完整配置文件
+# Proxy2API 完整配置文件
 # ═══════════════════════════════════════════════════════════════
 
 # ───────────────────────────────────────────────────────────────
@@ -17,14 +17,14 @@ log_level: info
 # 日志轮转配置
 # ───────────────────────────────────────────────────────────────
 # output: "stdout"（仅控制台）或 "file"（控制台+文件轮转），默认 stdout
-# file: 日志文件路径，默认 logs/easy_proxies.log
+# file: 日志文件路径，默认 logs/Proxy2API.log
 # max_size: 单个日志文件最大 MB，超出后自动轮转，默认 50
 # max_backups: 保留旧日志文件个数，默认 3
 # max_age: 保留旧日志文件天数，默认 7
 # compress: 是否压缩轮转后的旧日志，默认 false
 log:
   output: stdout
-  file: logs/easy_proxies.log
+  file: logs/Proxy2API.log
   max_size: 50
   max_backups: 3
   max_age: 7
@@ -90,7 +90,10 @@ multi_port:
 management:
   enabled: true                                      # 是否启用管理面板
   listen: 0.0.0.0:9091                               # 监听地址
-  probe_target: http://cp.cloudflare.com/generate_204  # 健康检查目标
+  probe_target: http://cp.cloudflare.com/generate_204  # 延迟及连通性探测目标，可在系统设置中修改
+  probe_interval: 5m                                  # 自动全量探测间隔
+  probe_timeout: 1m50s                                # 20s 主探测 + 4x20s Trace + 余量
+  probe_concurrency: 32                               # 并发探测节点数
   password: ""                                       # WebUI 访问密码，为空则不需要密码
 
 # ───────────────────────────────────────────────────────────────
@@ -105,20 +108,6 @@ dns:
   strategy: prefer_ipv4     # as_is / prefer_ipv4 / prefer_ipv6 / ipv4_only / ipv6_only
 
 # ───────────────────────────────────────────────────────────────
-# GeoIP 地域分区配置（可选）
-# ───────────────────────────────────────────────────────────────
-# 启用后会为节点打上地域标签（jp/kr/us/hk/tw/other），用于 WebUI 统计和筛选。
-geoip:
-  enabled: true                      # 是否启用 GeoIP 地域标记
-  database_path: "./GeoLite2-Country.mmdb"           # GeoIP 数据库路径（首次启动时自动下载）
-  auto_update_enabled: true                          # 是否启用自动更新数据库（推荐）
-  auto_update_interval: 24h                          # 自动更新间隔（默认 24 小时）
-  # 注意：
-  #   - 首次启动会自动从 GitHub 下载 GeoIP 数据库（约 9MB）
-  #   - 启用 auto_update_enabled 后，数据库会定期自动更新，无需重启容器
-  #   - 更新过程采用热重载，不会中断现有连接
-
-# ───────────────────────────────────────────────────────────────
 # 订阅自动刷新配置（可选）
 # ───────────────────────────────────────────────────────────────
 # subscription_refresh:
@@ -126,7 +115,7 @@ geoip:
 #   interval: 1h                # 刷新间隔（默认 1 小时）
 #   timeout: 30s                # 获取订阅的超时时间
 #   fetch_concurrency: 16       # 订阅抓取并发数（默认 16，最大 32）
-#   health_check_timeout: 60s   # 新节点健康检查超时
+#   health_check_timeout: 2m    # 新节点健康检查超时
 #   drain_timeout: 30s          # 旧实例排空超时时间
 #   min_available_nodes: 1      # 最少可用节点数，低于此值不切换
 

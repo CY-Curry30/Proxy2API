@@ -1,8 +1,6 @@
 # Binaries
-easy-proxies
-easy-proxies-*
-easy_proxies
-easy_proxies-*
+Proxy2API
+Proxy2API-*
 *.exe
 
 # Configuration (contains sensitive data)

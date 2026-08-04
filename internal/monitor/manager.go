@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +20,8 @@ type Config struct {
 	Enabled          bool
 	Listen           string
 	ProbeTarget      string
+	ProbeInterval    time.Duration
+	ProbeTimeout     time.Duration
 	Password         string
 	ProxyUsername    string // 代理池的用户名（用于导出）
 	ProxyPassword    string // 代理池的密码（用于导出）
@@ -36,8 +38,6 @@ type NodeInfo struct {
 	Mode          string `json:"mode"`
 	ListenAddress string `json:"listen_address,omitempty"`
 	Port          uint16 `json:"port,omitempty"`
-	Region        string `json:"region,omitempty"`  // GeoIP region code: "jp", "kr", "us", "hk", "tw", "other"
-	Country       string `json:"country,omitempty"` // Full country name from GeoIP
 }
 
 // TimelineEvent represents a single usage event for debug tracking.
@@ -53,8 +53,11 @@ const maxTimelineSize = 20
 // Snapshot is a runtime view of a proxy node.
 type Snapshot struct {
 	NodeInfo
-	FailureCount      int             `json:"failure_count"`
-	SuccessCount      int64           `json:"success_count"`
+	IP                string          `json:"ip,omitempty"`
+	Region            string          `json:"region,omitempty"`
+	Country           string          `json:"country,omitempty"`
+	FailureCount      int             `json:"failure_count"` // client request connection failures
+	SuccessCount      int64           `json:"success_count"` // client request connection successes
 	Blacklisted       bool            `json:"blacklisted"`
 	BlacklistedUntil  time.Time       `json:"blacklisted_until"`
 	ActiveConnections int32           `json:"active_connections"`
@@ -68,7 +71,17 @@ type Snapshot struct {
 	Timeline          []TimelineEvent `json:"timeline,omitempty"`
 }
 
-type probeFunc func(ctx context.Context) (time.Duration, error)
+// ProbeResult contains connectivity information discovered by a probe.
+type ProbeResult struct {
+	Latency       time.Duration
+	IP            string
+	Region        string
+	Country       string
+	TraceError    string
+	TraceAttempts int
+}
+
+type probeFunc func(ctx context.Context) (ProbeResult, error)
 type releaseFunc func()
 
 type EntryHandle struct {
@@ -77,6 +90,9 @@ type EntryHandle struct {
 
 type entry struct {
 	info             NodeInfo
+	ip               string
+	region           string
+	country          string
 	failure          int
 	success          int64
 	timeline         []TimelineEvent
@@ -100,9 +116,15 @@ type Manager struct {
 	cfg              Config
 	probeDst         M.Socksaddr
 	probeHost        string // probe target hostname (TLS SNI when probeTLS is true)
-	probeTLS         bool   // strict mode: probe via TLS with certificate verification
+	probePath        string // HTTP request path, including the query string
+	probeTLS         bool   // whether the probe target uses HTTPS
+	probeTLSInsecure bool   // global HTTPS certificate verification setting
 	probeReady       bool
 	probeConcurrency int
+	probeInterval    time.Duration
+	probeTimeout     time.Duration
+	probeScheduleCh  chan struct{}
+	periodicOnce     sync.Once
 	mu               sync.RWMutex
 	nodes            map[string]*entry
 	ctx              context.Context
@@ -118,7 +140,7 @@ type Manager struct {
 	probeSweepFail   atomic.Int32
 
 	// probeGate serializes health-check sweeps. probeAllNodes is triggered from
-	// several places concurrently (boot, the 5-minute ticker, and post-reload
+	// several places concurrently (boot, the configured ticker, and post-reload
 	// ProbeAllNow); without this gate two sweeps overlap, corrupt the shared
 	// progress counters, and — because each one clears probeSweepActive on
 	// return — leave the flag flapping so the dashboard progress bar reappears
@@ -165,50 +187,70 @@ func clampProbeConcurrency(n int) int {
 	return n
 }
 
-// resolveProbeTarget derives the probe destination, TLS SNI host and strict-TLS
-// decision from a probe target string. Strict TLS is enabled only for an https
-// target when skip_cert_verify is off. It is pure so both NewManager and the
-// live SetProbeTarget reload path share identical parsing.
-func resolveProbeTarget(probeTarget string, skipCertVerify bool) (dst M.Socksaddr, host string, useTLS, ready bool) {
-	if probeTarget == "" {
-		return M.Socksaddr{}, "", false, false
+// resolveProbeTarget derives the destination and complete HTTP request target.
+// Bare host[:port] values remain supported and use /generate_204 by default.
+func resolveProbeTarget(probeTarget string, skipCertVerify bool) (dst M.Socksaddr, host, path string, useTLS, tlsInsecure, ready bool) {
+	target := strings.TrimSpace(probeTarget)
+	if target == "" {
+		return M.Socksaddr{}, "", "", false, false, false
 	}
-	target := probeTarget
-	isHTTPS := strings.HasPrefix(target, "https://")
-	// Strip URL scheme if present (e.g., "https://www.google.com:443" -> "www.google.com:443")
-	if strings.HasPrefix(target, "https://") {
-		target = strings.TrimPrefix(target, "https://")
-	} else if strings.HasPrefix(target, "http://") {
-		target = strings.TrimPrefix(target, "http://")
+	if !strings.Contains(target, "://") {
+		target = "http://" + target
 	}
-	// Remove trailing path if present
-	if idx := strings.Index(target, "/"); idx != -1 {
-		target = target[:idx]
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Hostname() == "" {
+		return M.Socksaddr{}, "", "", false, false, false
 	}
-	h, port, err := net.SplitHostPort(target)
-	if err != nil {
-		// If no port specified, use default based on original scheme
-		h = target
-		if isHTTPS {
+
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return M.Socksaddr{}, "", "", false, false, false
+	}
+	host = parsed.Hostname()
+	port := parsed.Port()
+	if port == "" {
+		if scheme == "https" {
 			port = "443"
 		} else {
 			port = "80"
 		}
 	}
-	return M.ParseSocksaddrHostPort(h, parsePort(port)), h, isHTTPS && !skipCertVerify, true
+	portNumber := parsePort(port)
+	if portNumber == 0 {
+		return M.Socksaddr{}, "", "", false, false, false
+	}
+
+	path = parsed.EscapedPath()
+	if path == "" {
+		path = "/generate_204"
+	}
+	if parsed.RawQuery != "" {
+		path += "?" + parsed.RawQuery
+	}
+	useTLS = scheme == "https"
+	return M.ParseSocksaddrHostPort(host, portNumber), host, path, useTLS, skipCertVerify, true
 }
 
 // NewManager constructs a manager and pre-validates the probe target.
 func NewManager(cfg Config) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	if cfg.ProbeInterval <= 0 {
+		cfg.ProbeInterval = 5 * time.Minute
+	}
+	if cfg.ProbeTimeout <= 0 {
+		cfg.ProbeTimeout = 110 * time.Second
+	}
 	m := &Manager{
 		cfg:              cfg,
 		nodes:            make(map[string]*entry),
 		ctx:              ctx,
 		cancel:           cancel,
 		probeConcurrency: clampProbeConcurrency(cfg.ProbeConcurrency),
+		probeInterval:    cfg.ProbeInterval,
+		probeTimeout:     cfg.ProbeTimeout,
+		probeScheduleCh:  make(chan struct{}, 1),
 	}
-	m.probeDst, m.probeHost, m.probeTLS, m.probeReady = resolveProbeTarget(cfg.ProbeTarget, cfg.SkipCertVerify)
+	m.probeDst, m.probeHost, m.probePath, m.probeTLS, m.probeTLSInsecure, m.probeReady = resolveProbeTarget(cfg.ProbeTarget, cfg.SkipCertVerify)
 	return m, nil
 }
 
@@ -233,15 +275,40 @@ func (m *Manager) ProbeConcurrency() int {
 	return m.probeConcurrency
 }
 
+// SetProbeSchedule updates the automatic sweep interval and per-node timeout.
+func (m *Manager) SetProbeSchedule(interval, timeout time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	if timeout <= 0 {
+		timeout = 110 * time.Second
+	}
+	m.mu.Lock()
+	m.probeInterval = interval
+	m.probeTimeout = timeout
+	m.mu.Unlock()
+	select {
+	case m.probeScheduleCh <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) probeSchedule() (time.Duration, time.Duration) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.probeInterval, m.probeTimeout
+}
+
 // SetProbeTarget re-derives the probe destination and strict-TLS decision from
 // the live config so WebUI changes to probe_target / skip_cert_verify take
 // effect after a reload without a full process restart. The monitor Manager is
 // a long-lived singleton, so without this the startup-time target/TLS mode
 // would persist until the process restarts.
 func (m *Manager) SetProbeTarget(probeTarget string, skipCertVerify bool) {
-	dst, host, useTLS, ready := resolveProbeTarget(probeTarget, skipCertVerify)
+	dst, host, path, useTLS, tlsInsecure, ready := resolveProbeTarget(probeTarget, skipCertVerify)
 	m.mu.Lock()
-	m.probeDst, m.probeHost, m.probeTLS, m.probeReady = dst, host, useTLS, ready
+	m.probeDst, m.probeHost, m.probePath = dst, host, path
+	m.probeTLS, m.probeTLSInsecure, m.probeReady = useTLS, tlsInsecure, ready
 	m.mu.Unlock()
 }
 
@@ -249,34 +316,39 @@ func (m *Manager) SetProbeTarget(probeTarget string, skipCertVerify bool) {
 // interval: how often to check (e.g., 30 * time.Second)
 // timeout: timeout for each probe (e.g., 10 * time.Second)
 func (m *Manager) StartPeriodicHealthCheck(interval, timeout time.Duration) {
-	if !m.probeReady {
-		// No probe target configured: nodes cannot be verified. Run probeAllNodes
-		// once so it marks every node initialCheckDone+available via its nil-probe
-		// branch — otherwise nodes stay initialCheckDone=false forever and both the
-		// export and the "healthy online" count read zero. Do not start the ticker.
-		if m.logger != nil {
-			m.logger.Warn("probe target not configured, marking all nodes available without verification")
-		}
-		m.probeAllNodes(timeout)
-		return
-	}
+	m.SetProbeSchedule(interval, timeout)
+	m.periodicOnce.Do(func() {
+		go func() {
+			// Run one sweep immediately, then use the live schedule.
+			_, currentTimeout := m.probeSchedule()
+			m.probeAllNodes(currentTimeout)
 
-	go func() {
-		// 启动后立即进行一次检查
-		m.probeAllNodes(timeout)
+			currentInterval, _ := m.probeSchedule()
+			timer := time.NewTimer(currentInterval)
+			defer timer.Stop()
 
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-m.ctx.Done():
-				return
-			case <-ticker.C:
-				m.probeAllNodes(timeout)
+			for {
+				select {
+				case <-m.ctx.Done():
+					return
+				case <-timer.C:
+					_, currentTimeout = m.probeSchedule()
+					m.probeAllNodes(currentTimeout)
+					currentInterval, _ = m.probeSchedule()
+					timer.Reset(currentInterval)
+				case <-m.probeScheduleCh:
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					currentInterval, _ = m.probeSchedule()
+					timer.Reset(currentInterval)
+				}
 			}
-		}
-	}()
+		}()
+	})
 
 	if m.logger != nil {
 		m.logger.Info("periodic health check started, interval: ", interval)
@@ -401,42 +473,35 @@ func (m *Manager) runProbeSweep(timeout time.Duration) {
 			// later (its connection watchdog force-closes on ctx.Done) without
 			// blocking on send.
 			type probeOutcome struct {
-				latency time.Duration
-				err     error
+				result ProbeResult
+				err    error
 			}
 			resCh := make(chan probeOutcome, 1)
 			go func() {
-				latency, err := probe(ctx)
-				resCh <- probeOutcome{latency: latency, err: err}
+				result, err := probe(ctx)
+				resCh <- probeOutcome{result: result, err: err}
 			}()
 
-			var latency time.Duration
+			var result ProbeResult
 			var err error
 			select {
 			case out := <-resCh:
-				latency, err = out.latency, out.err
+				result, err = out.result, out.err
 			case <-ctx.Done():
 				err = ctx.Err()
 			}
 
-			entry.mu.Lock()
+			entry.mu.RLock()
 			uri := entry.info.URI
+			entry.mu.RUnlock()
 			if err != nil {
 				failedCount.Add(1)
 				m.probeSweepFail.Add(1)
-				entry.lastError = err.Error()
-				entry.lastFail = time.Now()
-				entry.available = false
-				entry.initialCheckDone = true
 			} else {
 				availableCount.Add(1)
 				m.probeSweepOK.Add(1)
-				entry.lastOK = time.Now()
-				entry.lastProbe = latency
-				entry.available = true
-				entry.initialCheckDone = true
 			}
-			entry.mu.Unlock()
+			entry.applyProbeResult(result, err)
 			m.probeSweepDone.Add(1)
 
 			if err != nil && m.logger != nil {
@@ -491,16 +556,14 @@ func (m *Manager) ClearNodes() {
 	m.nodes = make(map[string]*entry)
 }
 
-// DestinationForProbe exposes the configured destination for health checks.
-// host is the probe target's hostname (used as TLS SNI); useTLS is true when
-// the probe must perform a TLS handshake with strict certificate verification.
-func (m *Manager) DestinationForProbe() (dest M.Socksaddr, host string, useTLS bool, ok bool) {
+// DestinationForProbe exposes the configured destination and HTTP target.
+func (m *Manager) DestinationForProbe() (dest M.Socksaddr, host, path string, useTLS, tlsInsecure, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if !m.probeReady {
-		return M.Socksaddr{}, "", false, false
+		return M.Socksaddr{}, "", "", false, false, false
 	}
-	return m.probeDst, m.probeHost, m.probeTLS, true
+	return m.probeDst, m.probeHost, m.probePath, m.probeTLS, m.probeTLSInsecure, true
 }
 
 // Snapshot returns a sorted copy of current node states.
@@ -561,12 +624,22 @@ func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 // SnapshotFiltered results immediately, matching the behaviour of the periodic
 // probeAllNodes loop.
 func (m *Manager) Probe(ctx context.Context, tag string) (time.Duration, error) {
-	e, err := m.entry(tag)
+	result, err := m.ProbeWithResult(ctx, tag)
 	if err != nil {
 		return 0, err
 	}
+	return result.Latency, nil
+}
+
+// ProbeWithResult triggers a manual health check and returns both latency and
+// display-only metadata probe details.
+func (m *Manager) ProbeWithResult(ctx context.Context, tag string) (ProbeResult, error) {
+	e, err := m.entry(tag)
+	if err != nil {
+		return ProbeResult{}, err
+	}
 	if e.probe == nil {
-		return 0, errors.New("probe not available for this node")
+		return ProbeResult{}, errors.New("probe not available for this node")
 	}
 
 	// Enforce the context deadline at this level. Some sing-box outbound
@@ -579,39 +652,28 @@ func (m *Manager) Probe(ctx context.Context, tag string) (time.Duration, error) 
 	// ctx.Done). The result channel is buffered so that late goroutine never
 	// blocks on send.
 	type probeOutcome struct {
-		latency time.Duration
-		err     error
+		result ProbeResult
+		err    error
 	}
 	resCh := make(chan probeOutcome, 1)
 	go func() {
-		latency, err := e.probe(ctx)
-		resCh <- probeOutcome{latency: latency, err: err}
+		result, err := e.probe(ctx)
+		resCh <- probeOutcome{result: result, err: err}
 	}()
 
-	var latency time.Duration
+	var result ProbeResult
 	select {
 	case out := <-resCh:
-		latency, err = out.latency, out.err
+		result, err = out.result, out.err
 	case <-ctx.Done():
 		err = ctx.Err()
 	}
 
-	e.mu.Lock()
-	e.initialCheckDone = true
+	e.applyProbeResult(result, err)
 	if err != nil {
-		e.lastError = err.Error()
-		e.lastFail = time.Now()
-		e.available = false
-	} else {
-		e.lastOK = time.Now()
-		e.lastProbe = latency
-		e.available = true
+		return result, err
 	}
-	e.mu.Unlock()
-	if err != nil {
-		return 0, err
-	}
-	return latency, nil
+	return result, nil
 }
 
 // Release clears blacklist state for the given node.
@@ -676,6 +738,9 @@ func (e *entry) snapshot() Snapshot {
 
 	return Snapshot{
 		NodeInfo:          e.info,
+		IP:                e.ip,
+		Region:            e.region,
+		Country:           e.country,
 		FailureCount:      e.failure,
 		SuccessCount:      e.success,
 		Blacklisted:       e.blacklist,
@@ -690,6 +755,30 @@ func (e *entry) snapshot() Snapshot {
 		InitialCheckDone:  e.initialCheckDone,
 		Timeline:          timelineCopy,
 	}
+}
+
+func (e *entry) applyProbeResult(result ProbeResult, err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.initialCheckDone = true
+	if err != nil {
+		e.lastError = err.Error()
+		e.lastFail = time.Now()
+		e.available = false
+		return
+	}
+	e.lastOK = time.Now()
+	e.lastProbe = result.Latency
+	if result.IP != "" {
+		e.ip = result.IP
+	}
+	if result.Region != "" {
+		e.region = result.Region
+	}
+	if result.Country != "" {
+		e.country = result.Country
+	}
+	e.available = true
 }
 
 func (e *entry) recordFailure(err error) {
@@ -708,19 +797,6 @@ func (e *entry) recordSuccess() {
 	e.success++
 	e.lastOK = time.Now()
 	e.appendTimelineLocked(true, 0, "")
-}
-
-func (e *entry) recordSuccessWithLatency(latency time.Duration) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.success++
-	e.lastOK = time.Now()
-	e.lastProbe = latency
-	latencyMs := latency.Milliseconds()
-	if latencyMs == 0 && latency > 0 {
-		latencyMs = 1
-	}
-	e.appendTimelineLocked(true, latencyMs, "")
 }
 
 func (e *entry) appendTimelineLocked(success bool, latencyMs int64, errStr string) {
@@ -788,14 +864,6 @@ func (h *EntryHandle) RecordSuccess() {
 	h.ref.recordSuccess()
 }
 
-// RecordSuccessWithLatency updates the last success timestamp and latency.
-func (h *EntryHandle) RecordSuccessWithLatency(latency time.Duration) {
-	if h == nil || h.ref == nil {
-		return
-	}
-	h.ref.recordSuccessWithLatency(latency)
-}
-
 // Blacklist marks the node unavailable until the given deadline.
 func (h *EntryHandle) Blacklist(until time.Time) {
 	if h == nil || h.ref == nil {
@@ -829,7 +897,7 @@ func (h *EntryHandle) DecActive() {
 }
 
 // SetProbe assigns a probe function.
-func (h *EntryHandle) SetProbe(fn func(ctx context.Context) (time.Duration, error)) {
+func (h *EntryHandle) SetProbe(fn func(ctx context.Context) (ProbeResult, error)) {
 	if h == nil || h.ref == nil {
 		return
 	}

@@ -18,8 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"easy_proxies/internal/config"
-	"easy_proxies/internal/geoip"
+	"Proxy2API/internal/config"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -37,6 +36,7 @@ type Session struct {
 type NodeManager interface {
 	ListConfigNodes(ctx context.Context) ([]config.NodeConfig, error)
 	CreateNode(ctx context.Context, node config.NodeConfig) (config.NodeConfig, error)
+	ImportConfigNodes(ctx context.Context, nodes []config.NodeConfig) ([]config.NodeConfig, int, error)
 	UpdateNode(ctx context.Context, name string, node config.NodeConfig) (config.NodeConfig, error)
 	DeleteNode(ctx context.Context, name string) error
 	TriggerReload(ctx context.Context) error
@@ -53,6 +53,7 @@ var (
 type SubscriptionRefresher interface {
 	RefreshNow() error
 	Status() SubscriptionStatus
+	Subscriptions() []SubscriptionInfo
 	UpdateConfig(urls []string, enabled bool, interval time.Duration)
 	UpdateConfigAndRefresh(urls []string, enabled bool, interval time.Duration) error
 }
@@ -66,6 +67,24 @@ type SubscriptionStatus struct {
 	RefreshCount  int       `json:"refresh_count"`
 	IsRefreshing  bool      `json:"is_refreshing"`
 	NodesModified bool      `json:"nodes_modified"` // True if nodes.txt was modified since last refresh
+}
+
+// SubscriptionInfo describes the latest state reported by one subscription.
+type SubscriptionInfo struct {
+	ID             string    `json:"id"`
+	URL            string    `json:"url"`
+	Name           string    `json:"name"`
+	Status         string    `json:"status"`
+	NodeCount      int       `json:"node_count"`
+	Included       bool      `json:"included"`
+	UploadBytes    int64     `json:"upload_bytes"`
+	DownloadBytes  int64     `json:"download_bytes"`
+	UsedBytes      int64     `json:"used_bytes"`
+	TotalBytes     int64     `json:"total_bytes"`
+	RemainingBytes int64     `json:"remaining_bytes"`
+	ExpiresAt      int64     `json:"expires_at"`
+	LastRefresh    time.Time `json:"last_refresh"`
+	LastError      string    `json:"last_error,omitempty"`
 }
 
 // Server exposes HTTP endpoints for monitoring.
@@ -118,6 +137,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/nodes", s.withAuth(s.handleNodes))
 	mux.HandleFunc("/api/nodes/config", s.withAuth(s.handleConfigNodes))
 	mux.HandleFunc("/api/nodes/config/", s.withAuth(s.handleConfigNodeItem))
+	mux.HandleFunc("/api/nodes/import", s.withAuth(s.handleNodeImport))
 	mux.HandleFunc("/api/nodes/probe-all", s.withAuth(s.handleProbeAll))
 	mux.HandleFunc("/api/nodes/", s.withAuth(s.handleNodeAction))
 	mux.HandleFunc("/api/debug", s.withAuth(s.handleDebug))
@@ -125,6 +145,9 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/subscription/status", s.withAuth(s.handleSubscriptionStatus))
 	mux.HandleFunc("/api/subscription/refresh", s.withAuth(s.handleSubscriptionRefresh))
 	mux.HandleFunc("/api/subscription/config", s.withAuth(s.handleSubscriptionConfig))
+	mux.HandleFunc("/api/subscriptions", s.withAuth(s.handleSubscriptions))
+	mux.HandleFunc("/api/subscriptions/settings", s.withAuth(s.handleSubscriptionSettings))
+	mux.HandleFunc("/api/subscriptions/refresh", s.withAuth(s.handleManagedSubscriptionRefresh))
 	mux.HandleFunc("/api/reload", s.withAuth(s.handleReload))
 	mux.HandleFunc("/api/traffic", s.withAuth(s.handleTraffic))
 	mux.HandleFunc("/api/logs", s.withAuth(s.handleLogs))
@@ -166,11 +189,14 @@ func (s *Server) SetConfig(cfg *config.Config) {
 	if cfg != nil {
 		s.cfg.ExternalIP = cfg.ExternalIP
 		s.cfg.ProbeTarget = cfg.Management.ProbeTarget
+		s.cfg.ProbeInterval = cfg.ProbeIntervalOrDefault()
+		s.cfg.ProbeTimeout = cfg.ProbeTimeoutOrDefault()
 		s.cfg.SkipCertVerify = cfg.SkipCertVerify
 		// Sync probe concurrency to the manager so periodic health checks pick
 		// up WebUI changes after a reload (batch probes read it per request).
 		if s.mgr != nil {
 			s.mgr.SetProbeConcurrency(cfg.ProbeConcurrencyOrDefault())
+			s.mgr.SetProbeSchedule(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
 			// Re-derive the probe destination and strict-TLS mode so changes to
 			// probe_target / skip_cert_verify take effect on the long-lived
 			// manager without a full process restart.
@@ -210,8 +236,21 @@ func (s *Server) currentProbeConcurrency() int64 {
 	return 32
 }
 
-// updateSettings updates dynamic settings and persists to config file.
-func (s *Server) updateSettings(externalIP, probeTarget string, skipCertVerify bool, logCfg *config.LogConfig, geoipEnabled bool) error {
+func (s *Server) currentProbeTimeout() time.Duration {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	if s.cfgSrc != nil {
+		return s.cfgSrc.ProbeTimeoutOrDefault()
+	}
+	if s.cfg.ProbeTimeout > 0 {
+		return s.cfg.ProbeTimeout
+	}
+	return 110 * time.Second
+}
+
+// updateSettings updates the in-memory dynamic settings. The settings handler
+// persists once after applying the extended fields from the same request.
+func (s *Server) updateSettings(externalIP, probeTarget string, skipCertVerify bool, logCfg *config.LogConfig) error {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
@@ -227,14 +266,6 @@ func (s *Server) updateSettings(externalIP, probeTarget string, skipCertVerify b
 	s.cfgSrc.Management.ProbeTarget = probeTarget
 	s.cfgSrc.SkipCertVerify = skipCertVerify
 
-	// GeoIP settings
-	s.cfgSrc.GeoIP.Enabled = geoipEnabled
-	if geoipEnabled && s.cfgSrc.GeoIP.DatabasePath == "" {
-		s.cfgSrc.GeoIP.DatabasePath = "./GeoLite2-Country.mmdb"
-		s.cfgSrc.GeoIP.AutoUpdateEnabled = true
-		s.cfgSrc.GeoIP.AutoUpdateInterval = 24 * time.Hour
-	}
-
 	if logCfg != nil {
 		s.cfgSrc.Log.Output = logCfg.Output
 		if logCfg.MaxSize > 0 {
@@ -249,9 +280,6 @@ func (s *Server) updateSettings(externalIP, probeTarget string, skipCertVerify b
 		s.cfgSrc.Log.Compress = logCfg.Compress
 	}
 
-	if err := s.cfgSrc.SaveSettings(); err != nil {
-		return fmt.Errorf("保存配置失败: %w", err)
-	}
 	return nil
 }
 
@@ -305,27 +333,10 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	allNodes := s.mgr.Snapshot()
 	totalNodes := len(allNodes)
 
-	// Calculate region statistics
-	regionStats := make(map[string]int)
-	regionHealthy := make(map[string]int)
-	for _, snap := range allNodes {
-		region := snap.Region
-		if region == "" {
-			region = "other"
-		}
-		regionStats[region]++
-		// Count healthy nodes per region
-		if snap.InitialCheckDone && snap.Available && !snap.Blacklisted {
-			regionHealthy[region]++
-		}
-	}
-
 	sweepActive, sweepDone, sweepTotal, sweepOK, sweepFail := s.mgr.ProbeSweepProgress()
 	payload := map[string]any{
-		"nodes":          allNodes,
-		"total_nodes":    totalNodes,
-		"region_stats":   regionStats,
-		"region_healthy": regionHealthy,
+		"nodes":       allNodes,
+		"total_nodes": totalNodes,
 		"probe_sweep": map[string]any{
 			"active":    sweepActive,
 			"done":      sweepDone,
@@ -353,6 +364,9 @@ func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
 			"name":               snap.Name,
 			"mode":               snap.Mode,
 			"port":               snap.Port,
+			"ip":                 snap.IP,
+			"region":             snap.Region,
+			"country":            snap.Country,
 			"failure_count":      snap.FailureCount,
 			"success_count":      snap.SuccessCount,
 			"active_connections": snap.ActiveConnections,
@@ -397,18 +411,25 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), s.currentProbeTimeout())
 		defer cancel()
-		latency, err := s.mgr.Probe(ctx, tag)
+		result, err := s.mgr.ProbeWithResult(ctx, tag)
 		if err != nil {
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
 		}
-		latencyMs := latency.Milliseconds()
-		if latencyMs == 0 && latency > 0 {
+		latencyMs := result.Latency.Milliseconds()
+		if latencyMs == 0 && result.Latency > 0 {
 			latencyMs = 1 // Round up sub-millisecond latencies to 1ms
 		}
-		writeJSON(w, map[string]any{"message": "探测成功", "latency_ms": latencyMs})
+		writeJSON(w, map[string]any{
+			"message":        "探测成功",
+			"latency_ms":     latencyMs,
+			"trace_ok":       result.TraceError == "",
+			"trace_ip":       result.IP,
+			"trace_error":    result.TraceError,
+			"trace_attempts": result.TraceAttempts,
+		})
 	case "release":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -424,15 +445,22 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+		// Prefer the configured pool.blacklist_duration over a hardcoded 24h default.
+		defaultDuration := 24 * time.Hour
+		s.cfgMu.RLock()
+		if s.cfgSrc != nil && s.cfgSrc.Pool.BlacklistDuration > 0 {
+			defaultDuration = s.cfgSrc.Pool.BlacklistDuration
+		}
+		s.cfgMu.RUnlock()
 		var req struct {
 			Duration string `json:"duration"` // e.g. "1h", "24h", "30m"
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Duration == "" {
-			req.Duration = "24h"
+			req.Duration = defaultDuration.String()
 		}
 		duration, err := time.ParseDuration(req.Duration)
 		if err != nil || duration <= 0 {
-			duration = 24 * time.Hour
+			duration = defaultDuration
 		}
 		if err := s.mgr.ManualBlacklist(tag, duration); err != nil {
 			writeJSON(w, map[string]any{"error": err.Error()})
@@ -496,13 +524,13 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 
 	// Create context with a timeout scaled to node count and concurrency so that
 	// large inventories (e.g. thousands of nodes) are not cut off. Each probe
-	// still has its own 10s deadline; here we bound the total wall time as
+	// still has its own configured deadline; here we bound the total wall time as
 	// ceil(total / concurrency) * perProbe + slack, which is the expected
 	// completion time given the semaphore. We deliberately do NOT cap this below
 	// the estimate: a shorter deadline would cancel still-queued probes and
 	// report reachable nodes as failures (which can then blacklist them). The
 	// client can still abort early by closing the SSE connection (r.Context()).
-	perProbe := 10 * time.Second
+	perProbe := s.currentProbeTimeout()
 	batches := (int64(total) + concurrency - 1) / concurrency
 	totalTimeout := time.Duration(batches)*perProbe + 30*time.Second
 	if totalTimeout < 2*time.Minute {
@@ -516,10 +544,12 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 
 	// Probe all nodes with semaphore control
 	type probeResult struct {
-		tag     string
-		name    string
-		latency int64
-		err     string
+		tag           string
+		name          string
+		latency       int64
+		err           string
+		traceErr      string
+		traceAttempts int
 	}
 	results := make(chan probeResult, total)
 	var wg sync.WaitGroup
@@ -542,23 +572,27 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 			defer sem.Release(1)
 
 			// Execute probe
-			probeCtx, probeCancel := context.WithTimeout(ctx, 10*time.Second)
+			probeCtx, probeCancel := context.WithTimeout(ctx, perProbe)
 			defer probeCancel()
 
-			latency, err := s.mgr.Probe(probeCtx, snap.Tag)
+			probe, err := s.mgr.ProbeWithResult(probeCtx, snap.Tag)
 			if err != nil {
 				results <- probeResult{
-					tag:     snap.Tag,
-					name:    snap.Name,
-					latency: -1,
-					err:     err.Error(),
+					tag:           snap.Tag,
+					name:          snap.Name,
+					latency:       -1,
+					err:           err.Error(),
+					traceErr:      probe.TraceError,
+					traceAttempts: probe.TraceAttempts,
 				}
 			} else {
 				results <- probeResult{
-					tag:     snap.Tag,
-					name:    snap.Name,
-					latency: latency.Milliseconds(),
-					err:     "",
+					tag:           snap.Tag,
+					name:          snap.Name,
+					latency:       probe.Latency.Milliseconds(),
+					err:           "",
+					traceErr:      probe.TraceError,
+					traceAttempts: probe.TraceAttempts,
 				}
 			}
 		}(snap)
@@ -573,6 +607,8 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 	// Collect results
 	successCount := 0
 	failedCount := 0
+	traceSuccessCount := 0
+	traceFailedCount := 0
 	count := 0
 
 	for result := range results {
@@ -582,6 +618,13 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 		} else {
 			successCount++
 		}
+		if result.traceAttempts > 0 {
+			if result.traceErr != "" {
+				traceFailedCount++
+			} else {
+				traceSuccessCount++
+			}
+		}
 
 		status := "success"
 		if result.err != "" {
@@ -589,15 +632,17 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 		}
 
 		eventPayload := map[string]any{
-			"type":     "progress",
-			"tag":      result.tag,
-			"name":     result.name,
-			"latency":  result.latency,
-			"status":   status,
-			"error":    result.err,
-			"current":  count,
-			"total":    total,
-			"progress": float64(count) / float64(total) * 100,
+			"type":           "progress",
+			"tag":            result.tag,
+			"name":           result.name,
+			"latency":        result.latency,
+			"status":         status,
+			"error":          result.err,
+			"trace_error":    result.traceErr,
+			"trace_attempts": result.traceAttempts,
+			"current":        count,
+			"total":          total,
+			"progress":       float64(count) / float64(total) * 100,
 		}
 		eventData, _ := json.Marshal(eventPayload)
 		fmt.Fprintf(w, "data: %s\n\n", eventData)
@@ -605,7 +650,14 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send complete event
-	completeData, _ := json.Marshal(map[string]any{"type": "complete", "total": total, "success": successCount, "failed": failedCount})
+	completeData, _ := json.Marshal(map[string]any{
+		"type":          "complete",
+		"total":         total,
+		"success":       successCount,
+		"failed":        failedCount,
+		"trace_success": traceSuccessCount,
+		"trace_failed":  traceFailedCount,
+	})
 	fmt.Fprintf(w, "data: %s\n\n", completeData)
 	flusher.Flush()
 }
@@ -711,7 +763,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 //   - scheme=socks5
 //   - scheme=all    (同时导出 HTTP 和 SOCKS5)
 //
-// 在 pool/hybrid 模式下，还会导出 Pool 代理池入口和 GeoIP 分区路由入口。
+// 在 pool/hybrid 模式下，还会导出 Pool 代理池入口。
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -748,11 +800,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.RLock()
 	mode := ""
 	var listenerCfg config.ListenerConfig
-	var geoipCfg config.GeoIPConfig
 	if s.cfgSrc != nil {
 		mode = s.cfgSrc.Mode
 		listenerCfg = s.cfgSrc.Listener
-		geoipCfg = s.cfgSrc.GeoIP
 	}
 	s.cfgMu.RUnlock()
 
@@ -783,34 +833,6 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 			seen[poolHTTP] = true
 			lines = append(lines, poolSocks)
 			seen[poolSocks] = true
-		}
-	}
-
-	// GeoIP 分区路由入口
-	if geoipCfg.Enabled && geoipCfg.Port > 0 {
-		geoAddr := geoipCfg.Listen
-		if geoAddr == "" || geoAddr == "0.0.0.0" || geoAddr == "::" {
-			if extIP, _, _, _ := s.getSettings(); extIP != "" {
-				geoAddr = extIP
-			}
-		}
-		var geoAuth string
-		if listenerCfg.Username != "" && listenerCfg.Password != "" {
-			geoAuth = fmt.Sprintf("%s:%s@", listenerCfg.Username, listenerCfg.Password)
-		}
-		regions := geoip.AllRegions()
-		var pathParts []string
-		for _, r := range regions {
-			if r != "other" {
-				pathParts = append(pathParts, fmt.Sprintf("/%s/", r))
-			}
-		}
-		lines = append(lines, fmt.Sprintf("# GeoIP 分区路由入口 (支持路径: %s)", strings.Join(pathParts, " ")))
-		// GeoIP 路由仅支持 HTTP
-		geoURI := fmt.Sprintf("http://%s%s:%d", geoAuth, geoAddr, geoipCfg.Port)
-		if !seen[geoURI] {
-			lines = append(lines, geoURI)
-			seen[geoURI] = true
 		}
 	}
 
@@ -899,14 +921,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				"max_age":     logCfg.MaxAge,
 				"compress":    logCfg.Compress,
 			},
-			"geoip": map[string]any{
-				"enabled":              false,
-				"database_path":        "",
-				"listen":               "",
-				"port":                 0,
-				"auto_update_enabled":  false,
-				"auto_update_interval": "",
-			},
 		}
 		if cfg != nil {
 			resp["mode"] = cfg.Mode
@@ -935,14 +949,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				"listen":            cfg.Management.Listen,
 				"password":          cfg.Management.Password,
 				"probe_concurrency": cfg.ProbeConcurrencyOrDefault(),
-			}
-			resp["geoip"] = map[string]any{
-				"enabled":              cfg.GeoIP.Enabled,
-				"database_path":        cfg.GeoIP.DatabasePath,
-				"listen":               cfg.GeoIP.Listen,
-				"port":                 cfg.GeoIP.Port,
-				"auto_update_enabled":  cfg.GeoIP.AutoUpdateEnabled,
-				"auto_update_interval": cfg.GeoIP.AutoUpdateInterval.String(),
+				"probe_interval":    cfg.ProbeIntervalOrDefault().String(),
+				"probe_timeout":     cfg.ProbeTimeoutOrDefault().String(),
 			}
 		}
 		writeJSON(w, resp)
@@ -977,6 +985,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				Listen           string `json:"listen"`
 				Password         string `json:"password"`
 				ProbeConcurrency int    `json:"probe_concurrency"`
+				ProbeInterval    string `json:"probe_interval"`
+				ProbeTimeout     string `json:"probe_timeout"`
 			} `json:"management,omitempty"`
 			Log *struct {
 				Output     string `json:"output"`
@@ -985,14 +995,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				MaxAge     int    `json:"max_age"`
 				Compress   bool   `json:"compress"`
 			} `json:"log"`
-			GeoIP *struct {
-				Enabled            bool   `json:"enabled"`
-				DatabasePath       string `json:"database_path"`
-				Listen             string `json:"listen"`
-				Port               uint16 `json:"port"`
-				AutoUpdateEnabled  bool   `json:"auto_update_enabled"`
-				AutoUpdateInterval string `json:"auto_update_interval"`
-			} `json:"geoip"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -1002,6 +1004,26 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 		extIP := strings.TrimSpace(req.ExternalIP)
 		probeTarget := strings.TrimSpace(req.ProbeTarget)
+		var probeInterval, probeTimeout time.Duration
+		if req.Management != nil {
+			var err error
+			if req.Management.ProbeInterval != "" {
+				probeInterval, err = time.ParseDuration(req.Management.ProbeInterval)
+				if err != nil || probeInterval <= 0 {
+					w.WriteHeader(http.StatusBadRequest)
+					writeJSON(w, map[string]any{"error": "探测间隔格式无效"})
+					return
+				}
+			}
+			if req.Management.ProbeTimeout != "" {
+				probeTimeout, err = time.ParseDuration(req.Management.ProbeTimeout)
+				if err != nil || probeTimeout <= 0 {
+					w.WriteHeader(http.StatusBadRequest)
+					writeJSON(w, map[string]any{"error": "探测超时格式无效"})
+					return
+				}
+			}
+		}
 
 		var logCfg *config.LogConfig
 		if req.Log != nil {
@@ -1014,13 +1036,16 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if err := s.updateSettings(extIP, probeTarget, req.SkipCertVerify, logCfg, req.GeoIP != nil && req.GeoIP.Enabled); err != nil {
+		if err := s.updateSettings(extIP, probeTarget, req.SkipCertVerify, logCfg); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
 		}
 
-		// Update extended settings
+		// Update extended settings, then persist the complete request once. Saving
+		// before these assignments wrote stale values; ignoring this save error also
+		// made the API report success even when config.yaml was unchanged.
+		var saveErr error
 		s.cfgMu.Lock()
 		if s.cfgSrc != nil {
 			if req.Mode != "" {
@@ -1057,21 +1082,23 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if req.Management.ProbeConcurrency > 0 {
 					s.cfgSrc.Management.ProbeConcurrency = req.Management.ProbeConcurrency
 				}
-			}
-			if req.GeoIP != nil {
-				s.cfgSrc.GeoIP.DatabasePath = req.GeoIP.DatabasePath
-				s.cfgSrc.GeoIP.Listen = req.GeoIP.Listen
-				s.cfgSrc.GeoIP.Port = req.GeoIP.Port
-				s.cfgSrc.GeoIP.AutoUpdateEnabled = req.GeoIP.AutoUpdateEnabled
-				if req.GeoIP.AutoUpdateInterval != "" {
-					if d, err := time.ParseDuration(req.GeoIP.AutoUpdateInterval); err == nil {
-						s.cfgSrc.GeoIP.AutoUpdateInterval = d
-					}
+				if probeInterval > 0 {
+					s.cfgSrc.Management.ProbeInterval = probeInterval
+				}
+				if probeTimeout > 0 {
+					s.cfgSrc.Management.ProbeTimeout = probeTimeout
 				}
 			}
-			_ = s.cfgSrc.SaveSettings()
+			saveErr = s.cfgSrc.SaveSettings()
+		} else {
+			saveErr = errors.New("配置存储未初始化")
 		}
 		s.cfgMu.Unlock()
+		if saveErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]any{"error": fmt.Sprintf("保存配置失败: %v", saveErr)})
+			return
+		}
 
 		writeJSON(w, map[string]any{
 			"message":          "设置已保存",
@@ -1101,8 +1128,9 @@ func (s *Server) handleSubscriptionStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	status := s.subRefresher.Status()
+	configured := len(s.subRefresher.Subscriptions()) > 0
 	writeJSON(w, map[string]any{
-		"enabled":        true,
+		"enabled":        configured,
 		"last_refresh":   status.LastRefresh,
 		"next_refresh":   status.NextRefresh,
 		"node_count":     status.NodeCount,
@@ -1231,6 +1259,217 @@ func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request
 	}
 }
 
+type subscriptionMutationRequest struct {
+	URL         string `json:"url"`
+	OriginalURL string `json:"original_url"`
+}
+
+func validateSubscriptionURL(rawURL string) error {
+	parsed, err := url.ParseRequestURI(rawURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return errors.New("请输入有效的 HTTP/HTTPS 订阅地址")
+	}
+	return nil
+}
+
+func (s *Server) subscriptionConfigSnapshot() (urls []string, enabled bool, interval time.Duration) {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	if s.cfgSrc == nil {
+		return nil, false, time.Hour
+	}
+	urls = append([]string(nil), s.cfgSrc.Subscriptions...)
+	enabled = s.cfgSrc.SubscriptionRefresh.Enabled
+	interval = s.cfgSrc.SubscriptionRefresh.Interval
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	return
+}
+
+func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval time.Duration) error {
+	urls = append([]string(nil), urls...)
+	s.cfgMu.Lock()
+	if s.cfgSrc == nil {
+		s.cfgMu.Unlock()
+		return errors.New("配置管理未启用")
+	}
+	s.cfgSrc.Subscriptions = urls
+	s.cfgSrc.SubscriptionRefresh.Enabled = enabled
+	s.cfgSrc.SubscriptionRefresh.Interval = interval
+	if err := s.cfgSrc.SaveSettings(); err != nil {
+		s.cfgMu.Unlock()
+		return fmt.Errorf("保存配置失败: %w", err)
+	}
+	s.cfgMu.Unlock()
+	if s.subRefresher == nil {
+		return errors.New("订阅管理器未启用")
+	}
+	return s.subRefresher.UpdateConfigAndRefresh(urls, enabled, interval)
+}
+
+func (s *Server) subscriptionManagementPayload() map[string]any {
+	urls, enabled, interval := s.subscriptionConfigSnapshot()
+	items := make([]SubscriptionInfo, 0)
+	status := SubscriptionStatus{}
+	if s.subRefresher != nil {
+		items = s.subRefresher.Subscriptions()
+		status = s.subRefresher.Status()
+	} else {
+		for _, rawURL := range urls {
+			items = append(items, SubscriptionInfo{URL: rawURL, Status: "pending"})
+		}
+	}
+	return map[string]any{
+		"items":         items,
+		"enabled":       enabled,
+		"interval":      interval.String(),
+		"last_refresh":  status.LastRefresh,
+		"next_refresh":  status.NextRefresh,
+		"node_count":    status.NodeCount,
+		"is_refreshing": status.IsRefreshing,
+		"refresh_error": status.LastError,
+		"refresh_count": status.RefreshCount,
+	}
+}
+
+// handleSubscriptions provides CRUD for individual URLs while preserving the
+// existing []string YAML representation.
+func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
+	urls, enabled, interval := s.subscriptionConfigSnapshot()
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, s.subscriptionManagementPayload())
+		return
+	case http.MethodPost, http.MethodPut, http.MethodDelete:
+		var req subscriptionMutationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "请求格式错误"})
+			return
+		}
+		req.URL = strings.TrimSpace(req.URL)
+		req.OriginalURL = strings.TrimSpace(req.OriginalURL)
+
+		switch r.Method {
+		case http.MethodPost:
+			if err := validateSubscriptionURL(req.URL); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]any{"error": err.Error()})
+				return
+			}
+			for _, existing := range urls {
+				if existing == req.URL {
+					w.WriteHeader(http.StatusConflict)
+					writeJSON(w, map[string]any{"error": "订阅已存在"})
+					return
+				}
+			}
+			urls = append(urls, req.URL)
+		case http.MethodPut:
+			if req.OriginalURL == "" {
+				req.OriginalURL = req.URL
+			}
+			if err := validateSubscriptionURL(req.URL); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]any{"error": err.Error()})
+				return
+			}
+			found := false
+			for i, existing := range urls {
+				if existing == req.OriginalURL {
+					urls[i] = req.URL
+					found = true
+				} else if existing == req.URL {
+					w.WriteHeader(http.StatusConflict)
+					writeJSON(w, map[string]any{"error": "订阅已存在"})
+					return
+				}
+			}
+			if !found {
+				w.WriteHeader(http.StatusNotFound)
+				writeJSON(w, map[string]any{"error": "订阅不存在"})
+				return
+			}
+		case http.MethodDelete:
+			target := req.URL
+			filtered := make([]string, 0, len(urls))
+			found := false
+			for _, existing := range urls {
+				if existing == target {
+					found = true
+					continue
+				}
+				filtered = append(filtered, existing)
+			}
+			if !found {
+				w.WriteHeader(http.StatusNotFound)
+				writeJSON(w, map[string]any{"error": "订阅不存在"})
+				return
+			}
+			urls = filtered
+		}
+
+		if err := s.applySubscriptionConfig(urls, enabled, interval); err != nil {
+			writeJSON(w, map[string]any{"message": "订阅配置已保存，但刷新失败", "refresh_error": err.Error()})
+			return
+		}
+		writeJSON(w, s.subscriptionManagementPayload())
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleSubscriptionSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Enabled  bool   `json:"enabled"`
+		Interval string `json:"interval"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "请求格式错误"})
+		return
+	}
+	interval, err := time.ParseDuration(strings.TrimSpace(req.Interval))
+	if err != nil || interval < 5*time.Minute {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "刷新间隔不能小于 5 分钟"})
+		return
+	}
+	urls, _, _ := s.subscriptionConfigSnapshot()
+	if err := s.applySubscriptionConfig(urls, req.Enabled, interval); err != nil {
+		writeJSON(w, map[string]any{"message": "自动刷新配置已保存，但刷新失败", "refresh_error": err.Error()})
+		return
+	}
+	writeJSON(w, s.subscriptionManagementPayload())
+}
+
+func (s *Server) handleManagedSubscriptionRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.subRefresher == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]any{"error": "订阅管理器未启用"})
+		return
+	}
+	if len(s.subRefresher.Subscriptions()) == 0 {
+		writeJSON(w, s.subscriptionManagementPayload())
+		return
+	}
+	if err := s.subRefresher.RefreshNow(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, s.subscriptionManagementPayload())
+}
+
 // nodePayload is the JSON request body for node CRUD operations.
 type nodePayload struct {
 	Name     string `json:"name"`
@@ -1276,7 +1515,9 @@ func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 			s.respondNodeError(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"node": node, "message": "节点已添加，请点击重载使配置生效"})
+		response := map[string]any{"node": node}
+		s.reloadAfterNodeChange(r.Context(), response, "节点已添加并重载生效")
+		writeJSON(w, response)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -1309,16 +1550,77 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 			s.respondNodeError(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"node": node, "message": "节点已更新，请点击重载使配置生效"})
+		response := map[string]any{"node": node}
+		s.reloadAfterNodeChange(r.Context(), response, "节点已更新并重载生效")
+		writeJSON(w, response)
 	case http.MethodDelete:
 		if err := s.nodeMgr.DeleteNode(r.Context(), nodeName); err != nil {
 			s.respondNodeError(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"message": "节点已删除，请点击重载使配置生效"})
+		response := map[string]any{}
+		s.reloadAfterNodeChange(r.Context(), response, "节点已删除并重载生效")
+		writeJSON(w, response)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+// handleNodeImport parses YAML/TXT/pasted content and atomically adds nodes.
+func (s *Server) handleNodeImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.ensureNodeManager(w) {
+		return
+	}
+
+	const (
+		maxImportContentSize = 10 * 1024 * 1024
+		maxImportBodySize    = 24 * 1024 * 1024
+	)
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportBodySize)
+	var req struct {
+		Content  string `json:"content"`
+		Filename string `json:"filename,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "导入内容格式错误或文件过大"})
+		return
+	}
+	if len(req.Content) > maxImportContentSize {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		writeJSON(w, map[string]any{"error": "导入文件不能超过 10 MB"})
+		return
+	}
+
+	nodes, err := config.ParseNodeImportContent(req.Content)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	added, skipped, err := s.nodeMgr.ImportConfigNodes(r.Context(), nodes)
+	if err != nil {
+		s.respondNodeError(w, err)
+		return
+	}
+
+	response := map[string]any{
+		"parsed":  len(nodes),
+		"added":   len(added),
+		"skipped": skipped,
+		"nodes":   added,
+		"message": fmt.Sprintf("已导入 %d 个节点", len(added)),
+	}
+	if len(added) > 0 {
+		if err := s.nodeMgr.TriggerReload(r.Context()); err != nil {
+			response["reload_error"] = err.Error()
+		}
+	}
+	writeJSON(w, response)
 }
 
 // handleReload triggers a configuration reload.
@@ -1347,6 +1649,16 @@ func (s *Server) ensureNodeManager(w http.ResponseWriter) bool {
 		return false
 	}
 	return true
+}
+
+func (s *Server) reloadAfterNodeChange(ctx context.Context, response map[string]any, successMessage string) {
+	if err := s.nodeMgr.TriggerReload(ctx); err != nil {
+		response["message"] = "节点配置已保存，但自动重载失败"
+		response["reload_error"] = err.Error()
+		return
+	}
+	response["reloaded"] = true
+	response["message"] = successMessage
 }
 
 func (s *Server) respondNodeError(w http.ResponseWriter, err error) {

@@ -8,32 +8,21 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 
-	"easy_proxies/internal/app"
-	"easy_proxies/internal/config"
-	"easy_proxies/internal/monitor"
+	"Proxy2API/internal/app"
+	"Proxy2API/internal/config"
+	"Proxy2API/internal/monitor"
 
-	"gopkg.in/natefinch/lumberjack.v2")
+	"gopkg.in/natefinch/lumberjack.v2"
+)
 
 func main() {
 	var configPath string
 	flag.StringVar(&configPath, "config", "config.yaml", "path to config file")
 	flag.Parse()
 
-	var cfg *config.Config
-	for attempt := 1; attempt <= 3; attempt++ {
-		var err error
-		cfg, err = config.Load(configPath)
-		if err == nil {
-			break
-		}
-		if attempt < 3 && strings.Contains(err.Error(), "config.nodes cannot be empty") {
-			log.Printf("⚠️  Attempt %d/3: %v (retrying in %ds...)", attempt, err, attempt*10)
-			time.Sleep(time.Duration(attempt*10) * time.Second)
-			continue
-		}
+	cfg, err := config.Load(configPath)
+	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
 
@@ -63,9 +52,9 @@ func setupLogging(cfg *config.Config) {
 		} else {
 			lj := &lumberjack.Logger{
 				Filename:   cfg.Log.File,
-				MaxSize:    cfg.Log.MaxSize,    // MB
+				MaxSize:    cfg.Log.MaxSize, // MB
 				MaxBackups: cfg.Log.MaxBackups,
-				MaxAge:     cfg.Log.MaxAge,     // days
+				MaxAge:     cfg.Log.MaxAge, // days
 				Compress:   cfg.Log.Compress,
 			}
 			writers = append(writers, lj)

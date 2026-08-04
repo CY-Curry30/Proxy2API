@@ -4,7 +4,7 @@ import "context"
 
 type contextKey string
 
-const managerKey contextKey = "easy_proxies.monitor"
+const managerKey contextKey = "Proxy2API.monitor"
 
 // ContextWith attaches the manager into context so downstream components can reuse it.
 func ContextWith(ctx context.Context, mgr *Manager) context.Context {

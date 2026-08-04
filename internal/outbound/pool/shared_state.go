@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"easy_proxies/internal/monitor"
+	"Proxy2API/internal/monitor"
 )
 
 // sharedMemberState holds failure/blacklist state shared across all pool instances.
@@ -78,7 +78,6 @@ func ResetSharedStateStore() {
 		sharedStateStore.Delete(key)
 		return true
 	})
-	ResetDialerRegistry()
 }
 
 func (s *sharedMemberState) attachEntry(entry *monitor.EntryHandle) {

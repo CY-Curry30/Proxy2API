@@ -1,8 +1,6 @@
-# Easy Proxies
+# Proxy2API
 
-[English](README.md) | 简体中文
-
-Easy Proxies 是一个基于 sing-box 的代理池管理工具。
+Proxy2API 是一个基于 sing-box 的代理池管理工具。
 
 目标是把大量上游节点统一成稳定的本地 HTTP/SOCKS5 代理入口，同时支持按节点独立端口访问。
 
@@ -21,12 +19,11 @@ Easy Proxies 是一个基于 sing-box 的代理池管理工具。
 - Web 管理面板 + API：
   - 节点状态/探测/导出
   - **手动拉黑/解封节点**
-  - 动态设置（`external_ip`、`probe_target`、`skip_cert_verify`、`geoip`）
+  - 动态设置（`external_ip`、`probe_target`、`skip_cert_verify`）
   - 节点配置增删改查 + 重载
   - 订阅状态查询 + 手动刷新 + **保存即时生效**
   - **实时日志控制台**（最近 1000 行，WebSocket 流式传输）
 - 新增可配置 DNS 解析器（对 VMess 域名节点非常关键）。
-- 可选 GeoIP 标记（支持 JP/KR/US/HK/TW/SG 地域分区，可在 WebUI 中开关，支持自动更新和热重载）。
 - **可配置日志轮转**，支持大小限制、备份数量和压缩。
 
 ## 快速开始
@@ -40,7 +37,7 @@ cp nodes.example nodes.txt
 
 编辑 `config.yaml`，并配置节点来源（`nodes.txt` / `subscriptions` / `nodes`）。
 
-> 为什么要 `touch nodes.txt`？如果你用文件级挂载（如 `-v ./data/nodes.txt:/etc/easy_proxies/nodes.txt`）而宿主机上该文件不存在，Docker 会在宿主机上创建一个名为 `nodes.txt` 的**目录**并挂载进去，容器内就出现"本应是文件却是目录"的坑。预先创建文件（或直接挂载**目录** `./data:/etc/easy_proxies`，首启动会自动生成文件）可避免。若已踩坑：`rm -rf ./data/nodes.txt && touch ./data/nodes.txt` 后重启。
+> 为什么要 `touch nodes.txt`？如果你用文件级挂载（如 `-v ./data/nodes.txt:/etc/Proxy2API/nodes.txt`）而宿主机上该文件不存在，Docker 会在宿主机上创建一个名为 `nodes.txt` 的**目录**并挂载进去，容器内就出现"本应是文件却是目录"的坑。预先创建文件（或直接挂载**目录** `./data:/etc/Proxy2API`，首启动会自动生成文件）可避免。若已踩坑：`rm -rf ./data/nodes.txt && touch ./data/nodes.txt` 后重启。
 
 ### 2）启动
 
@@ -53,7 +50,7 @@ docker compose up -d
 本地运行：
 
 ```bash
-go run ./cmd/easy_proxies -config config.yaml
+go run ./cmd/Proxy2API -config config.yaml
 ```
 
 ## 最小配置示例（Pool）
@@ -211,7 +208,7 @@ ls -la data/
    ```
 
 2. **卷映射错误**：
-   - 确保 `docker-compose.yml` 中使用 `./data:/etc/easy_proxies`
+   - 确保 `docker-compose.yml` 中使用 `./data:/etc/Proxy2API`
    - 不要使用绝对路径或错误的目录
 
 3. **启动时未传递 UID/GID**：
@@ -233,7 +230,7 @@ docker-compose logs -f | grep "Saved"
 
 ### Docker 权限问题
 
-**问题描述**：使用 `docker-compose.yml` 映射配置目录时，可能遇到 "permission denied" 或 "cannot write to /etc/easy_proxies" 等权限错误。
+**问题描述**：使用 `docker-compose.yml` 映射配置目录时，可能遇到 "permission denied" 或 "cannot write to /etc/Proxy2API" 等权限错误。
 
 **原因分析**：容器以非 root 用户运行（docker-compose.yml 中指定 `user: "${UID:-10001}:${GID:-10001}"`），但宿主机挂载目录的所有权可能不匹配。
 
@@ -261,10 +258,10 @@ docker-compose logs -f | grep "Saved"
 mkdir -p data logs
 chmod -R u+w data logs
 docker run --user $(id -u):$(id -g) \
-  -v $(pwd)/data:/etc/easy_proxies \
+  -v $(pwd)/data:/etc/Proxy2API \
   -v $(pwd)/logs:/app/logs \
   --network host \
-  ghcr.io/jasonwong1991/easy_proxies:latest
+  ghcr.io/CY-Curry30/Proxy2API:latest
 ```
 
 ### 其他常见问题
@@ -294,7 +291,7 @@ go test ./...
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=jasonwong1991/easy_proxies&type=Date)](https://star-history.com/#jasonwong1991/easy_proxies&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=CY-Curry30/Proxy2API&type=Date)](https://star-history.com/#CY-Curry30/Proxy2API&Date)
 
 ## 致谢
 

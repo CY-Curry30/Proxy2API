@@ -17,9 +17,20 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
+
+const SubscriptionUserAgent = "clash-verge/v2.2.3"
+
+// ApplySubscriptionRequestHeaders keeps every subscription fetch path on the
+// same modern Clash-compatible response format. Some providers downgrade old
+// ClashForWindows clients to a legacy subset that omits VLESS/Hysteria2.
+func ApplySubscriptionRequestHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", SubscriptionUserAgent)
+	req.Header.Set("Accept", "*/*")
+}
 
 // Config describes the high level settings for the proxy pool server.
 type Config struct {
@@ -30,7 +41,6 @@ type Config struct {
 	Sticky              StickyConfig              `yaml:"sticky"`
 	Management          ManagementConfig          `yaml:"management"`
 	SubscriptionRefresh SubscriptionRefreshConfig `yaml:"subscription_refresh"`
-	GeoIP               GeoIPConfig               `yaml:"geoip"`
 	Log                 LogConfig                 `yaml:"log"`
 	Nodes               []NodeConfig              `yaml:"nodes"`
 	NodesFile           string                    `yaml:"nodes_file"`    // 节点文件路径，每行一个 URI
@@ -45,21 +55,11 @@ type Config struct {
 // LogConfig controls log output and rotation.
 type LogConfig struct {
 	Output     string `yaml:"output"`      // 日志输出: "stdout", "file", 默认 "stdout"
-	File       string `yaml:"file"`        // 日志文件路径，默认 "logs/easy_proxies.log"
+	File       string `yaml:"file"`        // 日志文件路径，默认 "logs/Proxy2API.log"
 	MaxSize    int    `yaml:"max_size"`    // 单个日志文件最大 MB，默认 50
 	MaxBackups int    `yaml:"max_backups"` // 保留旧日志文件个数，默认 3
 	MaxAge     int    `yaml:"max_age"`     // 保留旧日志文件天数，默认 7
 	Compress   bool   `yaml:"compress"`    // 是否压缩旧日志，默认 false
-}
-
-// GeoIPConfig controls GeoIP-based region routing.
-type GeoIPConfig struct {
-	Enabled            bool          `yaml:"enabled"`              // 是否启用 GeoIP 地域分区
-	DatabasePath       string        `yaml:"database_path"`        // GeoLite2-Country.mmdb 文件路径
-	Listen             string        `yaml:"listen"`               // GeoIP 路由监听地址，默认使用 listener 配置
-	Port               uint16        `yaml:"port"`                 // GeoIP 路由监听端口，默认 1221
-	AutoUpdateEnabled  bool          `yaml:"auto_update_enabled"`  // 是否启用自动更新数据库
-	AutoUpdateInterval time.Duration `yaml:"auto_update_interval"` // 自动更新间隔，默认 24 小时
 }
 
 // ListenerConfig defines how the HTTP/SOCKS5 mixed proxy should listen for clients.
@@ -112,11 +112,13 @@ type MultiPortConfig struct {
 
 // ManagementConfig controls the monitoring HTTP endpoint.
 type ManagementConfig struct {
-	Enabled          *bool  `yaml:"enabled"`
-	Listen           string `yaml:"listen"`
-	ProbeTarget      string `yaml:"probe_target"`
-	Password         string `yaml:"password"`          // WebUI 访问密码，为空则不需要密码
-	ProbeConcurrency int    `yaml:"probe_concurrency"` // 并发探测线程数（8-1024，默认 32），大规模节点可调高以加快探测
+	Enabled          *bool         `yaml:"enabled"`
+	Listen           string        `yaml:"listen"`
+	ProbeTarget      string        `yaml:"probe_target"`
+	ProbeInterval    time.Duration `yaml:"probe_interval"`    // 全量健康探测间隔，默认 5 分钟
+	ProbeTimeout     time.Duration `yaml:"probe_timeout"`     // 单节点探测超时，默认 110 秒
+	Password         string        `yaml:"password"`          // WebUI 访问密码，为空则不需要密码
+	ProbeConcurrency int           `yaml:"probe_concurrency"` // 并发探测线程数（8-1024，默认 32），大规模节点可调高以加快探测
 }
 
 // SubscriptionRefreshConfig controls subscription auto-refresh and reload settings.
@@ -144,6 +146,21 @@ const (
 	maxSubscriptionFetchConcurrency     = 32
 	maxSubscriptionBodySize             = 10 * 1024 * 1024
 )
+
+var subscriptionInfoNameKeywords = []string{
+	"剩余流量", "流量剩余", "已用流量", "流量已用", "总流量", "流量总量",
+	"流量重置", "重置流量", "下次重置", "重置倒计时", "套餐剩余",
+	"到期", "过期", "有效期",
+	"官网", "官方网站", "官方网址", "备用网址", "订阅地址", "更新订阅",
+	"续费订阅", "购买套餐", "联系客服", "客服中心", "用户中心", "使用教程",
+	"节点公告", "建议", "官方群", "交流群", "tg频道", "telegram频道",
+	"remainingtraffic", "trafficremaining", "usedtraffic", "trafficused",
+	"totaltraffic", "traffictotal", "trafficreset", "resettraffic", "nextreset",
+	"remainingbandwidth", "bandwidthremaining", "remainingdata", "dataremaining",
+	"expire", "expiry", "expiration", "validuntil",
+	"officialwebsite", "officialsite", "subscriptionurl", "updatesubscription",
+	"renewsubscription", "customerservice", "contactsupport",
+}
 
 // SubscriptionFetchStats describes a subscription loading attempt.
 type SubscriptionFetchStats struct {
@@ -341,7 +358,13 @@ func (c *Config) normalize() error {
 		c.Management.Listen = "127.0.0.1:9091"
 	}
 	if c.Management.ProbeTarget == "" {
-		c.Management.ProbeTarget = "www.apple.com:80"
+		c.Management.ProbeTarget = "http://cp.cloudflare.com/generate_204"
+	}
+	if c.Management.ProbeInterval <= 0 {
+		c.Management.ProbeInterval = 5 * time.Minute
+	}
+	if c.Management.ProbeTimeout <= 0 {
+		c.Management.ProbeTimeout = 110 * time.Second
 	}
 	if c.Management.Enabled == nil {
 		defaultEnabled := true
@@ -356,7 +379,7 @@ func (c *Config) normalize() error {
 		c.SubscriptionRefresh.Timeout = 30 * time.Second
 	}
 	if c.SubscriptionRefresh.HealthCheckTimeout <= 0 {
-		c.SubscriptionRefresh.HealthCheckTimeout = 60 * time.Second
+		c.SubscriptionRefresh.HealthCheckTimeout = 2 * time.Minute
 	}
 	if c.SubscriptionRefresh.DrainTimeout <= 0 {
 		c.SubscriptionRefresh.DrainTimeout = 30 * time.Second
@@ -425,9 +448,6 @@ func (c *Config) normalize() error {
 		c.Nodes = append(c.Nodes, subNodes...)
 	}
 
-	if len(c.Nodes) == 0 {
-		return errors.New("config.nodes cannot be empty (configure nodes in config or use nodes_file)")
-	}
 	// portCursor is an int (not uint16) so the >65535 exhaustion guard fires
 	// instead of wrapping to 0 and assigning unbindable low ports.
 	portCursor := int(c.MultiPort.BasePort)
@@ -607,6 +627,12 @@ func (c *Config) applyPersistedPorts() error {
 	if c.Mode != "multi-port" && c.Mode != "hybrid" {
 		return nil
 	}
+	// Keep the existing sidecar while the proxy starts without nodes. A later
+	// subscription refresh may restore the same nodes, in which case their
+	// previous ports should still be available for preservation.
+	if len(c.Nodes) == 0 {
+		return nil
+	}
 	// normalize() only assigned provisional ports (no bind checks). Run the
 	// authoritative, bind-checked assignment exactly once here. A saved sidecar
 	// supplies preserved ports; an empty/missing one means "assign all fresh".
@@ -675,7 +701,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 		c.Management.Listen = "127.0.0.1:9091"
 	}
 	if c.Management.ProbeTarget == "" {
-		c.Management.ProbeTarget = "www.apple.com:80"
+		c.Management.ProbeTarget = "http://cp.cloudflare.com/generate_204"
 	}
 	if c.Management.Enabled == nil {
 		defaultEnabled := true
@@ -688,7 +714,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 		c.SubscriptionRefresh.Timeout = 30 * time.Second
 	}
 	if c.SubscriptionRefresh.HealthCheckTimeout <= 0 {
-		c.SubscriptionRefresh.HealthCheckTimeout = 60 * time.Second
+		c.SubscriptionRefresh.HealthCheckTimeout = 2 * time.Minute
 	}
 	if c.SubscriptionRefresh.DrainTimeout <= 0 {
 		c.SubscriptionRefresh.DrainTimeout = 30 * time.Second
@@ -697,10 +723,6 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 		c.SubscriptionRefresh.MinAvailableNodes = 1
 	}
 	c.SubscriptionRefresh.FetchConcurrency = normalizeSubscriptionFetchConcurrency(c.SubscriptionRefresh.FetchConcurrency)
-
-	if len(c.Nodes) == 0 {
-		return errors.New("config.nodes cannot be empty")
-	}
 
 	// Build set of ports already assigned from portMap
 	usedPorts := make(map[uint16]bool)
@@ -830,7 +852,7 @@ func (c *Config) normalizeLogConfig() {
 		c.Log.Output = "stdout"
 	}
 	if c.Log.File == "" {
-		c.Log.File = "logs/easy_proxies.log"
+		c.Log.File = "logs/Proxy2API.log"
 	}
 	// Resolve relative log file path against config dir
 	if c.filePath != "" && !filepath.IsAbs(c.Log.File) {
@@ -866,6 +888,22 @@ func (c *Config) ProbeConcurrencyOrDefault() int {
 		return 1024
 	}
 	return v
+}
+
+// ProbeIntervalOrDefault returns the interval between automatic full probes.
+func (c *Config) ProbeIntervalOrDefault() time.Duration {
+	if c.Management.ProbeInterval <= 0 {
+		return 5 * time.Minute
+	}
+	return c.Management.ProbeInterval
+}
+
+// ProbeTimeoutOrDefault returns the timeout applied to each node probe.
+func (c *Config) ProbeTimeoutOrDefault() time.Duration {
+	if c.Management.ProbeTimeout <= 0 {
+		return 110 * time.Second
+	}
+	return c.Management.ProbeTimeout
 }
 
 // loadNodesFromFile reads a nodes file where each line is a proxy URI
@@ -1134,11 +1172,7 @@ func fetchSubscriptionWithClient(ctx context.Context, client *http.Client, subUR
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	// Use clash-compatible User-Agent to get Clash YAML format from subscription servers
-	// This ensures we receive structured YAML with all proxy types (AnyTLS, TUIC, etc.)
-	// instead of base64-encoded content that may only contain basic SS nodes
-	req.Header.Set("User-Agent", "clash-verge/v2.2.3")
-	req.Header.Set("Accept", "*/*")
+	ApplySubscriptionRequestHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1180,6 +1214,10 @@ func redactSubscriptionError(op, rawURL string, err error) error {
 // parseSubscriptionContent tries to parse subscription content in various formats (optimized)
 func parseSubscriptionContent(content string) ([]NodeConfig, error) {
 	content = strings.TrimSpace(content)
+	var (
+		nodes []NodeConfig
+		err   error
+	)
 
 	// Detect Clash YAML by a line-anchored top-level "proxies:" key anywhere in
 	// the document. The whole content is scanned (not just a 16 KB prefix): full
@@ -1188,7 +1226,11 @@ func parseSubscriptionContent(content string) ([]NodeConfig, error) {
 	// and drop every node. Line-anchoring avoids matching a stray "proxies:"
 	// inside a base64 blob.
 	if strings.HasPrefix(content, "proxies:") || strings.Contains(content, "\nproxies:") {
-		return parseClashYAML(content)
+		nodes, err = parseClashYAML(content)
+		if err != nil {
+			return nil, err
+		}
+		return filterSubscriptionInfoNodes(nodes), nil
 	}
 
 	// Check if it's base64 encoded (common for v2ray subscriptions)
@@ -1199,20 +1241,171 @@ func parseSubscriptionContent(content string) ([]NodeConfig, error) {
 			decoded, err = base64.RawStdEncoding.DecodeString(content)
 			if err != nil {
 				// Not base64, try as plain text
-				return parseNodesFromContent(content)
+				nodes, err = parseNodesFromContent(content)
+				if err != nil {
+					return nil, err
+				}
+				return filterSubscriptionInfoNodes(nodes), nil
 			}
 		}
 		content = string(decoded)
 	}
 
 	// Parse as plain text (one URI per line)
-	return parseNodesFromContent(content)
+	nodes, err = parseNodesFromContent(content)
+	if err != nil {
+		return nil, err
+	}
+	return filterSubscriptionInfoNodes(nodes), nil
+}
+
+// filterSubscriptionInfoNodes removes the non-proxy entries that providers
+// commonly encode as working proxy URIs to display account status or ads.
+func filterSubscriptionInfoNodes(nodes []NodeConfig) []NodeConfig {
+	if len(nodes) == 0 {
+		return nodes
+	}
+
+	filtered := make([]NodeConfig, 0, len(nodes))
+	for _, node := range nodes {
+		name := strings.TrimSpace(node.Name)
+		if name == "" {
+			name = ExtractNodeName(node.URI)
+		}
+		if isSubscriptionInfoName(name) {
+			continue
+		}
+		filtered = append(filtered, node)
+	}
+
+	if removed := len(nodes) - len(filtered); removed > 0 {
+		log.Printf("[subscription] filtered %d traffic/account information nodes", removed)
+	}
+	return filtered
+}
+
+func isSubscriptionInfoName(name string) bool {
+	compact := compactSubscriptionNodeName(name)
+	if compact == "" {
+		return false
+	}
+
+	// These phrases describe account state or provider navigation rather than
+	// a proxy location. Separators and whitespace have already been removed.
+	for _, keyword := range subscriptionInfoNameKeywords {
+		if strings.Contains(compact, keyword) {
+			return true
+		}
+	}
+
+	// Providers also use terse labels such as "流量: 100 GB" or
+	// "Traffic 20%". Require a value/status marker so names such as
+	// "流量优化专线" remain valid proxy nodes.
+	if strings.Contains(compact, "流量") &&
+		(containsDigit(compact) || containsAny(compact, "%", "倍率", "用量", "无限", "不限")) {
+		return true
+	}
+	if containsAny(compact, "traffic", "bandwidth", "quota") &&
+		(containsDigit(compact) || containsAny(compact, "%", "left", "limit", "usage")) {
+		return true
+	}
+
+	return false
+}
+
+func compactSubscriptionNodeName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		switch r {
+		case '-', '_', '|', '–', '—', ':', '：', '[', ']', '【', '】', '(', ')', '（', '）':
+			return -1
+		default:
+			return unicode.ToLower(r)
+		}
+	}, strings.TrimSpace(name))
+}
+
+func containsDigit(value string) bool {
+	for _, r := range value {
+		if unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAny(value string, candidates ...string) bool {
+	for _, candidate := range candidates {
+		if strings.Contains(value, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseSubscriptionContent parses subscription content in various formats (base64, plain text, Clash YAML).
 // This is exported for use by the subscription manager.
 func ParseSubscriptionContent(content string) ([]NodeConfig, error) {
 	return parseSubscriptionContent(content)
+}
+
+// ParseNodeImportContent parses uploaded or pasted node configuration. It
+// accepts Clash YAML, base64/plain subscriptions, Proxy2API config YAML with a
+// top-level nodes field, YAML node arrays, and a single YAML node object.
+func ParseNodeImportContent(content string) ([]NodeConfig, error) {
+	content = strings.TrimSpace(strings.TrimPrefix(content, "\uFEFF"))
+	if content == "" {
+		return nil, errors.New("导入内容不能为空")
+	}
+
+	parsed, subscriptionErr := parseSubscriptionContent(content)
+	if subscriptionErr == nil && len(parsed) > 0 {
+		return parsed, nil
+	}
+
+	var wrapped struct {
+		Nodes []NodeConfig `yaml:"nodes"`
+	}
+	if err := yaml.Unmarshal([]byte(content), &wrapped); err == nil && len(wrapped.Nodes) > 0 {
+		return normalizeImportedNodeConfigs(wrapped.Nodes)
+	}
+
+	var list []NodeConfig
+	if err := yaml.Unmarshal([]byte(content), &list); err == nil && len(list) > 0 {
+		return normalizeImportedNodeConfigs(list)
+	}
+
+	var single NodeConfig
+	if err := yaml.Unmarshal([]byte(content), &single); err == nil && strings.TrimSpace(single.URI) != "" {
+		return normalizeImportedNodeConfigs([]NodeConfig{single})
+	}
+
+	if subscriptionErr != nil {
+		return nil, subscriptionErr
+	}
+	return nil, errors.New("未解析到支持的节点，请检查 YAML 或节点 URI 格式")
+}
+
+func normalizeImportedNodeConfigs(nodes []NodeConfig) ([]NodeConfig, error) {
+	result := make([]NodeConfig, 0, len(nodes))
+	for _, node := range nodes {
+		node.Name = strings.TrimSpace(node.Name)
+		node.URI = strings.TrimSpace(node.URI)
+		if node.URI == "" || !IsProxyURI(node.URI) {
+			continue
+		}
+		if node.Name == "" {
+			node.Name = ExtractNodeName(node.URI)
+		}
+		result = append(result, node)
+	}
+	result = filterSubscriptionInfoNodes(result)
+	if len(result) == 0 {
+		return nil, errors.New("YAML 中没有支持的节点 URI")
+	}
+	return result, nil
 }
 
 // parseNodesFromContent parses nodes from plain text content (one URI per line)
@@ -1324,6 +1517,7 @@ type clashProxy struct {
 	ServerName        string                 `yaml:"servername"`
 	SNI               string                 `yaml:"sni"`
 	Flow              string                 `yaml:"flow"`
+	PacketEncoding    string                 `yaml:"packet-encoding"`
 	UDP               bool                   `yaml:"udp"`
 	WSOpts            *clashWSOptions        `yaml:"ws-opts"`
 	GrpcOpts          *clashGrpcOptions      `yaml:"grpc-opts"`
@@ -1331,6 +1525,8 @@ type clashProxy struct {
 	ClientFingerprint string                 `yaml:"client-fingerprint"`
 	Obfs              string                 `yaml:"obfs"`
 	ObfsPassword      string                 `yaml:"obfs-password"`
+	MPort             string                 `yaml:"mport"`
+	HopInterval       string                 `yaml:"hop-interval"`
 	Plugin            string                 `yaml:"plugin"`
 	PluginOpts        map[string]interface{} `yaml:"plugin-opts"`
 	// TUIC-specific fields
@@ -1425,9 +1621,31 @@ func convertClashProxyToURI(p clashProxy) string {
 		return buildHysteriaURI(p)
 	case "http", "https":
 		return buildHTTPProxyURI(p)
+	case "socks5", "socks":
+		return buildSOCKSProxyURI(p)
 	default:
 		return ""
 	}
+}
+
+func buildSOCKSProxyURI(p clashProxy) string {
+	port := int(p.Port)
+	if port == 0 {
+		port = 1080
+	}
+	u := &url.URL{
+		Scheme: "socks5",
+		Host:   net.JoinHostPort(p.Server, strconv.Itoa(port)),
+	}
+	if p.Password != "" {
+		u.User = url.UserPassword(p.Username, p.Password)
+	} else if p.Username != "" {
+		u.User = url.User(p.Username)
+	}
+	if p.Name != "" {
+		u.Fragment = p.Name
+	}
+	return u.String()
 }
 
 func buildHTTPProxyURI(p clashProxy) string {
@@ -1501,6 +1719,9 @@ func buildVLESSURI(p clashProxy) string {
 	if p.Flow != "" {
 		params.Set("flow", p.Flow)
 	}
+	if p.PacketEncoding != "" {
+		params.Set("packetEncoding", p.PacketEncoding)
+	}
 	if p.TLS {
 		params.Set("security", "tls")
 		if p.ServerName != "" {
@@ -1563,6 +1784,9 @@ func buildTrojanURI(p clashProxy) string {
 	if p.ClientFingerprint != "" {
 		params.Set("fp", p.ClientFingerprint)
 	}
+	if len(p.ALPN) > 0 {
+		params.Set("alpn", strings.Join(p.ALPN, ","))
+	}
 
 	query := ""
 	if len(params) > 0 {
@@ -1616,8 +1840,24 @@ func buildHysteria2URI(p clashProxy) string {
 			params.Set("obfs-password", p.ObfsPassword)
 		}
 	}
-	if strings.TrimSpace(p.Ports) != "" {
-		params.Set("ports", normalizeHysteria2PortsValue(strings.TrimSpace(p.Ports)))
+	ports := strings.TrimSpace(p.Ports)
+	if ports == "" {
+		ports = strings.TrimSpace(p.MPort)
+	}
+	if ports != "" {
+		params.Set("ports", normalizeHysteria2PortsValue(ports))
+	}
+	if p.HopInterval != "" {
+		params.Set("hop_interval", p.HopInterval)
+	}
+	if p.UpMbps > 0 {
+		params.Set("upMbps", strconv.Itoa(p.UpMbps))
+	}
+	if p.DownMbps > 0 {
+		params.Set("downMbps", strconv.Itoa(p.DownMbps))
+	}
+	if len(p.ALPN) > 0 {
+		params.Set("alpn", strings.Join(p.ALPN, ","))
 	}
 
 	query := ""
@@ -1892,8 +2132,7 @@ func (c *Config) Save() error {
 	return c.SaveNodes()
 }
 
-// SaveSettings persists only config settings (external_ip, probe_target, skip_cert_verify)
-// without touching nodes.txt. Use this for settings API updates.
+// SaveSettings persists runtime settings without touching nodes.txt.
 func (c *Config) SaveSettings() error {
 	if c == nil {
 		return errors.New("config is nil")
@@ -1917,11 +2156,11 @@ func (c *Config) SaveSettings() error {
 	saveCfg.Log = c.Log
 	saveCfg.Subscriptions = c.Subscriptions
 	saveCfg.SubscriptionRefresh = c.SubscriptionRefresh
-	saveCfg.GeoIP = c.GeoIP
 	saveCfg.Mode = c.Mode
 	saveCfg.Listener = c.Listener
 	saveCfg.MultiPort = c.MultiPort
 	saveCfg.Pool = c.Pool
+	saveCfg.Sticky = c.Sticky
 	saveCfg.Management = c.Management
 
 	newData, err := yaml.Marshal(&saveCfg)

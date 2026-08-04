@@ -8,10 +8,10 @@ import (
 	"syscall"
 	"time"
 
-	"easy_proxies/internal/boxmgr"
-	"easy_proxies/internal/config"
-	"easy_proxies/internal/monitor"
-	"easy_proxies/internal/subscription"
+	"Proxy2API/internal/boxmgr"
+	"Proxy2API/internal/config"
+	"Proxy2API/internal/monitor"
+	"Proxy2API/internal/subscription"
 )
 
 // Run builds the runtime components from config and blocks until shutdown.
@@ -28,6 +28,8 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		Enabled:          cfg.ManagementEnabled(),
 		Listen:           cfg.Management.Listen,
 		ProbeTarget:      cfg.Management.ProbeTarget,
+		ProbeInterval:    cfg.ProbeIntervalOrDefault(),
+		ProbeTimeout:     cfg.ProbeTimeoutOrDefault(),
 		Password:         cfg.Management.Password,
 		ProxyUsername:    proxyUsername,
 		ProxyPassword:    proxyPassword,
@@ -51,10 +53,9 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	subMgr := subscription.New(cfg, boxMgr)
 	defer subMgr.Stop()
 
-	// Start refresh loop only if subscriptions are already configured
-	if cfg.SubscriptionRefresh.Enabled && len(cfg.Subscriptions) > 0 {
-		subMgr.Start()
-	}
+	// Start the manager whenever subscriptions exist. The loop honors the auto
+	// refresh flag while remaining available for manual updates from the WebUI.
+	subMgr.Start()
 
 	// Wire up subscription manager to monitor server for API endpoints
 	if server := boxMgr.MonitorServer(); server != nil {

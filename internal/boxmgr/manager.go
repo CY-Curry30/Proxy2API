@@ -11,11 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"easy_proxies/internal/builder"
-	"easy_proxies/internal/config"
-	"easy_proxies/internal/geoip"
-	"easy_proxies/internal/monitor"
-	"easy_proxies/internal/outbound/pool"
+	"Proxy2API/internal/builder"
+	"Proxy2API/internal/config"
+	"Proxy2API/internal/monitor"
+	"Proxy2API/internal/outbound/pool"
 
 	"github.com/sagernet/sing-box"
 	C "github.com/sagernet/sing-box/constant"
@@ -28,14 +27,8 @@ var _ monitor.NodeManager = (*Manager)(nil)
 
 const (
 	defaultDrainTimeout       = 10 * time.Second
-	defaultHealthCheckTimeout = 30 * time.Second
+	defaultHealthCheckTimeout = 2 * time.Minute
 	healthCheckPollInterval   = 500 * time.Millisecond
-	periodicHealthInterval    = 5 * time.Minute
-	// periodicHealthTimeout bounds each individual probe. Unreachable nodes wait
-	// out this full deadline, so at scale (thousands of nodes) it dominates the
-	// total sweep time; 8s comfortably covers a healthy node's dial+TLS+HTTP
-	// while letting dead nodes be abandoned sooner.
-	periodicHealthTimeout = 8 * time.Second
 )
 
 // Logger defines logging interface for the manager.
@@ -60,7 +53,6 @@ type Manager struct {
 	currentBox    *box.Box
 	monitorMgr    *monitor.Manager
 	monitorServer *monitor.Server
-	geoRouter     *geoip.Router
 	cfg           *config.Config
 	monitorCfg    monitor.Config
 
@@ -114,6 +106,24 @@ func (m *Manager) Start(ctx context.Context) error {
 	cfg := m.cfg
 	m.mu.Unlock()
 
+	if len(cfg.Nodes) == 0 {
+		m.mu.Lock()
+		monitorMgr := m.monitorMgr
+		startHealthCheck := monitorMgr != nil && !m.healthCheckStarted
+		if startHealthCheck {
+			m.healthCheckStarted = true
+		}
+		m.mu.Unlock()
+		if monitorMgr != nil {
+			monitorMgr.SetProbeSchedule(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
+			if startHealthCheck {
+				monitorMgr.StartPeriodicHealthCheck(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
+			}
+		}
+		m.logger.Warnf("started without active nodes; management and subscription services remain available")
+		return nil
+	}
+
 	// Try to start, with automatic port conflict resolution
 	var instance *box.Box
 	maxRetries := 10
@@ -144,11 +154,20 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// Start periodic health check after nodes are registered
 	m.mu.Lock()
-	if m.monitorMgr != nil && !m.healthCheckStarted {
-		m.monitorMgr.StartPeriodicHealthCheck(periodicHealthInterval, periodicHealthTimeout)
+	monitorMgr := m.monitorMgr
+	startHealthCheck := monitorMgr != nil && !m.healthCheckStarted
+	if startHealthCheck {
 		m.healthCheckStarted = true
 	}
 	m.mu.Unlock()
+	if monitorMgr != nil {
+		monitorMgr.SetProbeSchedule(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
+		if startHealthCheck {
+			monitorMgr.StartPeriodicHealthCheck(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
+		} else {
+			go monitorMgr.ProbeAllNow(cfg.ProbeTimeoutOrDefault())
+		}
+	}
 
 	// Wait for initial health check if min nodes configured
 	if cfg.SubscriptionRefresh.MinAvailableNodes > 0 {
@@ -163,11 +182,6 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	m.logger.Infof("sing-box instance started with %d nodes", len(cfg.Nodes))
-
-	// Start GeoIP router if enabled
-	if cfg.GeoIP.Enabled {
-		m.startGeoIPRouter(ctx, cfg)
-	}
 
 	return nil
 }
@@ -204,14 +218,6 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 			m.logger.Warnf("error closing old instance: %v", err)
 		}
 	}
-
-	// Stop GeoIP router before starting new box to release its port
-	m.mu.Lock()
-	if m.geoRouter != nil {
-		m.geoRouter.Stop()
-		m.geoRouter = nil
-	}
-	m.mu.Unlock()
 
 	// Give OS time to release ports
 	time.Sleep(500 * time.Millisecond)
@@ -300,22 +306,11 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 
 	// Trigger initial health check for newly registered nodes
 	if m.monitorMgr != nil {
-		go m.monitorMgr.ProbeAllNow(periodicHealthTimeout)
+		m.monitorMgr.SetProbeSchedule(newCfg.ProbeIntervalOrDefault(), newCfg.ProbeTimeoutOrDefault())
+		go m.monitorMgr.ProbeAllNow(newCfg.ProbeTimeoutOrDefault())
 	}
 
 	m.logger.Infof("reload completed successfully with %d nodes", len(newCfg.Nodes))
-
-	// Restart GeoIP router with new pools
-	if newCfg.GeoIP.Enabled {
-		m.startGeoIPRouter(ctx, newCfg)
-	} else {
-		m.mu.Lock()
-		if m.geoRouter != nil {
-			m.geoRouter.Stop()
-			m.geoRouter = nil
-		}
-		m.mu.Unlock()
-	}
 
 	return nil
 }
@@ -381,10 +376,6 @@ func (m *Manager) Close() error {
 		m.monitorMgr = nil
 		m.healthCheckStarted = false
 	}
-	if m.geoRouter != nil {
-		m.geoRouter.Stop()
-		m.geoRouter = nil
-	}
 	m.baseCtx = nil
 	return err
 }
@@ -401,66 +392,6 @@ func (m *Manager) MonitorServer() *monitor.Server {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.monitorServer
-}
-
-// startGeoIPRouter starts the GeoIP region-routing HTTP proxy server.
-func (m *Manager) startGeoIPRouter(ctx context.Context, cfg *config.Config) {
-	// Stop existing router if any
-	m.mu.Lock()
-	if m.geoRouter != nil {
-		m.geoRouter.Stop()
-		m.geoRouter = nil
-	}
-	m.mu.Unlock()
-
-	geoipPort := cfg.GeoIP.Port
-	if geoipPort == 0 {
-		geoipPort = 1221 // Default GeoIP router port
-	}
-	// Avoid conflict with the pool listener port
-	if geoipPort == cfg.Listener.Port {
-		geoipPort = 1221
-		if geoipPort == cfg.Listener.Port {
-			geoipPort = cfg.Listener.Port + 1
-		}
-		log.Printf("⚠️  GeoIP port conflicts with listener port %d, using %d instead", cfg.Listener.Port, geoipPort)
-	}
-	geoipListen := cfg.GeoIP.Listen
-	if geoipListen == "" {
-		geoipListen = cfg.Listener.Address
-	}
-
-	routerCfg := geoip.RouterConfig{
-		Listen:   geoipListen,
-		Port:     geoipPort,
-		Username: cfg.Listener.Username,
-		Password: cfg.Listener.Password,
-	}
-
-	router := geoip.NewRouter(routerCfg, nil)
-
-	// Register region pool dialers
-	for _, region := range geoip.AllRegions() {
-		poolTag := fmt.Sprintf("pool-%s", region)
-		if dialer, ok := pool.GetDialer(poolTag); ok {
-			router.SetPool(region, dialer)
-			log.Printf("   GeoIP: registered pool %s for region /%s", poolTag, region)
-		}
-	}
-
-	// Register global pool dialer (for requests without region path)
-	if dialer, ok := pool.GetDialer(pool.Tag); ok {
-		router.SetGlobalPool(dialer)
-	}
-
-	if err := router.Start(ctx); err != nil {
-		m.logger.Warnf("failed to start GeoIP router: %v", err)
-		return
-	}
-
-	m.mu.Lock()
-	m.geoRouter = router
-	m.mu.Unlock()
 }
 
 // newBoxRecover wraps box.New and converts panics into errors. Some malformed
@@ -541,7 +472,7 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 				if poolOpts, ok := ob.Options.(*pool.Options); ok {
 					poolOpts.Members = removeFromSlice(poolOpts.Members, badTag)
 					delete(poolOpts.Metadata, badTag)
-					
+
 					// If the pool is now empty, remove it to avoid another validation error
 					if len(poolOpts.Members) == 0 {
 						log.Printf("⚠️  Removing empty pool '%s'", ob.Tag)
@@ -807,6 +738,78 @@ func (m *Manager) CreateNode(ctx context.Context, node config.NodeConfig) (confi
 	return normalized, nil
 }
 
+// ImportConfigNodes atomically appends parsed nodes, skipping duplicate
+// endpoints and assigning unique display names when imported names collide.
+func (m *Manager) ImportConfigNodes(ctx context.Context, nodes []config.NodeConfig) ([]config.NodeConfig, int, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+	}
+	if len(nodes) == 0 {
+		return nil, 0, fmt.Errorf("%w: 没有可导入的节点", monitor.ErrInvalidNode)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg == nil {
+		return nil, 0, errConfigUnavailable
+	}
+
+	backup := cloneNodes(m.cfg.Nodes)
+	existingKeys := make(map[string]struct{}, len(m.cfg.Nodes)+len(nodes))
+	for idx := range m.cfg.Nodes {
+		existingKeys[m.cfg.Nodes[idx].NodeKey()] = struct{}{}
+	}
+
+	added := make([]config.NodeConfig, 0, len(nodes))
+	skipped := 0
+	for _, node := range nodes {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				m.cfg.Nodes = backup
+				return nil, skipped, err
+			}
+		}
+		node.URI = strings.TrimSpace(node.URI)
+		if !config.IsProxyURI(node.URI) {
+			skipped++
+			continue
+		}
+		key := node.NodeKey()
+		if _, exists := existingKeys[key]; exists {
+			skipped++
+			continue
+		}
+
+		if strings.TrimSpace(node.Name) == "" {
+			node.Name = config.ExtractNodeName(node.URI)
+		}
+		if strings.TrimSpace(node.Name) == "" {
+			node.Name = "node"
+		}
+		node.Name = m.uniqueNodeNameLocked(node.Name)
+		normalized, err := m.prepareNodeLocked(node, "")
+		if err != nil {
+			skipped++
+			continue
+		}
+		normalized.Source = config.NodeSourceInline
+		m.cfg.Nodes = append(m.cfg.Nodes, normalized)
+		existingKeys[key] = struct{}{}
+		added = append(added, normalized)
+	}
+
+	if len(added) == 0 {
+		return []config.NodeConfig{}, skipped, nil
+	}
+	if err := m.cfg.Save(); err != nil {
+		m.cfg.Nodes = backup
+		return nil, skipped, fmt.Errorf("save imported nodes: %w", err)
+	}
+	return added, skipped, nil
+}
+
 // UpdateNode updates an existing node by name and saves the config.
 func (m *Manager) UpdateNode(ctx context.Context, name string, node config.NodeConfig) (config.NodeConfig, error) {
 	if ctx != nil {
@@ -894,10 +897,38 @@ func (m *Manager) TriggerReload(ctx context.Context) error {
 	return m.ReloadWithPortMap(cfgCopy, portMap)
 }
 
+func (m *Manager) deactivateProxyCore(newCfg *config.Config) error {
+	m.mu.Lock()
+	oldBox := m.currentBox
+	m.currentBox = nil
+	m.cfg = newCfg
+	m.mu.Unlock()
+
+	if oldBox != nil {
+		if err := oldBox.Close(); err != nil {
+			m.logger.Warnf("error closing proxy core for empty node pool: %v", err)
+		}
+	}
+	pool.ResetSharedStateStore()
+	if m.monitorMgr != nil {
+		m.monitorMgr.ClearNodes()
+		m.monitorMgr.SetProbeSchedule(newCfg.ProbeIntervalOrDefault(), newCfg.ProbeTimeoutOrDefault())
+	}
+	if m.monitorServer != nil {
+		m.monitorServer.SetConfig(newCfg)
+	}
+	m.applyConfigSettings(newCfg)
+	m.logger.Warnf("proxy core stopped because no active nodes remain")
+	return nil
+}
+
 // ReloadWithPortMap gracefully switches to a new configuration, preserving port assignments.
 func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]uint16) error {
 	if newCfg == nil {
 		return errors.New("new config is nil")
+	}
+	if len(newCfg.Nodes) == 0 {
+		return m.deactivateProxyCore(newCfg)
 	}
 
 	// Apply port mapping and assign ports. NormalizeWithPortMap preserves the
@@ -908,7 +939,25 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 		return fmt.Errorf("normalize config with port map: %w", err)
 	}
 
-	if err := m.Reload(newCfg); err != nil {
+	m.mu.RLock()
+	inactive := m.currentBox == nil
+	ctx := m.baseCtx
+	m.mu.RUnlock()
+	if inactive {
+		m.mu.Lock()
+		m.cfg = newCfg
+		m.mu.Unlock()
+		pool.ResetSharedStateStore()
+		if m.monitorMgr != nil {
+			m.monitorMgr.ClearNodes()
+		}
+		if err := m.Start(ctx); err != nil {
+			return fmt.Errorf("restart proxy core from empty node pool: %w", err)
+		}
+		if m.monitorServer != nil {
+			m.monitorServer.SetConfig(newCfg)
+		}
+	} else if err := m.Reload(newCfg); err != nil {
 		return err
 	}
 
@@ -952,7 +1001,6 @@ func extractPortFromBindError(err error) uint16 {
 	}
 	return 0
 }
-
 
 // reassignConflictingPort finds the node using the conflicting port and assigns a new port.
 func reassignConflictingPort(cfg *config.Config, conflictPort uint16) bool {
@@ -1020,6 +1068,22 @@ func (m *Manager) nodeIndexLocked(name string) int {
 		}
 	}
 	return -1
+}
+
+func (m *Manager) uniqueNodeNameLocked(name string) string {
+	base := strings.TrimSpace(name)
+	if base == "" {
+		base = "node"
+	}
+	if m.nodeIndexLocked(base) == -1 {
+		return base
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := fmt.Sprintf("%s-%d", base, suffix)
+		if m.nodeIndexLocked(candidate) == -1 {
+			return candidate
+		}
+	}
 }
 
 func (m *Manager) portInUseLocked(port uint16, currentName string) bool {

@@ -4,16 +4,19 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"easy_proxies/internal/monitor"
+	"Proxy2API/internal/monitor"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -61,8 +64,6 @@ type MemberMeta struct {
 	Mode          string
 	ListenAddress string
 	Port          uint16
-	Region        string // GeoIP region code: "jp", "kr", "us", "hk", "tw", "other"
-	Country       string // Full country name from GeoIP
 }
 
 // Register wires the pool outbound into the registry.
@@ -145,8 +146,6 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 				Mode:          meta.Mode,
 				ListenAddress: meta.ListenAddress,
 				Port:          meta.Port,
-				Region:        meta.Region,
-				Country:       meta.Country,
 			}
 			entry := monitorMgr.Register(info)
 			if entry != nil {
@@ -169,9 +168,6 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 	} else {
 		logger.Warn("monitor manager is nil, skipping node registration")
 	}
-
-	// Register this pool outbound in the dialer registry for GeoIP router
-	registerDialer(tag, p)
 
 	return p, nil
 }
@@ -253,8 +249,6 @@ func (p *poolOutbound) initializeMembersLocked() error {
 				Mode:          meta.Mode,
 				ListenAddress: meta.ListenAddress,
 				Port:          meta.Port,
-				Region:        meta.Region,
-				Country:       meta.Country,
 			}
 			entry := p.monitor.Register(info)
 			if entry != nil {
@@ -653,19 +647,19 @@ func (p *poolOutbound) makeReleaseFunc(member *memberState) func() {
 	}
 }
 
-// upgradeProbeConn optionally upgrades a plain TCP connection to TLS with
-// strict certificate verification. When useTLS is false the connection is
-// returned unchanged. host is used as the TLS SNI. A handshake failure
+// upgradeProbeConn optionally upgrades a plain TCP connection to TLS. When
+// useTLS is false the connection is returned unchanged. host is used as the
+// TLS SNI, and tlsInsecure controls certificate verification. A handshake failure
 // (e.g. self-signed or hijacked certificate) is returned as an error so the
 // caller can record it and eventually blacklist the node.
-func upgradeProbeConn(ctx context.Context, conn net.Conn, host string, useTLS bool) (net.Conn, error) {
+func upgradeProbeConn(ctx context.Context, conn net.Conn, host string, useTLS, tlsInsecure bool) (net.Conn, error) {
 	if !useTLS {
 		return conn, nil
 	}
 	tlsConn := tls.Client(conn, &tls.Config{
 		ServerName:         host,
 		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: false,
+		InsecureSkipVerify: tlsInsecure,
 	})
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		// Return the original connection so the caller's deferred Close keeps
@@ -675,126 +669,279 @@ func upgradeProbeConn(ctx context.Context, conn net.Conn, host string, useTLS bo
 	return tlsConn, nil
 }
 
-// httpProbe performs an HTTP probe through the connection and measures TTFB.
-// It sends a minimal HTTP request and waits for the first byte of response.
-func httpProbe(conn net.Conn, host string) (time.Duration, error) {
-	// Build HTTP request
-	req := fmt.Sprintf("GET /generate_204 HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Mozilla/5.0\r\n\r\n", host)
+// httpProbe performs the configurable connectivity check and measures TTFB.
+func httpProbe(conn net.Conn, host, path string) (time.Duration, error) {
+	request := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Proxy2API-monitor\r\n\r\n", path, host)
 
 	// Try to set write deadline (ignore errors for connections that don't support it)
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetWriteDeadline(time.Now().Add(probeRequestTimeout))
 
 	// Record time just before sending request
 	start := time.Now()
 
 	// Send HTTP request
-	if _, err := conn.Write([]byte(req)); err != nil {
+	if _, err := conn.Write([]byte(request)); err != nil {
 		return 0, fmt.Errorf("write request: %w", err)
 	}
 
 	// Try to set read deadline (ignore errors for connections that don't support it)
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(probeRequestTimeout))
 
-	// Read first byte (TTFB - Time To First Byte)
-	reader := bufio.NewReader(conn)
-	_, err := reader.ReadByte()
+	req, _ := http.NewRequest(http.MethodGet, path, nil)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
 	if err != nil {
 		return 0, fmt.Errorf("read response: %w", err)
 	}
-
-	// Calculate TTFB
-	ttfb := time.Since(start)
-	return ttfb, nil
+	defer resp.Body.Close()
+	return time.Since(start), nil
 }
 
-// probeMember dials the probe destination through a member and measures latency.
-// A context watchdog force-closes the underlying connection when ctx is cancelled
-// or its deadline fires. This is essential: some sing-box outbound connection
-// types do not honor SetDeadline, so without the watchdog a probe against a node
-// that accepts TCP but never sends an HTTP response would block on Read / the TLS
-// handshake forever, leaking goroutines and hanging the whole batch probe
-// (wg.Wait would never return, freezing the WebUI at "N/M").
-func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, destination M.Socksaddr, host string, useTLS bool) (time.Duration, error) {
-	start := time.Now()
-	rawConn, err := member.outbound.DialContext(ctx, N.NetworkTCP, destination)
-	if err != nil {
-		if member.entry != nil {
-			member.entry.RecordFailure(err)
+const (
+	probeLocationHost        = "www.cloudflare.com"
+	probeLocationPath        = "/cdn-cgi/trace"
+	probeRequestTimeout      = 20 * time.Second
+	probeTraceMaxRetries     = 3
+	probeTraceMaxAttempts    = probeTraceMaxRetries + 1
+	probeTraceAttemptTimeout = 20 * time.Second
+	probeTraceTotalTimeout   = time.Duration(probeTraceMaxAttempts) * probeTraceAttemptTimeout
+)
+
+// probeLocation obtains exit metadata through the same upstream node using a
+// dedicated, fixed Cloudflare trace request. Failure is display-only and does
+// not turn a successful latency probe into a failed health check.
+func (p *poolOutbound) probeLocation(ctx context.Context, member *memberState, tlsInsecure bool) (monitor.ProbeResult, error) {
+	var lastErr error
+	attempts := 0
+	for attempts < probeTraceMaxAttempts {
+		attempts++
+		attemptCtx, cancel := context.WithTimeout(ctx, probeTraceAttemptTimeout)
+		result, err := p.probeLocationOnce(attemptCtx, member, tlsInsecure)
+		cancel()
+		result.TraceAttempts = attempts
+		if err == nil {
+			return result, nil
 		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("trace request failed")
+	}
+	traceErr := fmt.Errorf("trace request failed after %d attempts: %w", attempts, lastErr)
+	return monitor.ProbeResult{
+		TraceError:    lastErr.Error(),
+		TraceAttempts: attempts,
+	}, traceErr
+}
+
+func (p *poolOutbound) probeLocationOnce(ctx context.Context, member *memberState, tlsInsecure bool) (monitor.ProbeResult, error) {
+	destination := M.ParseSocksaddrHostPort(probeLocationHost, 443)
+	rawConn, err := dialProbeTarget(ctx, member, destination)
+	if err != nil {
+		return monitor.ProbeResult{}, err
+	}
+	stopWatchdog := watchProbeConnection(ctx, rawConn)
+	defer stopWatchdog()
+	defer rawConn.Close()
+
+	conn, err := upgradeProbeConn(ctx, rawConn, probeLocationHost, true, tlsInsecure)
+	if err != nil {
+		return monitor.ProbeResult{}, err
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(probeTraceAttemptTimeout))
+	request := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Proxy2API-monitor\r\n\r\n", probeLocationPath, probeLocationHost)
+	if _, err := conn.Write([]byte(request)); err != nil {
+		return monitor.ProbeResult{}, fmt.Errorf("write trace request: %w", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(probeTraceAttemptTimeout))
+
+	req, _ := http.NewRequest(http.MethodGet, probeLocationPath, nil)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		return monitor.ProbeResult{}, fmt.Errorf("read trace response: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return monitor.ProbeResult{}, fmt.Errorf("trace endpoint returned %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return monitor.ProbeResult{}, fmt.Errorf("read trace body: %w", err)
+	}
+	ip, country := parseCloudflareTrace(body)
+	if ip == "" || country == "" {
+		return monitor.ProbeResult{}, errors.New("trace response does not contain valid ip and loc")
+	}
+	return monitor.ProbeResult{
+		IP:      ip,
+		Region:  strings.ToLower(country),
+		Country: country,
+	}, nil
+}
+
+func parseCloudflareTrace(body []byte) (ip, country string) {
+	for _, line := range strings.Split(string(body), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "ip":
+			ip = strings.TrimSpace(value)
+		case "loc":
+			country = strings.ToUpper(strings.TrimSpace(value))
+		}
+	}
+	if net.ParseIP(ip) == nil {
+		ip = ""
+	}
+	if len(country) != 2 {
+		country = ""
+	}
+	return ip, country
+}
+
+// watchProbeConnection closes conn when ctx expires. Some sing-box outbounds
+// do not reliably unblock a pending read from context cancellation alone.
+func watchProbeConnection(ctx context.Context, conn net.Conn) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
+}
+
+// probeConnectivity performs the configurable generate_204 request. Its child
+// context caps the complete attempt, including dialing, TLS and response read.
+func (p *poolOutbound) probeConnectivity(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool) (time.Duration, error) {
+	start := time.Now()
+	rawConn, err := dialProbeTarget(ctx, member, destination)
+	if err != nil {
 		return 0, err
 	}
 	// Watchdog: close the raw connection as soon as ctx is done so any blocked
 	// Read/Write/handshake below is unblocked even when SetDeadline is a no-op.
-	probeDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = rawConn.Close()
-		case <-probeDone:
-		}
-	}()
-	defer close(probeDone)
+	stopWatchdog := watchProbeConnection(ctx, rawConn)
+	defer stopWatchdog()
 	defer rawConn.Close()
 
 	conn := rawConn
 	// Strict mode: upgrade to TLS and verify the certificate chain so that
 	// nodes whose exit hijacks TLS (self-signed certs) fail the probe.
-	if conn, err = upgradeProbeConn(ctx, conn, host, useTLS); err != nil {
-		if member.entry != nil {
-			member.entry.RecordFailure(err)
-		}
+	if conn, err = upgradeProbeConn(ctx, conn, host, useTLS, tlsInsecure); err != nil {
 		return 0, err
 	}
 
 	// Perform HTTP probe to measure actual latency (TTFB).
-	if _, err = httpProbe(conn, destination.AddrString()); err != nil {
-		if member.entry != nil {
-			member.entry.RecordFailure(err)
-		}
+	if _, err = httpProbe(conn, destination.AddrString(), path); err != nil {
 		return 0, err
 	}
+	return time.Since(start), nil
+}
 
-	duration := time.Since(start)
-	if member.entry != nil {
-		member.entry.RecordSuccessWithLatency(duration)
+// probeMember runs the primary connectivity check followed by the display-only
+// Cloudflare Trace lookup. Neither path changes client request counters.
+func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool) (monitor.ProbeResult, error) {
+	requestCtx, requestCancel := context.WithTimeout(ctx, probeRequestTimeout)
+	duration, err := p.probeConnectivity(requestCtx, member, destination, host, path, useTLS, tlsInsecure)
+	requestCancel()
+	if err != nil {
+		return monitor.ProbeResult{}, err
 	}
+
 	// Clear pool blacklist on successful probe — a node that passes health check
 	// should be available for selection immediately (fixes #8, #9).
 	if member.shared != nil {
 		member.shared.forceRelease()
 	}
-	return duration, nil
+
+	result := monitor.ProbeResult{Latency: duration}
+	locationCtx, cancel := context.WithTimeout(ctx, probeTraceTotalTimeout)
+	location, locationErr := p.probeLocation(locationCtx, member, tlsInsecure)
+	cancel()
+	result.TraceError = location.TraceError
+	result.TraceAttempts = location.TraceAttempts
+	if locationErr == nil {
+		result.IP = location.IP
+		result.Region = location.Region
+		result.Country = location.Country
+	}
+	return result, nil
 }
 
-func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Context) (time.Duration, error) {
+// dialProbeTarget retries a transport handshake once when the remote closes it
+// without a protocol response. This is common during transient Trojan TLS
+// negotiation and should not immediately blacklist an otherwise healthy node.
+func dialProbeTarget(ctx context.Context, member *memberState, destination M.Socksaddr) (net.Conn, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, destination)
+		if err == nil {
+			return conn, nil
+		}
+		if conn != nil {
+			_ = conn.Close()
+		}
+		lastErr = err
+		if !isRetryableProbeHandshakeError(err) {
+			return nil, err
+		}
+		if attempt == 1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return nil, fmt.Errorf("proxy handshake failed after retry: %w", lastErr)
+}
+
+func isRetryableProbeHandshakeError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "connection reset") || strings.Contains(s, "reset by peer")
+}
+
+func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Context) (monitor.ProbeResult, error) {
 	if p.monitor == nil {
 		return nil
 	}
-	destination, host, useTLS, ok := p.monitor.DestinationForProbe()
-	if !ok {
-		return nil
-	}
-	return func(ctx context.Context) (time.Duration, error) {
-		return p.probeMember(ctx, member, destination, host, useTLS)
+	return func(ctx context.Context) (monitor.ProbeResult, error) {
+		destination, host, path, useTLS, tlsInsecure, ok := p.monitor.DestinationForProbe()
+		if !ok {
+			return monitor.ProbeResult{}, E.New("probe target is not configured")
+		}
+		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure)
 	}
 }
 
 // makeProbeByTagFunc creates a probe function that works before member initialization
-func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) (time.Duration, error) {
+func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) (monitor.ProbeResult, error) {
 	if p.monitor == nil {
 		return nil
 	}
-	destination, host, useTLS, ok := p.monitor.DestinationForProbe()
-	if !ok {
-		return nil
-	}
-	return func(ctx context.Context) (time.Duration, error) {
+	return func(ctx context.Context) (monitor.ProbeResult, error) {
+		destination, host, path, useTLS, tlsInsecure, ok := p.monitor.DestinationForProbe()
+		if !ok {
+			return monitor.ProbeResult{}, E.New("probe target is not configured")
+		}
 		// Ensure members are initialized
 		p.mu.Lock()
 		if len(p.members) == 0 {
 			if err := p.initializeMembersLocked(); err != nil {
 				p.mu.Unlock()
-				return 0, err
+				return monitor.ProbeResult{}, err
 			}
 		}
 
@@ -809,9 +956,9 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 		p.mu.Unlock()
 
 		if member == nil {
-			return 0, E.New("member not found: ", tag)
+			return monitor.ProbeResult{}, E.New("member not found: ", tag)
 		}
-		return p.probeMember(ctx, member, destination, host, useTLS)
+		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure)
 	}
 }
 

@@ -10,13 +10,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"easy_proxies/internal/config"
-	"easy_proxies/internal/geoip"
-	poolout "easy_proxies/internal/outbound/pool"
-	"easy_proxies/internal/ssuri"
+	"Proxy2API/internal/config"
+	poolout "Proxy2API/internal/outbound/pool"
+	"Proxy2API/internal/ssuri"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -31,33 +29,6 @@ func Build(cfg *config.Config) (option.Options, error) {
 	metadata := make(map[string]poolout.MemberMeta)
 	var failedNodes []string
 	usedTags := make(map[string]int) // Track tag usage for uniqueness
-
-	// Initialize GeoIP lookup if enabled
-	var geoLookup *geoip.Lookup
-	if cfg.GeoIP.Enabled && cfg.GeoIP.DatabasePath != "" {
-		var err error
-		// Use auto-update if enabled
-		if cfg.GeoIP.AutoUpdateEnabled {
-			interval := cfg.GeoIP.AutoUpdateInterval
-			if interval == 0 {
-				interval = 24 * time.Hour // Default to 24 hours
-			}
-			geoLookup, err = geoip.NewWithAutoUpdate(cfg.GeoIP.DatabasePath, interval)
-		} else {
-			geoLookup, err = geoip.New(cfg.GeoIP.DatabasePath)
-		}
-		if err != nil {
-			log.Printf("⚠️  GeoIP database load failed: %v (region routing disabled)", err)
-		} else {
-			log.Printf("✅ GeoIP database loaded: %s", cfg.GeoIP.DatabasePath)
-		}
-	}
-
-	// Track nodes by region for GeoIP routing
-	regionMembers := make(map[string][]string)
-	for _, region := range geoip.AllRegions() {
-		regionMembers[region] = []string{}
-	}
 
 	totalNodes := len(cfg.Nodes)
 	for i, node := range cfg.Nodes {
@@ -100,86 +71,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 			meta.Port = cfg.Listener.Port
 		}
 
-		// Default region (will be updated by concurrent GeoIP resolution)
-		meta.Region = geoip.RegionOther
-		meta.Country = "Unknown"
-
 		metadata[tag] = meta
-	}
-
-	// Concurrent GeoIP resolution
-	if geoLookup != nil && geoLookup.IsEnabled() {
-		geoStart := time.Now()
-		log.Printf("🌍 Resolving GeoIP for %d nodes (concurrent)...", len(memberTags))
-
-		type geoResult struct {
-			index  int
-			tag    string
-			region geoip.RegionInfo
-		}
-
-		results := make(chan geoResult, len(memberTags))
-		var wg sync.WaitGroup
-
-		// Worker pool: min(32, len(memberTags))
-		workerCount := 32
-		if len(memberTags) < workerCount {
-			workerCount = len(memberTags)
-		}
-
-		// Job channel
-		type geoJob struct {
-			index int
-			tag   string
-			uri   string
-		}
-		jobs := make(chan geoJob, len(memberTags))
-
-		// Start workers
-		for w := 0; w < workerCount; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for job := range jobs {
-					region := geoLookup.LookupURI(job.uri)
-					results <- geoResult{index: job.index, tag: job.tag, region: region}
-				}
-			}()
-		}
-
-		// Send jobs
-		for i, tag := range memberTags {
-			meta := metadata[tag]
-			jobs <- geoJob{index: i, tag: tag, uri: meta.URI}
-		}
-		close(jobs)
-
-		// Wait for completion and close results
-		go func() {
-			wg.Wait()
-			close(results)
-		}()
-
-		// Collect results
-		for res := range results {
-			meta := metadata[res.tag]
-			meta.Region = res.region.Code
-			meta.Country = res.region.Country
-			metadata[res.tag] = meta
-			regionMembers[res.region.Code] = append(regionMembers[res.region.Code], res.tag)
-		}
-
-		log.Printf("🌍 GeoIP resolution completed in %.1fs", time.Since(geoStart).Seconds())
-	} else {
-		// No GeoIP - assign all to "other" region
-		for _, tag := range memberTags {
-			regionMembers[geoip.RegionOther] = append(regionMembers[geoip.RegionOther], tag)
-		}
-	}
-
-	// Close GeoIP database after lookup
-	if geoLookup != nil {
-		geoLookup.Close()
 	}
 
 	// Check if we have at least one valid node
@@ -192,17 +84,6 @@ func Build(cfg *config.Config) (option.Options, error) {
 		log.Printf("⚠️  %d/%d nodes failed and were skipped: %v", len(failedNodes), len(cfg.Nodes), failedNodes)
 	}
 	log.Printf("✅ Successfully built %d/%d nodes", len(baseOutbounds), len(cfg.Nodes))
-
-	// Log GeoIP region distribution
-	if cfg.GeoIP.Enabled {
-		log.Println("🌍 GeoIP Region Distribution:")
-		for _, region := range geoip.AllRegions() {
-			count := len(regionMembers[region])
-			if count > 0 {
-				log.Printf("   %s %s: %d nodes", geoip.RegionEmoji(region), geoip.RegionName(region), count)
-			}
-		}
-	}
 
 	// Print proxy links for each node
 	printProxyLinks(cfg, metadata)
@@ -344,53 +225,6 @@ func Build(cfg *config.Config) (option.Options, error) {
 				},
 			})
 		}
-	}
-
-	// Build GeoIP region-based pool outbounds and routing
-	if cfg.GeoIP.Enabled && enablePoolInbound {
-		// Create pool outbound for each region that has nodes
-		for _, region := range geoip.AllRegions() {
-			members := regionMembers[region]
-			if len(members) == 0 {
-				continue
-			}
-
-			// Build metadata for this region's members
-			regionMeta := make(map[string]poolout.MemberMeta)
-			for _, tag := range members {
-				regionMeta[tag] = metadata[tag]
-			}
-
-			regionPoolTag := fmt.Sprintf("pool-%s", region)
-			regionPoolOptions := poolout.Options{
-				Mode:              cfg.Pool.Mode,
-				Members:           members,
-				FailureThreshold:  cfg.Pool.FailureThreshold,
-				BlacklistDuration: cfg.Pool.BlacklistDuration,
-				RetryEnabled:      cfg.Pool.RetryEnabledOrDefault(),
-				RetryAttempts:     cfg.Pool.RetryAttempts,
-				Metadata:          regionMeta,
-			}
-			outbounds = append(outbounds, option.Outbound{
-				Type:    poolout.Type,
-				Tag:     regionPoolTag,
-				Options: &regionPoolOptions,
-			})
-		}
-
-		// Log GeoIP routing info
-		geoipPort := cfg.GeoIP.Port
-		if geoipPort == 0 {
-			geoipPort = 1221 // Default GeoIP router port
-		}
-		geoipListen := cfg.GeoIP.Listen
-		if geoipListen == "" {
-			geoipListen = cfg.Listener.Address
-		}
-		log.Println("🌐 GeoIP Region Routing Enabled:")
-		log.Printf("   Access via: http://%s:%d/{region}", geoipListen, geoipPort)
-		log.Println("   Available regions: /jp, /kr, /us, /hk, /tw, /sg, /other")
-		log.Println("   Default (no path): all nodes pool")
 	}
 
 	opts := option.Options{
@@ -1153,7 +987,14 @@ func buildTrojanTLSOptions(query url.Values, skipCertVerify bool) (*option.Outbo
 		tlsOptions.ALPN = badoption.Listable[string](strings.Split(alpn, ","))
 	}
 
-	if fp := query.Get("fp"); fp != "" {
+	// A large number of modern Trojan providers reject the Go TLS fingerprint
+	// with a bare EOF while accepting Clash/Mihomo clients. Match their common
+	// Chrome ClientHello unless the URI explicitly selects another fingerprint.
+	fp := strings.TrimSpace(query.Get("fp"))
+	if fp == "" {
+		fp = "chrome"
+	}
+	if !strings.EqualFold(fp, "none") {
 		tlsOptions.UTLS = &option.OutboundUTLSOptions{Enabled: true, Fingerprint: fp}
 	}
 
