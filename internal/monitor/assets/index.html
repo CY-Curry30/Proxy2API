@@ -831,7 +831,7 @@
                 <div class="form-group"><label>探测目标</label><input type="text" id="settingProbeTarget" class="setting-input" placeholder="http://cp.cloudflare.com/generate_204" /></div>
                 <div class="form-group"><label>探测并发数</label><input type="number" id="settingProbeConcurrency" class="setting-input" min="1" max="1024" placeholder="32" /></div>
                 <div class="form-group"><label>自动探测间隔</label><input type="text" id="settingProbeInterval" class="setting-input" placeholder="5m" /></div>
-                <div class="form-group"><label>单节点探测超时</label><input type="text" id="settingProbeTimeout" class="setting-input" placeholder="8s" /></div>
+                <div class="form-group"><label>单节点探测总超时（秒）</label><input type="number" id="settingProbeTimeout" class="setting-input" min="25" step="5" required placeholder="110" /></div>
               </div>
             </div>
 
@@ -2087,6 +2087,41 @@
     }
 
     // Settings
+    function parseDurationSeconds(value, fallback = 110) {
+      if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value);
+      const text = String(value || '').trim();
+      if (!text) return fallback;
+      if (/^\d+(?:\.\d+)?$/.test(text)) return Math.round(Number(text));
+
+      const pattern = /(\d+(?:\.\d+)?)(ms|us|µs|ns|h|m|s)/g;
+      let total = 0;
+      let consumed = '';
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        consumed += match[0];
+        const amount = Number(match[1]);
+        const unit = match[2];
+        if (unit === 'h') total += amount * 3600;
+        else if (unit === 'm') total += amount * 60;
+        else if (unit === 's') total += amount;
+        else if (unit === 'ms') total += amount / 1000;
+        else if (unit === 'us' || unit === 'µs') total += amount / 1000000;
+        else if (unit === 'ns') total += amount / 1000000000;
+      }
+      return consumed === text && Number.isFinite(total) ? Math.round(total) : fallback;
+    }
+
+    function readProbeTimeoutSeconds() {
+      const input = document.getElementById('settingProbeTimeout');
+      const seconds = Number(input.value);
+      if (!Number.isInteger(seconds) || seconds < 25 || seconds % 5 !== 0) {
+        showToast('单节点探测总超时必须是至少 25 秒且为 5 的倍数', 'error');
+        input.focus();
+        return null;
+      }
+      return seconds;
+    }
+
     async function loadSettingsPage() {
       try {
         const r = await fetch('/api/settings'); const d = await r.json();
@@ -2123,7 +2158,7 @@
         document.getElementById('settingMgmtPassword').value = mgmt.password || '';
         document.getElementById('settingProbeConcurrency').value = mgmt.probe_concurrency || 32;
         document.getElementById('settingProbeInterval').value = mgmt.probe_interval || '5m0s';
-        document.getElementById('settingProbeTimeout').value = mgmt.probe_timeout || '1m50s';
+        document.getElementById('settingProbeTimeout').value = parseDurationSeconds(mgmt.probe_timeout);
         // Log
         const logCfg = d.log || {};
         document.getElementById('settingLogOutput').value = logCfg.output || 'stdout';
@@ -2176,6 +2211,8 @@
       e.preventDefault();
       const saveBtn = e.target.querySelector('button[type="submit"]');
       const originalText = saveBtn.textContent;
+      const probeTimeoutSeconds = readProbeTimeoutSeconds();
+      if (probeTimeoutSeconds === null) return;
 
       // Build current snapshots for change detection
       const currentCoreSnapshot = _buildCoreSnapshot();
@@ -2219,7 +2256,7 @@
             password: document.getElementById('settingMgmtPassword').value,
             probe_concurrency: parseInt(document.getElementById('settingProbeConcurrency').value) || 32,
             probe_interval: document.getElementById('settingProbeInterval').value || '5m',
-            probe_timeout: document.getElementById('settingProbeTimeout').value || '1m50s',
+            probe_timeout: `${probeTimeoutSeconds}s`,
           },
           log: {
             output: document.getElementById('settingLogOutput').value,

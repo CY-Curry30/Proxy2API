@@ -50,6 +50,8 @@ type TimelineEvent struct {
 
 const maxTimelineSize = 20
 
+const probeTimeoutParts = 5
+
 // Snapshot is a runtime view of a proxy node.
 type Snapshot struct {
 	NodeInfo
@@ -297,6 +299,17 @@ func (m *Manager) probeSchedule() (time.Duration, time.Duration) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.probeInterval, m.probeTimeout
+}
+
+// ProbeAttemptTimeout returns the timeout for one primary request or one
+// Trace attempt. The configured per-node budget is split into five equal
+// parts: one primary request plus four Trace attempts.
+func (m *Manager) ProbeAttemptTimeout() time.Duration {
+	_, total := m.probeSchedule()
+	if total <= 0 {
+		total = 110 * time.Second
+	}
+	return total / probeTimeoutParts
 }
 
 // SetProbeTarget re-derives the probe destination and strict-TLS decision from

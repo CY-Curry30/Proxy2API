@@ -116,7 +116,7 @@ type ManagementConfig struct {
 	Listen           string        `yaml:"listen"`
 	ProbeTarget      string        `yaml:"probe_target"`
 	ProbeInterval    time.Duration `yaml:"probe_interval"`    // 全量健康探测间隔，默认 5 分钟
-	ProbeTimeout     time.Duration `yaml:"probe_timeout"`     // 单节点探测超时，默认 110 秒
+	ProbeTimeout     time.Duration `yaml:"probe_timeout"`     // 单节点探测总超时，默认 110 秒，必须为 5 秒的倍数且不低于 25 秒
 	Password         string        `yaml:"password"`          // WebUI 访问密码，为空则不需要密码
 	ProbeConcurrency int           `yaml:"probe_concurrency"` // 并发探测线程数（8-1024，默认 32），大规模节点可调高以加快探测
 }
@@ -364,7 +364,9 @@ func (c *Config) normalize() error {
 		c.Management.ProbeInterval = 5 * time.Minute
 	}
 	if c.Management.ProbeTimeout <= 0 {
-		c.Management.ProbeTimeout = 110 * time.Second
+		c.Management.ProbeTimeout = DefaultProbeTimeout
+	} else if err := ValidateProbeTimeout(c.Management.ProbeTimeout); err != nil {
+		return err
 	}
 	if c.Management.Enabled == nil {
 		defaultEnabled := true
@@ -703,6 +705,14 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 	if c.Management.ProbeTarget == "" {
 		c.Management.ProbeTarget = "http://cp.cloudflare.com/generate_204"
 	}
+	if c.Management.ProbeInterval <= 0 {
+		c.Management.ProbeInterval = 5 * time.Minute
+	}
+	if c.Management.ProbeTimeout <= 0 {
+		c.Management.ProbeTimeout = DefaultProbeTimeout
+	} else if err := ValidateProbeTimeout(c.Management.ProbeTimeout); err != nil {
+		return err
+	}
 	if c.Management.Enabled == nil {
 		defaultEnabled := true
 		c.Management.Enabled = &defaultEnabled
@@ -901,9 +911,28 @@ func (c *Config) ProbeIntervalOrDefault() time.Duration {
 // ProbeTimeoutOrDefault returns the timeout applied to each node probe.
 func (c *Config) ProbeTimeoutOrDefault() time.Duration {
 	if c.Management.ProbeTimeout <= 0 {
-		return 110 * time.Second
+		return DefaultProbeTimeout
 	}
 	return c.Management.ProbeTimeout
+}
+
+const (
+	DefaultProbeTimeout = 110 * time.Second
+	MinimumProbeTimeout = 25 * time.Second
+	probeTimeoutStep    = 5 * time.Second
+)
+
+// ValidateProbeTimeout verifies the total per-node probe budget. The probe
+// implementation divides this budget into five equal attempts: one primary
+// request and four Trace attempts.
+func ValidateProbeTimeout(timeout time.Duration) error {
+	if timeout < MinimumProbeTimeout {
+		return fmt.Errorf("探测超时必须至少为 %s", MinimumProbeTimeout)
+	}
+	if timeout%probeTimeoutStep != 0 {
+		return fmt.Errorf("探测超时必须是 %s 的倍数", probeTimeoutStep)
+	}
+	return nil
 }
 
 // loadNodesFromFile reads a nodes file where each line is a proxy URI

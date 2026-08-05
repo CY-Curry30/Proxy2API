@@ -1017,9 +1017,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if req.Management.ProbeTimeout != "" {
 				probeTimeout, err = time.ParseDuration(req.Management.ProbeTimeout)
-				if err != nil || probeTimeout <= 0 {
+				if err != nil {
 					w.WriteHeader(http.StatusBadRequest)
 					writeJSON(w, map[string]any{"error": "探测超时格式无效"})
+					return
+				}
+				if err := config.ValidateProbeTimeout(probeTimeout); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					writeJSON(w, map[string]any{"error": err.Error()})
 					return
 				}
 			}

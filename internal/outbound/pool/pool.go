@@ -670,11 +670,11 @@ func upgradeProbeConn(ctx context.Context, conn net.Conn, host string, useTLS, t
 }
 
 // httpProbe performs the configurable connectivity check and measures TTFB.
-func httpProbe(conn net.Conn, host, path string) (time.Duration, error) {
+func httpProbe(conn net.Conn, host, path string, timeout time.Duration) (time.Duration, error) {
 	request := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Proxy2API-monitor\r\n\r\n", path, host)
 
 	// Try to set write deadline (ignore errors for connections that don't support it)
-	_ = conn.SetWriteDeadline(time.Now().Add(probeRequestTimeout))
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
 
 	// Record time just before sending request
 	start := time.Now()
@@ -685,7 +685,7 @@ func httpProbe(conn net.Conn, host, path string) (time.Duration, error) {
 	}
 
 	// Try to set read deadline (ignore errors for connections that don't support it)
-	_ = conn.SetReadDeadline(time.Now().Add(probeRequestTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 
 	req, _ := http.NewRequest(http.MethodGet, path, nil)
 	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
@@ -697,25 +697,22 @@ func httpProbe(conn net.Conn, host, path string) (time.Duration, error) {
 }
 
 const (
-	probeLocationHost        = "www.cloudflare.com"
-	probeLocationPath        = "/cdn-cgi/trace"
-	probeRequestTimeout      = 20 * time.Second
-	probeTraceMaxRetries     = 3
-	probeTraceMaxAttempts    = probeTraceMaxRetries + 1
-	probeTraceAttemptTimeout = 20 * time.Second
-	probeTraceTotalTimeout   = time.Duration(probeTraceMaxAttempts) * probeTraceAttemptTimeout
+	probeLocationHost     = "www.cloudflare.com"
+	probeLocationPath     = "/cdn-cgi/trace"
+	probeTraceMaxRetries  = 3
+	probeTraceMaxAttempts = probeTraceMaxRetries + 1
 )
 
 // probeLocation obtains exit metadata through the same upstream node using a
 // dedicated, fixed Cloudflare trace request. Failure is display-only and does
 // not turn a successful latency probe into a failed health check.
-func (p *poolOutbound) probeLocation(ctx context.Context, member *memberState, tlsInsecure bool) (monitor.ProbeResult, error) {
+func (p *poolOutbound) probeLocation(ctx context.Context, member *memberState, tlsInsecure bool, attemptTimeout time.Duration) (monitor.ProbeResult, error) {
 	var lastErr error
 	attempts := 0
 	for attempts < probeTraceMaxAttempts {
 		attempts++
-		attemptCtx, cancel := context.WithTimeout(ctx, probeTraceAttemptTimeout)
-		result, err := p.probeLocationOnce(attemptCtx, member, tlsInsecure)
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		result, err := p.probeLocationOnce(attemptCtx, member, tlsInsecure, attemptTimeout)
 		cancel()
 		result.TraceAttempts = attempts
 		if err == nil {
@@ -736,7 +733,7 @@ func (p *poolOutbound) probeLocation(ctx context.Context, member *memberState, t
 	}, traceErr
 }
 
-func (p *poolOutbound) probeLocationOnce(ctx context.Context, member *memberState, tlsInsecure bool) (monitor.ProbeResult, error) {
+func (p *poolOutbound) probeLocationOnce(ctx context.Context, member *memberState, tlsInsecure bool, attemptTimeout time.Duration) (monitor.ProbeResult, error) {
 	destination := M.ParseSocksaddrHostPort(probeLocationHost, 443)
 	rawConn, err := dialProbeTarget(ctx, member, destination)
 	if err != nil {
@@ -750,12 +747,12 @@ func (p *poolOutbound) probeLocationOnce(ctx context.Context, member *memberStat
 	if err != nil {
 		return monitor.ProbeResult{}, err
 	}
-	_ = conn.SetWriteDeadline(time.Now().Add(probeTraceAttemptTimeout))
+	_ = conn.SetWriteDeadline(time.Now().Add(attemptTimeout))
 	request := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Proxy2API-monitor\r\n\r\n", probeLocationPath, probeLocationHost)
 	if _, err := conn.Write([]byte(request)); err != nil {
 		return monitor.ProbeResult{}, fmt.Errorf("write trace request: %w", err)
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(probeTraceAttemptTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(attemptTimeout))
 
 	req, _ := http.NewRequest(http.MethodGet, probeLocationPath, nil)
 	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
@@ -820,7 +817,7 @@ func watchProbeConnection(ctx context.Context, conn net.Conn) func() {
 
 // probeConnectivity performs the configurable generate_204 request. Its child
 // context caps the complete attempt, including dialing, TLS and response read.
-func (p *poolOutbound) probeConnectivity(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool) (time.Duration, error) {
+func (p *poolOutbound) probeConnectivity(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool, requestTimeout time.Duration) (time.Duration, error) {
 	start := time.Now()
 	rawConn, err := dialProbeTarget(ctx, member, destination)
 	if err != nil {
@@ -840,7 +837,7 @@ func (p *poolOutbound) probeConnectivity(ctx context.Context, member *memberStat
 	}
 
 	// Perform HTTP probe to measure actual latency (TTFB).
-	if _, err = httpProbe(conn, destination.AddrString(), path); err != nil {
+	if _, err = httpProbe(conn, destination.AddrString(), path, requestTimeout); err != nil {
 		return 0, err
 	}
 	return time.Since(start), nil
@@ -849,8 +846,9 @@ func (p *poolOutbound) probeConnectivity(ctx context.Context, member *memberStat
 // probeMember runs the primary connectivity check followed by the display-only
 // Cloudflare Trace lookup. Neither path changes client request counters.
 func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool) (monitor.ProbeResult, error) {
-	requestCtx, requestCancel := context.WithTimeout(ctx, probeRequestTimeout)
-	duration, err := p.probeConnectivity(requestCtx, member, destination, host, path, useTLS, tlsInsecure)
+	attemptTimeout := p.monitor.ProbeAttemptTimeout()
+	requestCtx, requestCancel := context.WithTimeout(ctx, attemptTimeout)
+	duration, err := p.probeConnectivity(requestCtx, member, destination, host, path, useTLS, tlsInsecure, attemptTimeout)
 	requestCancel()
 	if err != nil {
 		return monitor.ProbeResult{}, err
@@ -863,8 +861,8 @@ func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, des
 	}
 
 	result := monitor.ProbeResult{Latency: duration}
-	locationCtx, cancel := context.WithTimeout(ctx, probeTraceTotalTimeout)
-	location, locationErr := p.probeLocation(locationCtx, member, tlsInsecure)
+	locationCtx, cancel := context.WithTimeout(ctx, time.Duration(probeTraceMaxAttempts-1)*attemptTimeout)
+	location, locationErr := p.probeLocation(locationCtx, member, tlsInsecure, attemptTimeout)
 	cancel()
 	result.TraceError = location.TraceError
 	result.TraceAttempts = location.TraceAttempts
