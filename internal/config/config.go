@@ -22,7 +22,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const SubscriptionUserAgent = "clash-verge/v2.2.3"
+const (
+	SubscriptionUserAgent     = "clash-verge/v2.2.3"
+	SubscriptionCacheFileName = ".subscription-cache.json"
+)
 
 // ApplySubscriptionRequestHeaders keeps every subscription fetch path on the
 // same modern Clash-compatible response format. Some providers downgrade old
@@ -34,20 +37,21 @@ func ApplySubscriptionRequestHeaders(req *http.Request) {
 
 // Config describes the high level settings for the proxy pool server.
 type Config struct {
-	Mode                string                    `yaml:"mode"`
-	Listener            ListenerConfig            `yaml:"listener"`
-	MultiPort           MultiPortConfig           `yaml:"multi_port"`
-	Pool                PoolConfig                `yaml:"pool"`
-	Sticky              StickyConfig              `yaml:"sticky"`
-	Management          ManagementConfig          `yaml:"management"`
-	SubscriptionRefresh SubscriptionRefreshConfig `yaml:"subscription_refresh"`
-	Log                 LogConfig                 `yaml:"log"`
-	Nodes               []NodeConfig              `yaml:"nodes"`
-	NodesFile           string                    `yaml:"nodes_file"`    // 节点文件路径，每行一个 URI
-	Subscriptions       []string                  `yaml:"subscriptions"` // 订阅链接列表
-	ExternalIP          string                    `yaml:"external_ip"`   // 外部 IP 地址，用于导出时替换 0.0.0.0
-	LogLevel            string                    `yaml:"log_level"`
-	SkipCertVerify      bool                      `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
+	Mode                  string                    `yaml:"mode"`
+	Listener              ListenerConfig            `yaml:"listener"`
+	MultiPort             MultiPortConfig           `yaml:"multi_port"`
+	Pool                  PoolConfig                `yaml:"pool"`
+	Sticky                StickyConfig              `yaml:"sticky"`
+	Management            ManagementConfig          `yaml:"management"`
+	SubscriptionRefresh   SubscriptionRefreshConfig `yaml:"subscription_refresh"`
+	Log                   LogConfig                 `yaml:"log"`
+	Nodes                 []NodeConfig              `yaml:"nodes"`
+	NodesFile             string                    `yaml:"nodes_file"`                       // 节点文件路径，每行一个 URI
+	Subscriptions         []string                  `yaml:"subscriptions"`                    // 订阅链接列表
+	DisabledSubscriptions []string                  `yaml:"disabled_subscriptions,omitempty"` // 已暂停但保留缓存的订阅
+	ExternalIP            string                    `yaml:"external_ip"`                      // 外部 IP 地址，用于导出时替换 0.0.0.0
+	LogLevel              string                    `yaml:"log_level"`
+	SkipCertVerify        bool                      `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
 
 	filePath string `yaml:"-"` // 配置文件路径，用于保存
 }
@@ -75,8 +79,9 @@ type ListenerConfig struct {
 // pinned to a single upstream node by source IP, keeping the egress IP stable.
 // The sticky port reuses the listener's address and credentials.
 type StickyConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Port    uint16 `yaml:"port"`
+	Enabled   bool   `yaml:"enabled"`
+	Port      uint16 `yaml:"port"`
+	FixedNode string `yaml:"fixed_node,omitempty"` // 粘性入口指定节点；空值默认选择最低延迟节点
 }
 
 // PoolConfig configures scheduling + failure handling.
@@ -84,6 +89,7 @@ type PoolConfig struct {
 	Mode              string        `yaml:"mode"`
 	FailureThreshold  int           `yaml:"failure_threshold"`
 	BlacklistDuration time.Duration `yaml:"blacklist_duration"`
+	FixedNode         string        `yaml:"fixed_node,omitempty"` // Deprecated: migrated to sticky.fixed_node
 	// RetryEnabled toggles automatic fail-over to another member when a dial fails.
 	// nil/unset → default true. Use *bool so users can explicitly disable via YAML.
 	RetryEnabled *bool `yaml:"retry_enabled,omitempty"`
@@ -185,12 +191,14 @@ type SubscriptionFetchOptions struct {
 
 // NodeConfig describes a single upstream proxy endpoint expressed as URI.
 type NodeConfig struct {
-	Name     string     `yaml:"name" json:"name"`
-	URI      string     `yaml:"uri" json:"uri"`
-	Port     uint16     `yaml:"port,omitempty" json:"port,omitempty"`
-	Username string     `yaml:"username,omitempty" json:"username,omitempty"`
-	Password string     `yaml:"password,omitempty" json:"password,omitempty"`
-	Source   NodeSource `yaml:"-" json:"source,omitempty"` // Runtime only, not persisted
+	Name            string     `yaml:"name" json:"name"`
+	URI             string     `yaml:"uri" json:"uri"`
+	Port            uint16     `yaml:"port,omitempty" json:"port,omitempty"`
+	Username        string     `yaml:"username,omitempty" json:"username,omitempty"`
+	Password        string     `yaml:"password,omitempty" json:"password,omitempty"`
+	Source          NodeSource `yaml:"-" json:"source,omitempty"` // Runtime only, not persisted
+	SubscriptionURL string     `yaml:"-" json:"-"`                // Runtime owner used for per-subscription enable/disable
+	Disabled        bool       `yaml:"-" json:"disabled,omitempty"`
 }
 
 // NodeKey returns a stable identifier for the node, used to preserve port
@@ -238,6 +246,74 @@ func stableNodeKey(uri string) string {
 		u.RawQuery = u.Query().Encode()
 	}
 	return u.String()
+}
+
+// SubscriptionEnabled reports whether a configured subscription participates
+// in refreshes and the active node pool.
+func (c *Config) SubscriptionEnabled(rawURL string) bool {
+	for _, disabledURL := range c.DisabledSubscriptions {
+		if disabledURL == rawURL {
+			return false
+		}
+	}
+	return true
+}
+
+// ActiveSubscriptions returns configured subscriptions that are not paused.
+func (c *Config) ActiveSubscriptions() []string {
+	active := make([]string, 0, len(c.Subscriptions))
+	for _, rawURL := range c.Subscriptions {
+		if c.SubscriptionEnabled(rawURL) {
+			active = append(active, rawURL)
+		}
+	}
+	return active
+}
+
+// SetSubscriptionEnabled updates the persisted pause list without removing the
+// subscription URL or its cached nodes.
+func (c *Config) SetSubscriptionEnabled(rawURL string, enabled bool) {
+	disabled := make([]string, 0, len(c.DisabledSubscriptions)+1)
+	found := false
+	for _, existing := range c.DisabledSubscriptions {
+		if existing == rawURL {
+			found = true
+			if enabled {
+				continue
+			}
+		}
+		disabled = append(disabled, existing)
+	}
+	if !enabled && !found {
+		disabled = append(disabled, rawURL)
+	}
+	c.DisabledSubscriptions = disabled
+}
+
+func (c *Config) normalizeDisabledSubscriptions() {
+	configured := make(map[string]struct{}, len(c.Subscriptions))
+	for _, rawURL := range c.Subscriptions {
+		configured[rawURL] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(c.DisabledSubscriptions))
+	filtered := make([]string, 0, len(c.DisabledSubscriptions))
+	for _, rawURL := range c.DisabledSubscriptions {
+		if _, ok := configured[rawURL]; !ok {
+			continue
+		}
+		if _, duplicate := seen[rawURL]; duplicate {
+			continue
+		}
+		seen[rawURL] = struct{}{}
+		filtered = append(filtered, rawURL)
+	}
+	c.DisabledSubscriptions = filtered
+}
+
+// PruneDisabledSubscriptions removes pause entries for subscriptions that no
+// longer exist. It is used by live subscription CRUD updates.
+func (c *Config) PruneDisabledSubscriptions() {
+	c.normalizeDisabledSubscriptions()
 }
 
 // Load reads YAML config from disk and applies defaults/validation.
@@ -372,6 +448,7 @@ func (c *Config) normalize() error {
 		defaultEnabled := true
 		c.Management.Enabled = &defaultEnabled
 	}
+	c.normalizeDisabledSubscriptions()
 
 	// Subscription refresh defaults
 	if c.SubscriptionRefresh.Interval <= 0 {
@@ -408,7 +485,8 @@ func (c *Config) normalize() error {
 		c.Nodes = append(c.Nodes, fileNodes...)
 	}
 
-	// Load nodes from subscriptions (highest priority - writes to nodes.txt)
+	// Load nodes from enabled subscriptions (highest priority - writes to nodes.txt).
+	// Paused subscriptions remain configured but are excluded from the active pool.
 	if len(c.Subscriptions) > 0 {
 		nodesFilePath := c.NodesFile
 		if nodesFilePath == "" {
@@ -416,22 +494,46 @@ func (c *Config) normalize() error {
 			c.NodesFile = nodesFilePath
 		}
 		cachedNodes, cacheErr := loadNodesFromFile(nodesFilePath)
+		perSubscriptionCache, perSubscriptionCacheErr := loadSubscriptionNodeCache(
+			filepath.Join(filepath.Dir(c.filePath), SubscriptionCacheFileName),
+		)
 
-		subNodes, stats := FetchSubscriptionNodes(context.Background(), c.Subscriptions, SubscriptionFetchOptions{
-			Timeout:     c.SubscriptionRefresh.Timeout,
-			Concurrency: c.SubscriptionRefresh.FetchConcurrency,
-			Loggerf:     log.Printf,
-		})
-		if stats.Failed > 0 {
-			log.Printf("⚠️  Subscription initialization skipped %d/%d unique URLs; last error: %v", stats.Failed, stats.UniqueURLs, stats.LastError)
+		activeSubscriptions := c.ActiveSubscriptions()
+		var subNodes []NodeConfig
+		var stats SubscriptionFetchStats
+		if len(activeSubscriptions) > 0 {
+			subNodes, stats = FetchSubscriptionNodes(context.Background(), activeSubscriptions, SubscriptionFetchOptions{
+				Timeout:     c.SubscriptionRefresh.Timeout,
+				Concurrency: c.SubscriptionRefresh.FetchConcurrency,
+				Loggerf:     log.Printf,
+			})
+			if stats.Failed > 0 {
+				log.Printf("⚠️  Subscription initialization skipped %d/%d unique URLs; last error: %v", stats.Failed, stats.UniqueURLs, stats.LastError)
+			}
+			log.Printf("✅ Subscription initialization fetched %d nodes from %d/%d unique URLs in parallel (deduped_urls=%d, deduped_nodes=%d)",
+				stats.Nodes, stats.Successful, stats.UniqueURLs, stats.DedupedURLs, stats.DedupedNodes)
 		}
-		log.Printf("✅ Subscription initialization fetched %d nodes from %d/%d unique URLs in parallel (deduped_urls=%d, deduped_nodes=%d)",
-			stats.Nodes, stats.Successful, stats.UniqueURLs, stats.DedupedURLs, stats.DedupedNodes)
+		if len(c.DisabledSubscriptions) > 0 && perSubscriptionCacheErr == nil {
+			subNodes = c.mergeSubscriptionNodeCache(subNodes, perSubscriptionCache)
+			log.Printf("✅ Restored per-subscription cache for paused subscriptions (%d cached nodes total)", len(subNodes))
+		} else if len(activeSubscriptions) == 0 && cacheErr == nil {
+			// Keep the service startable when every subscription is paused. These
+			// legacy aggregate-cache nodes stay suppressed until a subscription is
+			// restored from its per-subscription cache by the runtime manager.
+			subNodes = cachedNodes
+			for idx := range subNodes {
+				subNodes[idx].Source = NodeSourceSubscription
+				subNodes[idx].Disabled = true
+			}
+		}
 		// Mark subscription nodes and write to nodes.txt
 		for idx := range subNodes {
 			subNodes[idx].Source = NodeSourceSubscription
 		}
-		useCached, reason := shouldUseCachedSubscriptionNodes(subNodes, cachedNodes, cacheErr, stats)
+		useCached, reason := false, ""
+		if len(activeSubscriptions) > 0 && len(c.DisabledSubscriptions) == 0 {
+			useCached, reason = shouldUseCachedSubscriptionNodes(subNodes, cachedNodes, cacheErr, stats)
+		}
 		if useCached {
 			log.Printf("⚠️  Keeping cached subscription nodes from %s (%d cached vs %d fetched): %s",
 				nodesFilePath, len(cachedNodes), len(subNodes), reason)
@@ -447,7 +549,12 @@ func (c *Config) normalize() error {
 				log.Printf("✅ Written %d subscription nodes to %s", len(subNodes), nodesFilePath)
 			}
 		}
-		c.Nodes = append(c.Nodes, subNodes...)
+		for _, node := range subNodes {
+			if node.Disabled {
+				continue
+			}
+			c.Nodes = append(c.Nodes, node)
+		}
 	}
 
 	// portCursor is an int (not uint16) so the >65535 exhaustion guard fires
@@ -717,6 +824,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 		defaultEnabled := true
 		c.Management.Enabled = &defaultEnabled
 	}
+	c.normalizeDisabledSubscriptions()
 	if c.SubscriptionRefresh.Interval <= 0 {
 		c.SubscriptionRefresh.Interval = 1 * time.Hour
 	}
@@ -831,6 +939,15 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 // Sticky sessions only apply to the shared pool entry, so they are disabled
 // outside pool/hybrid mode. Must run after node ports are assigned.
 func (c *Config) normalizeSticky() error {
+	// Backward compatibility: older versions stored the selected node under
+	// pool.fixed_node and applied it to the primary listener. The selection now
+	// belongs exclusively to the sticky listener.
+	if strings.TrimSpace(c.Sticky.FixedNode) == "" && strings.TrimSpace(c.Pool.FixedNode) != "" {
+		c.Sticky.FixedNode = strings.TrimSpace(c.Pool.FixedNode)
+	}
+	c.Pool.FixedNode = ""
+	c.Sticky.FixedNode = strings.TrimSpace(c.Sticky.FixedNode)
+
 	if !c.Sticky.Enabled {
 		return nil
 	}
@@ -948,6 +1065,62 @@ func loadNodesFromFile(path string) ([]NodeConfig, error) {
 // LoadNodesFromFile reads a nodes file where each non-comment line is a proxy URI.
 func LoadNodesFromFile(path string) ([]NodeConfig, error) {
 	return loadNodesFromFile(path)
+}
+
+func loadSubscriptionNodeCache(path string) (map[string][]NodeConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cached map[string][]NodeConfig
+	if err := json.Unmarshal(data, &cached); err != nil {
+		return nil, err
+	}
+	return cached, nil
+}
+
+// mergeSubscriptionNodeCache adds cached nodes for subscriptions that were not
+// fetched and retains paused subscriptions as suppressed runtime members. Fresh
+// enabled nodes always win when two subscriptions contain the same endpoint.
+func (c *Config) mergeSubscriptionNodeCache(fetched []NodeConfig, cached map[string][]NodeConfig) []NodeConfig {
+	merged := make([]NodeConfig, 0, len(fetched))
+	seenNodes := make(map[string]struct{}, len(fetched))
+	freshSubscriptions := make(map[string]struct{}, len(c.Subscriptions))
+	appendNode := func(node NodeConfig, rawURL string, disabled bool) {
+		node.Source = NodeSourceSubscription
+		node.SubscriptionURL = rawURL
+		node.Disabled = disabled
+		key := node.NodeKey()
+		if _, duplicate := seenNodes[key]; duplicate {
+			return
+		}
+		seenNodes[key] = struct{}{}
+		merged = append(merged, node)
+	}
+
+	for _, node := range fetched {
+		if node.SubscriptionURL != "" {
+			freshSubscriptions[node.SubscriptionURL] = struct{}{}
+		}
+		appendNode(node, node.SubscriptionURL, false)
+	}
+	for _, enabledPass := range []bool{true, false} {
+		for _, rawURL := range c.Subscriptions {
+			enabled := c.SubscriptionEnabled(rawURL)
+			if enabled != enabledPass {
+				continue
+			}
+			if enabled {
+				if _, fresh := freshSubscriptions[rawURL]; fresh {
+					continue
+				}
+			}
+			for _, node := range cached[rawURL] {
+				appendNode(node, rawURL, !enabled)
+			}
+		}
+	}
+	return merged
 }
 
 func shouldUseCachedSubscriptionNodes(fetched []NodeConfig, cached []NodeConfig, cacheErr error, stats SubscriptionFetchStats) (bool, string) {
@@ -1152,6 +1325,10 @@ func FetchSubscriptionNodes(ctx context.Context, urls []string, opts Subscriptio
 		}
 		if opts.Loggerf != nil {
 			opts.Loggerf("✅ Loaded %d nodes from subscription %s", len(res.nodes), RedactURL(res.url))
+		}
+		for idx := range res.nodes {
+			res.nodes[idx].Source = NodeSourceSubscription
+			res.nodes[idx].SubscriptionURL = res.url
 		}
 		allNodes = append(allNodes, res.nodes...)
 	}
@@ -2184,6 +2361,7 @@ func (c *Config) SaveSettings() error {
 	saveCfg.SkipCertVerify = c.SkipCertVerify
 	saveCfg.Log = c.Log
 	saveCfg.Subscriptions = c.Subscriptions
+	saveCfg.DisabledSubscriptions = c.DisabledSubscriptions
 	saveCfg.SubscriptionRefresh = c.SubscriptionRefresh
 	saveCfg.Mode = c.Mode
 	saveCfg.Listener = c.Listener

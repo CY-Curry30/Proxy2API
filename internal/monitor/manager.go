@@ -28,16 +28,19 @@ type Config struct {
 	ExternalIP       string // 外部 IP 地址，用于导出时替换 0.0.0.0
 	SkipCertVerify   bool   // 全局跳过 SSL 证书验证
 	ProbeConcurrency int    // 并发探测线程数（批量探测与周期健康检查共用）
+	StickyNode       string // 粘性入口指定节点；空值默认选择最低延迟节点
 }
 
 // NodeInfo is static metadata about a proxy entry.
 type NodeInfo struct {
-	Tag           string `json:"tag"`
-	Name          string `json:"name"`
-	URI           string `json:"uri"`
-	Mode          string `json:"mode"`
-	ListenAddress string `json:"listen_address,omitempty"`
-	Port          uint16 `json:"port,omitempty"`
+	Tag             string `json:"tag"`
+	Name            string `json:"name"`
+	URI             string `json:"uri"`
+	Mode            string `json:"mode"`
+	ListenAddress   string `json:"listen_address,omitempty"`
+	Port            uint16 `json:"port,omitempty"`
+	SubscriptionURL string `json:"-"`
+	Suppressed      bool   `json:"-"`
 }
 
 // TimelineEvent represents a single usage event for debug tracking.
@@ -70,6 +73,7 @@ type Snapshot struct {
 	LastLatencyMs     int64           `json:"last_latency_ms"`
 	Available         bool            `json:"available"`
 	InitialCheckDone  bool            `json:"initial_check_done"`
+	Suppressed        bool            `json:"suppressed,omitempty"`
 	Timeline          []TimelineEvent `json:"timeline,omitempty"`
 }
 
@@ -110,6 +114,7 @@ type entry struct {
 	blacklistFn      func(time.Duration)
 	initialCheckDone bool
 	available        bool
+	suppressed       bool
 	mu               sync.RWMutex
 }
 
@@ -125,6 +130,8 @@ type Manager struct {
 	probeConcurrency int
 	probeInterval    time.Duration
 	probeTimeout     time.Duration
+	stickyNode       string
+	entryExits       map[uint16]string
 	probeScheduleCh  chan struct{}
 	periodicOnce     sync.Once
 	mu               sync.RWMutex
@@ -250,6 +257,8 @@ func NewManager(cfg Config) (*Manager, error) {
 		probeConcurrency: clampProbeConcurrency(cfg.ProbeConcurrency),
 		probeInterval:    cfg.ProbeInterval,
 		probeTimeout:     cfg.ProbeTimeout,
+		stickyNode:       strings.TrimSpace(cfg.StickyNode),
+		entryExits:       make(map[uint16]string),
 		probeScheduleCh:  make(chan struct{}, 1),
 	}
 	m.probeDst, m.probeHost, m.probePath, m.probeTLS, m.probeTLSInsecure, m.probeReady = resolveProbeTarget(cfg.ProbeTarget, cfg.SkipCertVerify)
@@ -310,6 +319,78 @@ func (m *Manager) ProbeAttemptTimeout() time.Duration {
 		total = 110 * time.Second
 	}
 	return total / probeTimeoutParts
+}
+
+// SetStickyNode selects the only node the sticky listener may use. An empty tag
+// restores lowest-latency selection for new sticky bindings.
+func (m *Manager) SetStickyNode(tag string) {
+	m.mu.Lock()
+	m.stickyNode = strings.TrimSpace(tag)
+	m.mu.Unlock()
+}
+
+func (m *Manager) StickyNode() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.stickyNode
+}
+
+// RecordEntryExit records the most recent successful upstream selected by a
+// shared listener. The key is the configured listener port, so WebUI labels
+// automatically follow settings changes after a reload.
+func (m *Manager) RecordEntryExit(port uint16, tag string) {
+	tag = strings.TrimSpace(tag)
+	if port == 0 || tag == "" {
+		return
+	}
+	m.mu.Lock()
+	m.entryExits[port] = tag
+	m.mu.Unlock()
+}
+
+func (m *Manager) EntryExits() map[uint16]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[uint16]string, len(m.entryExits))
+	for port, tag := range m.entryExits {
+		result[port] = tag
+	}
+	return result
+}
+
+// SetSubscriptionEnabled suppresses or restores every registered node owned
+// by one subscription without deleting its runtime state.
+func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) {
+	m.mu.RLock()
+	entries := make([]*entry, 0)
+	for _, e := range m.nodes {
+		e.mu.RLock()
+		owned := e.info.SubscriptionURL == rawURL
+		e.mu.RUnlock()
+		if owned {
+			entries = append(entries, e)
+		}
+	}
+	m.mu.RUnlock()
+	for _, e := range entries {
+		e.mu.Lock()
+		e.suppressed = !enabled
+		e.mu.Unlock()
+	}
+}
+
+func (m *Manager) HasSubscriptionNodes(rawURL string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, e := range m.nodes {
+		e.mu.RLock()
+		owned := e.info.SubscriptionURL == rawURL
+		e.mu.RUnlock()
+		if owned {
+			return true
+		}
+	}
+	return false
 }
 
 // SetProbeTarget re-derives the probe destination and strict-TLS decision from
@@ -413,7 +494,12 @@ func (m *Manager) runProbeSweep(timeout time.Duration) {
 	m.mu.RLock()
 	entries := make([]*entry, 0, len(m.nodes))
 	for _, e := range m.nodes {
-		entries = append(entries, e)
+		e.mu.RLock()
+		suppressed := e.suppressed
+		e.mu.RUnlock()
+		if !suppressed {
+			entries = append(entries, e)
+		}
 	}
 	m.mu.RUnlock()
 
@@ -551,12 +637,16 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 	e, ok := m.nodes[info.Tag]
 	if !ok {
 		e = &entry{
-			info:     info,
-			timeline: make([]TimelineEvent, 0, maxTimelineSize),
+			info:       info,
+			suppressed: info.Suppressed,
+			timeline:   make([]TimelineEvent, 0, maxTimelineSize),
 		}
 		m.nodes[info.Tag] = e
 	} else {
+		e.mu.Lock()
 		e.info = info
+		e.suppressed = info.Suppressed
+		e.mu.Unlock()
 	}
 	return &EntryHandle{ref: e}
 }
@@ -567,6 +657,7 @@ func (m *Manager) ClearNodes() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.nodes = make(map[string]*entry)
+	m.entryExits = make(map[uint16]string)
 }
 
 // DestinationForProbe exposes the configured destination and HTTP target.
@@ -583,6 +674,18 @@ func (m *Manager) DestinationForProbe() (dest M.Socksaddr, host, path string, us
 // If onlyAvailable is true, only returns nodes that passed initial health check.
 func (m *Manager) Snapshot() []Snapshot {
 	return m.SnapshotFiltered(false)
+}
+
+// SnapshotVisible excludes nodes belonging to paused subscriptions.
+func (m *Manager) SnapshotVisible() []Snapshot {
+	all := m.SnapshotFiltered(false)
+	visible := all[:0]
+	for _, snap := range all {
+		if !snap.Suppressed {
+			visible = append(visible, snap)
+		}
+	}
+	return visible
 }
 
 // SnapshotFiltered returns a sorted copy of current node states.
@@ -604,7 +707,7 @@ func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 		// "healthy online" statistic: InitialCheckDone && Available. This
 		// excludes unchecked nodes (which the old logic optimistically included)
 		// so export count matches the WebUI display.
-		if onlyAvailable && (!snap.InitialCheckDone || !snap.Available || snap.Blacklisted) {
+		if onlyAvailable && (snap.Suppressed || !snap.InitialCheckDone || !snap.Available || snap.Blacklisted) {
 			continue
 		}
 		snapshots = append(snapshots, snap)
@@ -653,6 +756,12 @@ func (m *Manager) ProbeWithResult(ctx context.Context, tag string) (ProbeResult,
 	}
 	if e.probe == nil {
 		return ProbeResult{}, errors.New("probe not available for this node")
+	}
+	e.mu.RLock()
+	suppressed := e.suppressed
+	e.mu.RUnlock()
+	if suppressed {
+		return ProbeResult{}, errors.New("node belongs to a paused subscription")
 	}
 
 	// Enforce the context deadline at this level. Some sing-box outbound
@@ -766,6 +875,7 @@ func (e *entry) snapshot() Snapshot {
 		LastLatencyMs:     latencyMs,
 		Available:         e.available,
 		InitialCheckDone:  e.initialCheckDone,
+		Suppressed:        e.suppressed,
 		Timeline:          timelineCopy,
 	}
 }
@@ -954,6 +1064,15 @@ func (h *EntryHandle) MarkAvailable(available bool) {
 	h.ref.mu.Lock()
 	h.ref.available = available
 	h.ref.mu.Unlock()
+}
+
+func (h *EntryHandle) Suppressed() bool {
+	if h == nil || h.ref == nil {
+		return false
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return h.ref.suppressed
 }
 
 // LastLatency returns the last measured probe latency.

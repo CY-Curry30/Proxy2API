@@ -591,7 +591,7 @@ func (m *Manager) availableNodeCount() (int, int) {
 	if m.monitorMgr == nil {
 		return 0, 0
 	}
-	snapshots := m.monitorMgr.Snapshot()
+	snapshots := m.monitorMgr.SnapshotVisible()
 	total := len(snapshots)
 	available := 0
 	for _, snap := range snapshots {
@@ -1046,6 +1046,15 @@ func cloneNodes(nodes []config.NodeConfig) []config.NodeConfig {
 	return out
 }
 
+// CurrentConfigSnapshot returns an isolated copy of the configuration backing
+// the running box. Subscription reloads use it so unrelated live settings are
+// not replaced by an older manager snapshot.
+func (m *Manager) CurrentConfigSnapshot() *config.Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.copyConfigLocked()
+}
+
 func (m *Manager) copyConfigLocked() *config.Config {
 	if m.cfg == nil {
 		return nil
@@ -1056,6 +1065,9 @@ func (m *Manager) copyConfigLocked() *config.Config {
 	if len(m.cfg.Subscriptions) > 0 {
 		cloned.Subscriptions = make([]string, len(m.cfg.Subscriptions))
 		copy(cloned.Subscriptions, m.cfg.Subscriptions)
+	}
+	if len(m.cfg.DisabledSubscriptions) > 0 {
+		cloned.DisabledSubscriptions = append([]string(nil), m.cfg.DisabledSubscriptions...)
 	}
 	cloned.SetFilePath(m.cfg.FilePath())
 	return &cloned

@@ -272,6 +272,33 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .node-name-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .node-name-line .cell-trunc { min-width: 0; }
+    .entry-port-badges {
+      display: inline-flex;
+      flex: 0 0 auto;
+      gap: 4px;
+    }
+    .entry-port-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 18px;
+      padding: 0 5px;
+      border: 1px solid var(--primary);
+      border-radius: 3px;
+      color: var(--primary);
+      background: var(--primary-light);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1;
+    }
     .cell-trunc-uri { max-width: 360px; }
     
     .badge {
@@ -281,6 +308,7 @@
     .badge-warning { background: var(--warning-bg); color: var(--warning); border: 1px solid var(--warning); }
     .badge-error { background: var(--error-bg); color: var(--error); border: 1px solid var(--error); }
     .badge-offline { background: var(--bg-hover); color: var(--text-muted); border: 1px solid var(--border); }
+    .badge-copyable { cursor: copy; user-select: none; }
 
     .tt-mono { font-family: var(--font-mono); font-size: 12px; }
     
@@ -406,6 +434,108 @@
       z-index: 10;
     }
     .chart-container { width: 100%; height: 100%; }
+    .region-availability {
+      height: 100%;
+      padding-top: 32px;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .region-overview {
+      min-height: 36px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      color: var(--text-muted);
+      font-size: 11px;
+      border-bottom: 1px solid var(--border);
+    }
+    .region-overview strong {
+      margin-left: 5px;
+      color: var(--text-main);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .region-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+      box-sizing: border-box;
+      padding-right: 12px;
+    }
+    .region-list-header,
+    .region-row {
+      display: grid;
+      grid-template-columns: minmax(88px, 120px) 78px minmax(100px, 1fr);
+      gap: 8px;
+      align-items: center;
+    }
+    .region-list-header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      min-height: 28px;
+      color: var(--text-muted);
+      background: var(--bg-panel);
+      font-size: 10px;
+      text-transform: uppercase;
+      border-bottom: 1px solid var(--border);
+    }
+    .region-row {
+      min-height: 36px;
+      border-bottom: 1px solid var(--border-light);
+    }
+    .region-row:last-child { border-bottom: 0; }
+    .region-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-main);
+      font-weight: 600;
+    }
+    .region-count {
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .region-rate {
+      display: grid;
+      grid-template-columns: 1fr 38px;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+    .region-rate-track {
+      height: 6px;
+      overflow: hidden;
+      background: var(--border);
+      border-radius: 3px;
+    }
+    .region-rate-fill { height: 100%; border-radius: 3px; }
+    .region-rate-value {
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-align: right;
+    }
+    .region-empty {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+    @media (max-width: 520px) {
+      .region-list-header,
+      .region-row { grid-template-columns: 96px 64px minmax(82px, 1fr); gap: 8px; }
+      .region-overview { gap: 12px; }
+      .region-rate { grid-template-columns: 1fr 34px; gap: 6px; }
+    }
 
   </style>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
@@ -541,7 +671,7 @@
         <div class="charts-grid">
           <div class="chart-panel">
             <div class="chart-title">Region Availability</div>
-            <div class="chart-container" id="regionChart"></div>
+            <div class="region-availability" id="regionAvailability"></div>
           </div>
           <div class="chart-panel">
             <div class="chart-title">最优节点延迟 (Top Fastest Nodes)</div>
@@ -557,6 +687,7 @@
           <div class="panel-header">
             <div class="panel-title">节点监控列表</div>
             <div class="table-tools">
+              <button class="btn btn-sm btn-primary" id="stickyNodeResetBtn" style="display:none" onclick="setStickyNode('')">取消指定</button>
               <select id="nodeStatusFilter" class="setting-input table-tool" onchange="applyNodeFilters()" title="状态筛选">
                 <option value="all">全部状态</option>
                 <option value="healthy">在线</option>
@@ -813,7 +944,7 @@
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
                   <div class="form-group"><label>粘性端口</label><input type="number" id="settingStickyPort" class="setting-input" min="1" max="65535" placeholder="2324（留空则为 listener 端口 +1）" /></div>
                 </div>
-                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">仅 pool / hybrid 模式生效。开启后会额外监听一个端口，与原 listener 端口共存；通过粘性端口接入的客户端会按来源 IP 永久绑定到同一上游节点（节点失效时自动重选）。</div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">仅 pool / hybrid 模式生效。未指定节点时按最低延迟选择并按来源 IP 保持绑定；也可在监控节点列表中指定粘性出口。原 listener 端口始终按 pool 策略调度。</div>
               </div>
             </div>
 
@@ -991,6 +1122,9 @@
     let isEditMode = false;
     let configNodes = [];
     let subscriptionsCache = [];
+    let stickyNodeTag = '';
+    let stickyEnabled = false;
+    let entryExitPortsByTag = new Map();
     let _savedCoreSnapshot = '';
     // Cached pool.blacklist_duration from /api/settings (e.g. "1h", "24h0m0s"). null = not loaded yet.
     let cachedBlacklistDuration = null;
@@ -1006,7 +1140,6 @@
     }
 
     // Chart instances
-    let regionChartInst = null;
     let latencyChartInst = null;
     let successRateChartInst = null;
     let failureChartInst = null;
@@ -1018,7 +1151,6 @@
 
     // Resize observer for charts
     window.addEventListener('resize', () => {
-      regionChartInst && regionChartInst.resize();
       latencyChartInst && latencyChartInst.resize();
       successRateChartInst && successRateChartInst.resize();
       failureChartInst && failureChartInst.resize();
@@ -1032,6 +1164,38 @@
       c.appendChild(t);
       setTimeout(() => t.classList.add('removing'), 2700);
       setTimeout(() => t.remove(), 3000);
+    }
+
+    async function copyStatusError(event, message) {
+      event.preventDefault();
+      event.stopPropagation();
+      const text = String(message || '').trim();
+      if (!text) return;
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('clipboard unavailable');
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        let copied = false;
+        try {
+          copied = document.execCommand('copy');
+        } catch (copyError) {
+          copied = false;
+        } finally {
+          textarea.remove();
+        }
+        if (!copied) {
+          showToast('复制失败', 'error');
+          return;
+        }
+      }
+      showToast('错误信息已复制');
     }
 
     async function checkAuth() {
@@ -1148,6 +1312,21 @@
         if (res.status === 401) { document.getElementById('loginOverlay').classList.add('show'); stopAutoRefresh(); return; }
         const data = await res.json();
         allNodesCache = data.nodes || [];
+        stickyNodeTag = data.sticky_node || '';
+        stickyEnabled = !!data.sticky_enabled;
+        entryExitPortsByTag = new Map();
+        Object.entries(data.entry_exits || {}).forEach(([port, tag]) => {
+          if (!tag) return;
+          const ports = entryExitPortsByTag.get(tag) || [];
+          ports.push(port);
+          entryExitPortsByTag.set(tag, ports);
+        });
+        entryExitPortsByTag.forEach(ports => ports.sort((a, b) => Number(a) - Number(b)));
+        const stickyResetBtn = document.getElementById('stickyNodeResetBtn');
+        if (stickyResetBtn) {
+          stickyResetBtn.style.display = stickyNodeTag ? 'inline-flex' : 'none';
+          stickyResetBtn.title = stickyNodeTag ? `当前粘性代理指定节点：${stickyNodeTag}` : '';
+        }
         ensureLocationColumns();
         updateDashboardStats(data);
         updateRegionFilterOptions();
@@ -1246,54 +1425,63 @@
 
     function getCssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
+    function renderRegionAvailability() {
+      const container = document.getElementById('regionAvailability');
+      if (!container) return;
+
+      const regionStats = new Map();
+      allNodesCache.forEach(node => {
+        const rawRegion = String(node.region || '').trim();
+        const key = rawRegion ? rawRegion.toLowerCase() : 'other';
+        if (!regionStats.has(key)) {
+          regionStats.set(key, { name: rawRegion ? rawRegion.toUpperCase() : 'OTHER', total: 0, healthy: 0 });
+        }
+        const stat = regionStats.get(key);
+        stat.total++;
+        if (!node.blacklisted && node.initial_check_done && node.available) stat.healthy++;
+      });
+
+      const regions = Array.from(regionStats.values())
+        .map(stat => ({ ...stat, rate: stat.total > 0 ? Math.round(stat.healthy / stat.total * 100) : 0 }))
+        .sort((a, b) => b.healthy - a.healthy || b.total - a.total || a.name.localeCompare(b.name));
+      const healthyTotal = regions.reduce((sum, stat) => sum + stat.healthy, 0);
+      const nodeTotal = regions.reduce((sum, stat) => sum + stat.total, 0);
+
+      if (regions.length === 0) {
+        container.innerHTML = '<div class="region-empty">暂无地域数据</div>';
+        return;
+      }
+
+      const rows = regions.map(stat => {
+        const color = stat.healthy === 0 ? 'var(--error)' : (stat.healthy < stat.total ? 'var(--warning)' : 'var(--success)');
+        const title = `${stat.name}: ${stat.healthy}/${stat.total} 可用 (${stat.rate}%)`;
+        return `<div class="region-row" title="${escapeHtml(title)}">
+          <div class="region-name">${escapeHtml(stat.name)}</div>
+          <div class="region-count">${stat.healthy} / ${stat.total}</div>
+          <div class="region-rate">
+            <div class="region-rate-track"><div class="region-rate-fill" style="width:${stat.rate}%; background:${color};"></div></div>
+            <div class="region-rate-value">${stat.rate}%</div>
+          </div>
+        </div>`;
+      }).join('');
+
+      container.innerHTML = `
+        <div class="region-overview">
+          <span>地域<strong>${regions.length}</strong></span>
+          <span>可用节点<strong>${healthyTotal} / ${nodeTotal}</strong></span>
+        </div>
+        <div class="region-list">
+          <div class="region-list-header"><span>地域</span><span>可用 / 总数</span><span>可用率</span></div>
+          ${rows}
+        </div>`;
+    }
+
     function updateDashboardCharts() {
-      if(!regionChartInst) regionChartInst = initEchart('regionChart');
       if(!latencyChartInst) latencyChartInst = initEchart('latencyChart');
 
-      if (!allNodesCache || allNodesCache.length === 0) return;
+      renderRegionAvailability();
 
-      const regionStats = {};
-      allNodesCache.forEach(n => {
-        const region = String(n.region || 'other').toLowerCase();
-        if (!regionStats[region]) regionStats[region] = { total: 0, healthy: 0 };
-        regionStats[region].total++;
-        if (!n.blacklisted && n.initial_check_done && n.available) regionStats[region].healthy++;
-      });
-      const regionData = Object.keys(regionStats).map(region => ({
-        name: region.toUpperCase(),
-        value: regionStats[region].total,
-        itemStyle: { color: regionStats[region].healthy === 0 ? '#ef4444' : (regionStats[region].healthy < regionStats[region].total ? '#f59e0b' : '#3b82f6') }
-      }));
-      regionChartInst && regionChartInst.setOption({
-        backgroundColor: 'transparent',
-        tooltip: { trigger: 'item', formatter: params => {
-          const key = String(params.name || '').toLowerCase();
-          const stat = regionStats[key] || { total: 0, healthy: 0 };
-          return `${params.name}<br/>Total: ${stat.total}<br/>Available: ${stat.healthy}`;
-        } },
-        legend: {
-          type: 'scroll',
-          orient: 'vertical',
-          left: 0,
-          top: 48,
-          bottom: 8,
-          width: 96,
-          itemWidth: 12,
-          itemHeight: 8,
-          itemGap: 12,
-          textStyle: { color: getCssVar('--text-muted') }
-        },
-        series: [{
-          name: 'Regions',
-          type: 'pie',
-          radius: ['34%', '58%'],
-          center: ['67%', '53%'],
-          avoidLabelOverlap: true,
-          label: { formatter: '{b}: {c}', color: getCssVar('--text-muted') },
-          labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' },
-          data: regionData
-        }]
-      });
+      if (!allNodesCache || allNodesCache.length === 0) return;
 
       // Latency Chart Data
       const sorted = allNodesCache
@@ -1473,6 +1661,9 @@
         const ms = currentHealthy ? measuredMs : -1;
         const calls = (n.success_count || 0) + (n.failure_count || 0);
         const successRate = calls > 0 ? ((n.success_count || 0) / calls * 100) : null;
+        const entryPortBadges = (entryExitPortsByTag.get(n.tag) || [])
+          .map(port => `<span class="entry-port-badge" title="入口 ${escapeHtml(port)} 当前出口">${escapeHtml(port)}</span>`)
+          .join('');
         let badge = '', statusText = '', statusTitle = '';
         if (n.blacklisted) {
           badge = 'badge-error';
@@ -1491,13 +1682,20 @@
           statusText = '在线 Healthy';
           statusTitle = '最近一次探测成功';
         }
+        const copyableError = !n.blacklisted && n.initial_check_done && !n.available && !!statusTitle;
+        const statusCopyAttrs = copyableError
+          ? ` oncontextmenu="copyStatusError(event, '${escapeAttrJs(statusTitle)}')"`
+          : '';
 
         return `<tr>
-          <td><span class="badge ${badge}" title="${escapeHtml(statusTitle)}">${statusText}</span></td>
+          <td><span class="badge ${badge}${copyableError ? ' badge-copyable' : ''}" title="${escapeHtml(statusTitle)}"${statusCopyAttrs}>${statusText}</span></td>
           <td class="tt-mono">${escapeHtml(formatRegion(n))}</td>
           <td class="tt-mono">${escapeHtml(n.ip || '-')}</td>
           <td>
-            <div class="cell-trunc" style="font-weight: 500" title="${escapeHtml(n.name || n.tag)}">${escapeHtml(n.name || n.tag)}</div>
+            <div class="node-name-line">
+              <div class="cell-trunc" style="font-weight: 500" title="${escapeHtml(n.name || n.tag)}">${escapeHtml(n.name || n.tag)}</div>
+              ${entryPortBadges ? `<span class="entry-port-badges">${entryPortBadges}</span>` : ''}
+            </div>
             <div class="cell-trunc" style="font-size: 11px; color: var(--text-muted)" title="${escapeHtml(n.tag)}">${escapeHtml(n.tag)}</div>
           </td>
           <td class="tt-mono">${n.port || '-'}</td>
@@ -1511,6 +1709,9 @@
           <td class="tt-mono" style="color:${successRate === null ? 'var(--text-muted)' : (successRate >= 90 ? 'var(--success)' : (successRate >= 70 ? 'var(--warning)' : 'var(--error)'))}" title="请求成功 ${n.success_count||0} / 请求失败 ${n.failure_count||0}">${successRate === null ? '-' : successRate.toFixed(1)+'%'}</td>
           <td>
             <button class="btn btn-sm" onclick="probeNode('${escapeAttrJs(n.tag)}')">探测</button>
+            ${stickyNodeTag === n.tag
+              ? `<button class="btn btn-sm btn-primary" onclick="setStickyNode('')">取消指定</button>`
+              : `<button class="btn btn-sm" onclick="setStickyNode('${escapeAttrJs(n.tag)}')" ${currentHealthy && stickyEnabled ? '' : 'disabled'} title="${stickyEnabled ? '指定为粘性代理出口' : '请先启用粘性代理'}">指定</button>`}
             ${n.blacklisted ? `<button class="btn btn-sm btn-primary" onclick="releaseNode('${escapeAttrJs(n.tag)}')">解封</button>` : `<button class="btn btn-sm btn-danger" onclick="blacklistNode('${escapeAttrJs(n.tag)}')">拉黑</button>`}
           </td>
         </tr>`;
@@ -1547,6 +1748,28 @@
           refresh();
         }
       } catch(e) { showToast(e.message, 'error'); }
+    }
+
+    async function setStickyNode(tag) {
+      try {
+        const response = await fetch('/api/sticky/fixed-node', {
+          method: tag ? 'PUT' : 'DELETE',
+          headers: {'Content-Type':'application/json'},
+          body: tag ? JSON.stringify({tag}) : null
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || '设置失败');
+        stickyNodeTag = data.tag || '';
+        const stickyResetBtn = document.getElementById('stickyNodeResetBtn');
+        if (stickyResetBtn) {
+          stickyResetBtn.style.display = stickyNodeTag ? 'inline-flex' : 'none';
+          stickyResetBtn.title = stickyNodeTag ? `当前粘性代理指定节点：${stickyNodeTag}` : '';
+        }
+        showToast(stickyNodeTag ? '粘性代理已指定节点' : '粘性代理已恢复最低延迟选择');
+        applyNodeFilters();
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
     }
     
     async function releaseNode(tag) {
@@ -1682,6 +1905,7 @@
 
     function subscriptionStatusView(status) {
       switch (status) {
+        case 'disabled': return ['badge-offline', '已关闭'];
         case 'active': return ['badge-healthy', '有效'];
         case 'expired': return ['badge-error', '已到期'];
         case 'quota_exhausted': return ['badge-error', '流量用尽'];
@@ -1728,7 +1952,8 @@
           <td>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               <button class="btn btn-sm" onclick="showSubscriptionModal('${escapeAttrJs(item.url)}')">修改</button>
-              <button class="btn btn-sm" onclick="refreshManagedSubscription('${escapeAttrJs(item.url)}')">更新</button>
+              <button class="btn btn-sm ${item.enabled ? '' : 'btn-primary'}" onclick="toggleSubscription('${escapeAttrJs(item.url)}', ${item.enabled ? 'false' : 'true'})">${item.enabled ? '关闭' : '开启'}</button>
+              <button class="btn btn-sm" onclick="refreshManagedSubscription('${escapeAttrJs(item.url)}')" ${item.enabled ? '' : 'disabled'}>更新</button>
               <button class="btn btn-sm btn-danger" onclick="deleteSubscription('${escapeAttrJs(item.url)}')">删除</button>
             </div>
           </td>
@@ -1775,6 +2000,26 @@
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || '删除失败');
         if (data.refresh_error) showToast(data.refresh_error, 'error'); else showToast('订阅已删除');
+        await loadSubscriptionsPage();
+        refresh();
+      } catch (error) {
+        showToast(error.message, 'error');
+      } finally {
+        hideFullscreenLoading();
+      }
+    }
+
+    async function toggleSubscription(rawURL, enabled) {
+      showFullscreenLoading(enabled ? '开启订阅中...' : '关闭订阅中...', enabled ? '正在恢复缓存节点并启动探测' : '正在暂停更新并屏蔽节点');
+      try {
+        const response = await fetch('/api/subscriptions', {
+          method: 'PATCH',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({url: rawURL, enabled})
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || '操作失败');
+        showToast(enabled ? '订阅已开启' : '订阅已关闭');
         await loadSubscriptionsPage();
         refresh();
       } catch (error) {
@@ -2324,7 +2569,6 @@
     function getOsTheme() { return osMediaQuery.matches ? 'dark' : 'light'; }
 
     function reRenderCharts() {
-      if (regionChartInst) { regionChartInst.dispose(); regionChartInst = null; }
       if (latencyChartInst) { latencyChartInst.dispose(); latencyChartInst = null; }
       if (trafficChartInst) { trafficChartInst.dispose(); trafficChartInst = null; }
       if (successRateChartInst) { successRateChartInst.dispose(); successRateChartInst = null; }

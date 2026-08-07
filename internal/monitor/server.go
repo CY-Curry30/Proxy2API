@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	mathrand "math/rand"
 	"net/http"
@@ -56,6 +57,8 @@ type SubscriptionRefresher interface {
 	Subscriptions() []SubscriptionInfo
 	UpdateConfig(urls []string, enabled bool, interval time.Duration)
 	UpdateConfigAndRefresh(urls []string, enabled bool, interval time.Duration) error
+	UpdateConfigAndRefreshSelected(urls []string, enabled bool, interval time.Duration, refreshURLs []string) error
+	SetSubscriptionEnabled(rawURL string, enabled bool) error
 }
 
 // SubscriptionStatus represents subscription refresh status.
@@ -77,6 +80,7 @@ type SubscriptionInfo struct {
 	Status         string    `json:"status"`
 	NodeCount      int       `json:"node_count"`
 	Included       bool      `json:"included"`
+	Enabled        bool      `json:"enabled"`
 	UploadBytes    int64     `json:"upload_bytes"`
 	DownloadBytes  int64     `json:"download_bytes"`
 	UsedBytes      int64     `json:"used_bytes"`
@@ -135,6 +139,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/auth", s.handleAuth)
 	mux.HandleFunc("/api/settings", s.withAuth(s.handleSettings))
 	mux.HandleFunc("/api/nodes", s.withAuth(s.handleNodes))
+	mux.HandleFunc("/api/nodes/online", s.withAuth(s.handleOnlineNodes))
 	mux.HandleFunc("/api/nodes/config", s.withAuth(s.handleConfigNodes))
 	mux.HandleFunc("/api/nodes/config/", s.withAuth(s.handleConfigNodeItem))
 	mux.HandleFunc("/api/nodes/import", s.withAuth(s.handleNodeImport))
@@ -148,6 +153,10 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/subscriptions", s.withAuth(s.handleSubscriptions))
 	mux.HandleFunc("/api/subscriptions/settings", s.withAuth(s.handleSubscriptionSettings))
 	mux.HandleFunc("/api/subscriptions/refresh", s.withAuth(s.handleManagedSubscriptionRefresh))
+	mux.HandleFunc("/api/sticky/fixed-node", s.withAuth(s.handleStickyNode))
+	// Keep the old endpoint as a compatibility alias; its behavior now targets
+	// the sticky listener instead of the primary pool listener.
+	mux.HandleFunc("/api/pool/fixed-node", s.withAuth(s.handleStickyNode))
 	mux.HandleFunc("/api/reload", s.withAuth(s.handleReload))
 	mux.HandleFunc("/api/traffic", s.withAuth(s.handleTraffic))
 	mux.HandleFunc("/api/logs", s.withAuth(s.handleLogs))
@@ -195,6 +204,7 @@ func (s *Server) SetConfig(cfg *config.Config) {
 		// Sync probe concurrency to the manager so periodic health checks pick
 		// up WebUI changes after a reload (batch probes read it per request).
 		if s.mgr != nil {
+			s.mgr.SetStickyNode(cfg.Sticky.FixedNode)
 			s.mgr.SetProbeConcurrency(cfg.ProbeConcurrencyOrDefault())
 			s.mgr.SetProbeSchedule(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
 			// Re-derive the probe destination and strict-TLS mode so changes to
@@ -330,13 +340,19 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	// 返回全量节点，前端据此按状态统计（健康/拉黑/异常）并展示可解封的拉黑节点。
 	// 之前只返回 SnapshotFiltered(true)，导致 dashboard 的拉黑/异常计数恒为 0，
 	// 且拉黑节点不出现在表格里、无法解封。
-	allNodes := s.mgr.Snapshot()
+	allNodes := s.mgr.SnapshotVisible()
 	totalNodes := len(allNodes)
 
 	sweepActive, sweepDone, sweepTotal, sweepOK, sweepFail := s.mgr.ProbeSweepProgress()
+	s.cfgMu.RLock()
+	stickyEnabled := s.cfgSrc != nil && s.cfgSrc.Sticky.Enabled
+	s.cfgMu.RUnlock()
 	payload := map[string]any{
-		"nodes":       allNodes,
-		"total_nodes": totalNodes,
+		"nodes":          allNodes,
+		"total_nodes":    totalNodes,
+		"sticky_node":    s.mgr.StickyNode(),
+		"sticky_enabled": stickyEnabled,
+		"entry_exits":    s.mgr.EntryExits(),
 		"probe_sweep": map[string]any{
 			"active":    sweepActive,
 			"done":      sweepDone,
@@ -348,12 +364,97 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, payload)
 }
 
+// handleOnlineNodes returns a compact, automation-friendly list of nodes that
+// are currently verified online and eligible for routing.
+func (s *Server) handleOnlineNodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	nodes := make([]map[string]any, 0)
+	for _, snap := range s.mgr.SnapshotFiltered(true) {
+		nodes = append(nodes, map[string]any{
+			"tag":                snap.Tag,
+			"name":               snap.Name,
+			"mode":               snap.Mode,
+			"listen_address":     snap.ListenAddress,
+			"port":               snap.Port,
+			"latency_ms":         snap.LastLatencyMs,
+			"ip":                 snap.IP,
+			"region":             snap.Region,
+			"country":            snap.Country,
+			"active_connections": snap.ActiveConnections,
+		})
+	}
+	writeJSON(w, map[string]any{
+		"count":       len(nodes),
+		"sticky_node": s.mgr.StickyNode(),
+		"entry_exits": s.mgr.EntryExits(),
+		"nodes":       nodes,
+	})
+}
+
+func (s *Server) handleStickyNode(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{"tag": s.mgr.StickyNode()})
+	case http.MethodPut, http.MethodDelete:
+		tag := ""
+		if r.Method == http.MethodPut {
+			var req struct {
+				Tag string `json:"tag"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]any{"error": "请求格式错误"})
+				return
+			}
+			tag = strings.TrimSpace(req.Tag)
+		}
+		if tag != "" {
+			found := false
+			for _, snap := range s.mgr.SnapshotVisible() {
+				if snap.Tag == tag {
+					found = true
+					break
+				}
+			}
+			if !found {
+				w.WriteHeader(http.StatusNotFound)
+				writeJSON(w, map[string]any{"error": "节点不存在或属于已关闭订阅"})
+				return
+			}
+		}
+
+		s.cfgMu.Lock()
+		if s.cfgSrc == nil {
+			s.cfgMu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeJSON(w, map[string]any{"error": "配置管理未启用"})
+			return
+		}
+		s.cfgSrc.Sticky.FixedNode = tag
+		s.cfgSrc.Pool.FixedNode = ""
+		if err := s.cfgSrc.SaveSettings(); err != nil {
+			s.cfgMu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]any{"error": fmt.Sprintf("保存固定节点失败: %v", err)})
+			return
+		}
+		s.cfgMu.Unlock()
+		s.mgr.SetStickyNode(tag)
+		writeJSON(w, map[string]any{"tag": tag, "message": "固定出口已更新"})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	snapshots := s.mgr.Snapshot()
+	snapshots := s.mgr.SnapshotVisible()
 	var totalCalls, totalSuccess int64
 	debugNodes := make([]map[string]any, 0, len(snapshots))
 	for _, snap := range snapshots {
@@ -415,6 +516,7 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		result, err := s.mgr.ProbeWithResult(ctx, tag)
 		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
 		}
@@ -436,10 +538,11 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.mgr.Release(tag); err != nil {
+			w.WriteHeader(http.StatusNotFound)
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, map[string]any{"message": "已解除拉黑"})
+		writeJSON(w, map[string]any{"tag": tag, "message": "已解除拉黑"})
 	case "blacklist":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -455,18 +558,26 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Duration string `json:"duration"` // e.g. "1h", "24h", "30m"
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Duration == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "请求格式错误"})
+			return
+		}
+		if req.Duration == "" {
 			req.Duration = defaultDuration.String()
 		}
 		duration, err := time.ParseDuration(req.Duration)
 		if err != nil || duration <= 0 {
-			duration = defaultDuration
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "拉黑时长格式无效"})
+			return
 		}
 		if err := s.mgr.ManualBlacklist(tag, duration); err != nil {
+			w.WriteHeader(http.StatusNotFound)
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, map[string]any{"message": fmt.Sprintf("已拉黑 %s", duration)})
+		writeJSON(w, map[string]any{"tag": tag, "duration": duration.String(), "message": fmt.Sprintf("已拉黑 %s", duration)})
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -502,7 +613,7 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 	defer s.probeAllInFlight.Store(false)
 
 	// Get all nodes
-	snapshots := s.mgr.Snapshot()
+	snapshots := s.mgr.SnapshotVisible()
 	total := len(snapshots)
 	if total == 0 {
 		emptyData, _ := json.Marshal(map[string]any{"type": "complete", "total": 0, "success": 0, "failed": 0})
@@ -788,7 +899,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	var snapshots []Snapshot
 	if includeAll {
-		snapshots = s.mgr.Snapshot()
+		snapshots = s.mgr.SnapshotVisible()
 	} else {
 		snapshots = s.mgr.SnapshotFiltered(true)
 	}
@@ -942,8 +1053,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				"blacklist_duration": cfg.Pool.BlacklistDuration.String(),
 			}
 			resp["sticky"] = map[string]any{
-				"enabled": cfg.Sticky.Enabled,
-				"port":    cfg.Sticky.Port,
+				"enabled":    cfg.Sticky.Enabled,
+				"port":       cfg.Sticky.Port,
+				"fixed_node": cfg.Sticky.FixedNode,
 			}
 			resp["management"] = map[string]any{
 				"listen":            cfg.Management.Listen,
@@ -1210,6 +1322,8 @@ func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request
 			interval = 1 * time.Hour // default
 		}
 
+		previousURLs, _, _ := s.subscriptionConfigSnapshot()
+
 		// Clean URLs
 		var cleanURLs []string
 		for _, u := range req.Subscriptions {
@@ -1237,14 +1351,21 @@ func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request
 
 		// Hot-reload subscription manager and wait for refresh to complete
 		if s.subRefresher != nil {
-			if err := s.subRefresher.UpdateConfigAndRefresh(cleanURLs, req.Enabled, interval); err != nil {
+			refreshURLs := subscriptionAddedURLs(previousURLs, cleanURLs)
+			var refreshErr error
+			if len(refreshURLs) > 0 && !subscriptionListRemovesURLs(previousURLs, cleanURLs) {
+				refreshErr = s.subRefresher.UpdateConfigAndRefreshSelected(cleanURLs, req.Enabled, interval, refreshURLs)
+			} else {
+				refreshErr = s.subRefresher.UpdateConfigAndRefresh(cleanURLs, req.Enabled, interval)
+			}
+			if refreshErr != nil {
 				// Config was saved but refresh failed — report partial success
 				writeJSON(w, map[string]any{
-					"message":       fmt.Sprintf("订阅配置已保存，但刷新失败: %v", err),
+					"message":       fmt.Sprintf("订阅配置已保存，但刷新失败: %v", refreshErr),
 					"subscriptions": cleanURLs,
 					"enabled":       req.Enabled,
 					"interval":      interval.String(),
-					"refresh_error": err.Error(),
+					"refresh_error": refreshErr.Error(),
 				})
 				return
 			}
@@ -1264,9 +1385,43 @@ func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request
 	}
 }
 
+func subscriptionAddedURLs(previous, current []string) []string {
+	present := make(map[string]struct{}, len(previous))
+	for _, rawURL := range previous {
+		present[rawURL] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(current))
+	added := make([]string, 0)
+	for _, rawURL := range current {
+		if _, ok := present[rawURL]; ok {
+			continue
+		}
+		if _, ok := seen[rawURL]; ok {
+			continue
+		}
+		seen[rawURL] = struct{}{}
+		added = append(added, rawURL)
+	}
+	return added
+}
+
+func subscriptionListRemovesURLs(previous, current []string) bool {
+	present := make(map[string]struct{}, len(current))
+	for _, rawURL := range current {
+		present[rawURL] = struct{}{}
+	}
+	for _, rawURL := range previous {
+		if _, ok := present[rawURL]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
 type subscriptionMutationRequest struct {
 	URL         string `json:"url"`
 	OriginalURL string `json:"original_url"`
+	Enabled     *bool  `json:"enabled,omitempty"`
 }
 
 func validateSubscriptionURL(rawURL string) error {
@@ -1292,7 +1447,7 @@ func (s *Server) subscriptionConfigSnapshot() (urls []string, enabled bool, inte
 	return
 }
 
-func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval time.Duration) error {
+func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval time.Duration, refreshURLs ...string) error {
 	urls = append([]string(nil), urls...)
 	s.cfgMu.Lock()
 	if s.cfgSrc == nil {
@@ -1300,6 +1455,7 @@ func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval t
 		return errors.New("配置管理未启用")
 	}
 	s.cfgSrc.Subscriptions = urls
+	s.cfgSrc.PruneDisabledSubscriptions()
 	s.cfgSrc.SubscriptionRefresh.Enabled = enabled
 	s.cfgSrc.SubscriptionRefresh.Interval = interval
 	if err := s.cfgSrc.SaveSettings(); err != nil {
@@ -1309,6 +1465,9 @@ func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval t
 	s.cfgMu.Unlock()
 	if s.subRefresher == nil {
 		return errors.New("订阅管理器未启用")
+	}
+	if len(refreshURLs) > 0 {
+		return s.subRefresher.UpdateConfigAndRefreshSelected(urls, enabled, interval, refreshURLs)
 	}
 	return s.subRefresher.UpdateConfigAndRefresh(urls, enabled, interval)
 }
@@ -1322,7 +1481,14 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 		status = s.subRefresher.Status()
 	} else {
 		for _, rawURL := range urls {
-			items = append(items, SubscriptionInfo{URL: rawURL, Status: "pending"})
+			s.cfgMu.RLock()
+			subscriptionEnabled := s.cfgSrc == nil || s.cfgSrc.SubscriptionEnabled(rawURL)
+			s.cfgMu.RUnlock()
+			statusName := "pending"
+			if !subscriptionEnabled {
+				statusName = "disabled"
+			}
+			items = append(items, SubscriptionInfo{URL: rawURL, Status: statusName, Enabled: subscriptionEnabled})
 		}
 	}
 	return map[string]any{
@@ -1346,7 +1512,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeJSON(w, s.subscriptionManagementPayload())
 		return
-	case http.MethodPost, http.MethodPut, http.MethodDelete:
+	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
 		var req subscriptionMutationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -1355,6 +1521,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		}
 		req.URL = strings.TrimSpace(req.URL)
 		req.OriginalURL = strings.TrimSpace(req.OriginalURL)
+		var refreshURLs []string
 
 		switch r.Method {
 		case http.MethodPost:
@@ -1371,6 +1538,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			urls = append(urls, req.URL)
+			refreshURLs = []string{req.URL}
 		case http.MethodPut:
 			if req.OriginalURL == "" {
 				req.OriginalURL = req.URL
@@ -1396,6 +1564,14 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, map[string]any{"error": "订阅不存在"})
 				return
 			}
+			if req.OriginalURL != req.URL {
+				s.cfgMu.Lock()
+				if s.cfgSrc != nil && !s.cfgSrc.SubscriptionEnabled(req.OriginalURL) {
+					s.cfgSrc.SetSubscriptionEnabled(req.OriginalURL, true)
+					s.cfgSrc.SetSubscriptionEnabled(req.URL, false)
+				}
+				s.cfgMu.Unlock()
+			}
 		case http.MethodDelete:
 			target := req.URL
 			filtered := make([]string, 0, len(urls))
@@ -1413,9 +1589,43 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			urls = filtered
+			s.cfgMu.Lock()
+			if s.cfgSrc != nil {
+				s.cfgSrc.SetSubscriptionEnabled(target, true)
+			}
+			s.cfgMu.Unlock()
+		case http.MethodPatch:
+			if req.URL == "" || req.Enabled == nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]any{"error": "缺少订阅地址或启用状态"})
+				return
+			}
+			if s.subRefresher == nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				writeJSON(w, map[string]any{"error": "订阅管理器未启用"})
+				return
+			}
+			if err := s.subRefresher.SetSubscriptionEnabled(req.URL, *req.Enabled); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]any{"error": err.Error()})
+				return
+			}
+			s.cfgMu.Lock()
+			if s.cfgSrc != nil {
+				s.cfgSrc.SetSubscriptionEnabled(req.URL, *req.Enabled)
+				if err := s.cfgSrc.SaveSettings(); err != nil {
+					s.cfgMu.Unlock()
+					w.WriteHeader(http.StatusInternalServerError)
+					writeJSON(w, map[string]any{"error": fmt.Sprintf("保存订阅状态失败: %v", err)})
+					return
+				}
+			}
+			s.cfgMu.Unlock()
+			writeJSON(w, s.subscriptionManagementPayload())
+			return
 		}
 
-		if err := s.applySubscriptionConfig(urls, enabled, interval); err != nil {
+		if err := s.applySubscriptionConfig(urls, enabled, interval, refreshURLs...); err != nil {
 			writeJSON(w, map[string]any{"message": "订阅配置已保存，但刷新失败", "refresh_error": err.Error()})
 			return
 		}

@@ -58,9 +58,11 @@ func Build(cfg *config.Config) (option.Options, error) {
 		memberTags = append(memberTags, tag)
 		baseOutbounds = append(baseOutbounds, outbound)
 		meta := poolout.MemberMeta{
-			Name: node.Name,
-			URI:  node.URI,
-			Mode: cfg.Mode,
+			Name:            node.Name,
+			URI:             node.URI,
+			Mode:            cfg.Mode,
+			SubscriptionURL: node.SubscriptionURL,
+			Suppressed:      node.Disabled,
 		}
 		// For multi-port and hybrid modes, use per-node port
 		if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
@@ -118,6 +120,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 			RetryEnabled:      cfg.Pool.RetryEnabledOrDefault(),
 			RetryAttempts:     cfg.Pool.RetryAttempts,
 			Metadata:          metadata,
+			EntryPort:         cfg.Listener.Port,
 		}
 		outbounds = append(outbounds, option.Outbound{
 			Type:    poolout.Type,
@@ -137,14 +140,16 @@ func Build(cfg *config.Config) (option.Options, error) {
 			}
 			inbounds = append(inbounds, stickyInbound)
 			stickyOptions := poolout.Options{
-				Mode:              cfg.Pool.Mode,
-				Members:           memberTags,
-				FailureThreshold:  cfg.Pool.FailureThreshold,
-				BlacklistDuration: cfg.Pool.BlacklistDuration,
-				RetryEnabled:      cfg.Pool.RetryEnabledOrDefault(),
-				RetryAttempts:     cfg.Pool.RetryAttempts,
-				Metadata:          metadata,
-				Sticky:            true,
+				Mode:                 "latency",
+				Members:              memberTags,
+				FailureThreshold:     cfg.Pool.FailureThreshold,
+				BlacklistDuration:    cfg.Pool.BlacklistDuration,
+				RetryEnabled:         cfg.Pool.RetryEnabledOrDefault(),
+				RetryAttempts:        cfg.Pool.RetryAttempts,
+				Metadata:             metadata,
+				Sticky:               true,
+				HonorStickySelection: true,
+				EntryPort:            cfg.Sticky.Port,
 			}
 			outbounds = append(outbounds, option.Outbound{
 				Type:    poolout.Type,

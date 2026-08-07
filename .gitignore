@@ -7,6 +7,7 @@ Proxy2API-*
 config.yaml
 nodes.txt
 node_ports.json
+.subscription-cache.json
 
 # GeoIP database (auto-downloaded)
 *.mmdb
@@ -31,6 +32,7 @@ logs/
 
 # Go
 vendor/
+.go-cache/
 
 # Test artifacts
 coverage.out

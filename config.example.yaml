@@ -74,6 +74,8 @@ pool:
 sticky:
   enabled: false        # 是否启用粘性代理端口
   port: 2324            # 粘性端口（留空或 0 则默认为 listener.port + 1）
+  # 指定粘性入口的出口节点 tag；留空时默认选择最低延迟节点
+  fixed_node: ""
 
 # ───────────────────────────────────────────────────────────────
 # 多端口模式配置（multi-port / hybrid 模式使用）
@@ -129,6 +131,9 @@ dns:
 # subscriptions:
 #   - "https://example.com/subscribe?token=xxx"
 #   - "https://another.com/api/v1/client/subscribe?token=yyy"
+# 暂停的订阅仍保留本地节点缓存，但不更新、不探测、不展示
+# disabled_subscriptions:
+#   - "https://example.com/subscribe?token=xxx"
 
 # ───────────────────────────────────────────────────────────────
 # 方式 2: 节点文件（每行一个代理 URI）

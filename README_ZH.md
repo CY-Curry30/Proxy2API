@@ -87,12 +87,13 @@ nodes_file: nodes.txt
 
 ## 粘性代理（可选，仅 Pool/Hybrid 模式）
 
-开启后会额外监听一个独立端口（默认 `listener.port + 1`，即 `2324`），与原 `2323` 端口共存。通过粘性端口接入的客户端会按**来源 IP** 固定绑定到同一个上游节点，保持出口 IP 稳定（避免轮询导致 IP 频繁跳变触发风控/掉登录态）。绑定为永久保持，仅当该节点被拉黑/移除时才重新选择。监听地址与认证复用 `listener` 配置。
+开启后会额外监听一个独立端口（默认 `listener.port + 1`，即 `2324`），与原 `2323` 端口共存。粘性入口可通过监控面板指定出口节点；未指定时默认选择最低延迟节点，再按**来源 IP** 保持绑定。原主入口始终按 `pool.mode` 调度，不受粘性入口的指定节点影响。监听地址与认证复用 `listener` 配置。
 
 ```yaml
 sticky:
   enabled: true
   port: 2324    # 留空或 0 则默认为 listener.port + 1
+  fixed_node: "" # 可选；留空时选择最低延迟节点
 ```
 
 ## DNS 配置说明
@@ -163,17 +164,47 @@ dns:
 - `POST /api/auth`
 - `GET|PUT /api/settings`
 - `GET /api/nodes`
+- `GET /api/nodes/online`（仅返回当前在线节点的端口、延迟、IP 和地域等信息）
 - `POST /api/nodes/{tag}/probe`
 - `POST /api/nodes/{tag}/release`
-- `POST /api/nodes/{tag}/blacklist`
+- `POST /api/nodes/{tag}/blacklist`（可选 JSON：`{"duration":"1h"}`）
 - `POST /api/nodes/probe-all`（SSE）
+- `GET|PUT|DELETE /api/sticky/fixed-node`（指定粘性入口出口；清空后恢复最低延迟选择）
 - `GET /api/export`
+- `GET|POST|PUT|PATCH|DELETE /api/subscriptions`（`PATCH` 用于开启/关闭订阅）
 - `GET|PUT /api/subscription/config`
 - `GET|POST /api/subscription/status|refresh`
 - `GET|POST|PUT|DELETE /api/nodes/config[...]`
 - `POST /api/reload`
 
 `management.password` 为空时，Web/API 不要求登录。
+
+Python 调用示例：
+
+```python
+from urllib.parse import quote
+
+import requests
+
+base = "http://127.0.0.1:9091"
+session = requests.Session()
+
+# 配置了 management.password 时需要先登录；未配置时删除此行即可。
+session.post(f"{base}/api/auth", json={"password": "your-password"}).raise_for_status()
+
+nodes = session.get(f"{base}/api/nodes/online").json()
+tag = nodes["nodes"][0]["tag"]
+
+session.post(
+    f"{base}/api/nodes/{quote(tag, safe='')}/blacklist",
+    json={"duration": "1h"},
+).raise_for_status()
+session.post(f"{base}/api/nodes/{quote(tag, safe='')}/release").raise_for_status()
+
+# 指定粘性入口出口；DELETE 恢复最低延迟选择。
+session.put(f"{base}/api/sticky/fixed-node", json={"tag": tag}).raise_for_status()
+session.delete(f"{base}/api/sticky/fixed-node").raise_for_status()
+```
 
 ## 重要运行说明
 

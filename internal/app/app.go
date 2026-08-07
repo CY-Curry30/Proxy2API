@@ -35,6 +35,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		ProxyPassword:    proxyPassword,
 		ExternalIP:       cfg.ExternalIP,
 		ProbeConcurrency: cfg.ProbeConcurrencyOrDefault(),
+		StickyNode:       cfg.Sticky.FixedNode,
 	}
 
 	// Create and start BoxManager

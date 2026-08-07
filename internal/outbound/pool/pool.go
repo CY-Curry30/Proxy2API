@@ -52,6 +52,12 @@ type Options struct {
 	// Multi-member pools pick a different member per retry; single-member pools retry the same member.
 	RetryAttempts int
 	Metadata      map[string]MemberMeta
+	// HonorStickySelection makes this pool follow the monitor's sticky-entry
+	// node choice. It is enabled only for the dedicated sticky listener.
+	HonorStickySelection bool
+	// EntryPort identifies a shared listener in the monitor. Successful dials
+	// update that listener's most recent exit node for the WebUI.
+	EntryPort uint16
 	// Sticky pins each client (by source IP) to a single member, only
 	// re-selecting when the pinned member becomes unavailable. Pool/hybrid entry only.
 	Sticky bool
@@ -59,11 +65,13 @@ type Options struct {
 
 // MemberMeta carries optional descriptive information for monitoring UI.
 type MemberMeta struct {
-	Name          string
-	URI           string
-	Mode          string
-	ListenAddress string
-	Port          uint16
+	Name            string
+	URI             string
+	Mode            string
+	ListenAddress   string
+	Port            uint16
+	SubscriptionURL string
+	Suppressed      bool
 }
 
 // Register wires the pool outbound into the registry.
@@ -80,21 +88,22 @@ type memberState struct {
 
 type poolOutbound struct {
 	outbound.Adapter
-	ctx            context.Context
-	logger         singlog.ContextLogger
-	manager        adapter.OutboundManager
-	options        Options
-	mode           string
-	members        []*memberState
-	mu             sync.Mutex
-	rrCounter      atomic.Uint32
-	rng            *rand.Rand
-	rngMu          sync.Mutex // protects rng for random mode
-	monitor        *monitor.Manager
-	candidatesPool sync.Pool
-	sticky         bool
-	stickyMu       sync.Mutex        // protects stickyMap
-	stickyMap      map[string]string // sticky key (client source IP) -> member tag
+	ctx             context.Context
+	logger          singlog.ContextLogger
+	manager         adapter.OutboundManager
+	options         Options
+	mode            string
+	members         []*memberState
+	mu              sync.Mutex
+	rrCounter       atomic.Uint32
+	rng             *rand.Rand
+	rngMu           sync.Mutex // protects rng for random mode
+	monitor         *monitor.Manager
+	candidatesPool  sync.Pool
+	sticky          bool
+	stickyMu        sync.Mutex        // protects stickyMap
+	stickyMap       map[string]string // sticky key (client source IP) -> member tag
+	stickySelection string            // last configured sticky node; protects stale pins
 }
 
 func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger, tag string, options Options) (adapter.Outbound, error) {
@@ -140,12 +149,14 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 
 			meta := normalized.Metadata[memberTag]
 			info := monitor.NodeInfo{
-				Tag:           memberTag,
-				Name:          meta.Name,
-				URI:           meta.URI,
-				Mode:          meta.Mode,
-				ListenAddress: meta.ListenAddress,
-				Port:          meta.Port,
+				Tag:             memberTag,
+				Name:            meta.Name,
+				URI:             meta.URI,
+				Mode:            meta.Mode,
+				ListenAddress:   meta.ListenAddress,
+				Port:            meta.Port,
+				SubscriptionURL: meta.SubscriptionURL,
+				Suppressed:      meta.Suppressed,
 			}
 			entry := monitorMgr.Register(info)
 			if entry != nil {
@@ -243,12 +254,14 @@ func (p *poolOutbound) initializeMembersLocked() error {
 		if p.monitor != nil {
 			meta := p.options.Metadata[tag]
 			info := monitor.NodeInfo{
-				Tag:           tag,
-				Name:          meta.Name,
-				URI:           meta.URI,
-				Mode:          meta.Mode,
-				ListenAddress: meta.ListenAddress,
-				Port:          meta.Port,
+				Tag:             tag,
+				Name:            meta.Name,
+				URI:             meta.URI,
+				Mode:            meta.Mode,
+				ListenAddress:   meta.ListenAddress,
+				Port:            meta.Port,
+				SubscriptionURL: meta.SubscriptionURL,
+				Suppressed:      meta.Suppressed,
 			}
 			entry := p.monitor.Register(info)
 			if entry != nil {
@@ -400,6 +413,21 @@ func (p *poolOutbound) pickMemberFiltered(network string, tried map[string]bool,
 		p.mu.Unlock()
 	}
 
+	if p.options.HonorStickySelection && p.monitor != nil {
+		selectedTag := p.monitor.StickyNode()
+		p.syncStickySelection(selectedTag)
+		if selectedTag != "" {
+			for _, member := range candidates {
+				if member.tag == selectedTag {
+					p.putCandidateBuffer(candidates)
+					return member, nil
+				}
+			}
+			p.putCandidateBuffer(candidates)
+			return nil, E.New("selected sticky proxy node is unavailable: ", selectedTag)
+		}
+	}
+
 	if len(candidates) == 0 {
 		p.putCandidateBuffer(candidates)
 		return nil, E.New("no healthy proxy available")
@@ -461,6 +489,9 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf []*memberState) []*memberState {
 	result := buf[:0]
 	for _, member := range p.members {
+		if member.entry != nil && member.entry.Suppressed() {
+			continue
+		}
 		// Check blacklist via shared state (auto-clears if expired)
 		if member.shared != nil && member.shared.isBlacklisted(now) {
 			// Log blacklisted nodes for debugging
@@ -483,13 +514,24 @@ func (p *poolOutbound) releaseIfAllBlacklistedLocked(now time.Time) bool {
 		return false
 	}
 	// Check if all members are blacklisted
+	activeMembers := 0
 	for _, member := range p.members {
+		if member.entry != nil && member.entry.Suppressed() {
+			continue
+		}
+		activeMembers++
 		if member.shared == nil || !member.shared.isBlacklisted(now) {
 			return false
 		}
 	}
+	if activeMembers == 0 {
+		return false
+	}
 	// All blacklisted, force release all
 	for _, member := range p.members {
+		if member.entry != nil && member.entry.Suppressed() {
+			continue
+		}
 		if member.shared != nil {
 			member.shared.forceRelease()
 		}
@@ -542,6 +584,23 @@ func (p *poolOutbound) selectSticky(candidates []*memberState, stickyKey string)
 		p.stickyMap[stickyKey] = member.tag
 	}
 	return member
+}
+
+// syncStickySelection invalidates source-IP pins whenever the configured
+// sticky node changes. Clearing a specified node therefore immediately returns
+// clients to lowest-latency selection instead of reviving old pins.
+func (p *poolOutbound) syncStickySelection(tag string) {
+	if !p.sticky {
+		return
+	}
+	tag = strings.TrimSpace(tag)
+	p.stickyMu.Lock()
+	defer p.stickyMu.Unlock()
+	if tag == p.stickySelection {
+		return
+	}
+	clear(p.stickyMap)
+	p.stickySelection = tag
 }
 
 // selectByMode applies the configured scheduling strategy.
@@ -624,6 +683,9 @@ func (p *poolOutbound) recordFailure(member *memberState, cause error) {
 func (p *poolOutbound) recordSuccess(member *memberState) {
 	if member.shared != nil {
 		member.shared.recordSuccess()
+	}
+	if p.monitor != nil && p.options.EntryPort > 0 {
+		p.monitor.RecordEntryExit(p.options.EntryPort, member.tag)
 	}
 }
 
