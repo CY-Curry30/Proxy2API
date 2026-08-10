@@ -14,6 +14,7 @@ import (
 	mathrand "math/rand"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -140,6 +141,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/settings", s.withAuth(s.handleSettings))
 	mux.HandleFunc("/api/nodes", s.withAuth(s.handleNodes))
 	mux.HandleFunc("/api/nodes/online", s.withAuth(s.handleOnlineNodes))
+	mux.HandleFunc("/api/nodes/by-port", s.withAuth(s.handleNodeByPort))
 	mux.HandleFunc("/api/nodes/config", s.withAuth(s.handleConfigNodes))
 	mux.HandleFunc("/api/nodes/config/", s.withAuth(s.handleConfigNodeItem))
 	mux.HandleFunc("/api/nodes/import", s.withAuth(s.handleNodeImport))
@@ -392,6 +394,63 @@ func (s *Server) handleOnlineNodes(w http.ResponseWriter, r *http.Request) {
 		"entry_exits": s.mgr.EntryExits(),
 		"nodes":       nodes,
 	})
+}
+
+// handleNodeByPort resolves the node currently associated with a proxy entry
+// port. Shared pool entries use the most recent successful exit recorded by
+// the pool; multi-port entries resolve directly from the node's assigned port.
+func (s *Server) handleNodeByPort(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	port, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("port")))
+	if err != nil || port < 1 || port > 65535 {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "port must be an integer between 1 and 65535"})
+		return
+	}
+
+	wantedPort := uint16(port)
+	snapshots := s.mgr.SnapshotVisible()
+	entryExits := s.mgr.EntryExits()
+
+	// Shared pool and sticky entries record the most recent successful exit.
+	if tag, ok := entryExits[wantedPort]; ok {
+		for _, snap := range snapshots {
+			if snap.Tag == tag {
+				writeJSON(w, map[string]any{
+					"port":        wantedPort,
+					"tag":         snap.Tag,
+					"source":      "entry_exit",
+					"node":        snap,
+					"entry_exits": entryExits,
+				})
+				return
+			}
+		}
+	}
+
+	// In multi-port or hybrid mode each node owns its assigned port. Do not
+	// apply this fallback to pool mode, where every node reports the shared
+	// listener port but no node is current until a request succeeds.
+	for _, snap := range snapshots {
+		if (snap.Mode == "multi-port" || snap.Mode == "hybrid") && snap.Port == wantedPort {
+			writeJSON(w, map[string]any{
+				"port":        wantedPort,
+				"tag":         snap.Tag,
+				"source":      "node_port",
+				"node":        snap,
+				"entry_exits": entryExits,
+			})
+			return
+		}
+	}
+
+	// A shared port may not have served a successful request yet. Treat that
+	// state as an empty result rather than an HTTP error for polling clients.
+	writeJSON(w, map[string]any{})
 }
 
 func (s *Server) handleStickyNode(w http.ResponseWriter, r *http.Request) {
