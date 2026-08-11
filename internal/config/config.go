@@ -485,8 +485,9 @@ func (c *Config) normalize() error {
 		c.Nodes = append(c.Nodes, fileNodes...)
 	}
 
-	// Load nodes from enabled subscriptions (highest priority - writes to nodes.txt).
-	// Paused subscriptions remain configured but are excluded from the active pool.
+	// Restore subscription nodes from local cache only. Startup must never fetch
+	// remote subscriptions or rewrite nodes.txt; remote changes are applied only
+	// by an explicit refresh or by the optional periodic refresh loop.
 	if len(c.Subscriptions) > 0 {
 		nodesFilePath := c.NodesFile
 		if nodesFilePath == "" {
@@ -498,56 +499,25 @@ func (c *Config) normalize() error {
 			filepath.Join(filepath.Dir(c.filePath), SubscriptionCacheFileName),
 		)
 
-		activeSubscriptions := c.ActiveSubscriptions()
 		var subNodes []NodeConfig
-		var stats SubscriptionFetchStats
-		if len(activeSubscriptions) > 0 {
-			subNodes, stats = FetchSubscriptionNodes(context.Background(), activeSubscriptions, SubscriptionFetchOptions{
-				Timeout:     c.SubscriptionRefresh.Timeout,
-				Concurrency: c.SubscriptionRefresh.FetchConcurrency,
-				Loggerf:     log.Printf,
-			})
-			if stats.Failed > 0 {
-				log.Printf("⚠️  Subscription initialization skipped %d/%d unique URLs; last error: %v", stats.Failed, stats.UniqueURLs, stats.LastError)
-			}
-			log.Printf("✅ Subscription initialization fetched %d nodes from %d/%d unique URLs in parallel (deduped_urls=%d, deduped_nodes=%d)",
-				stats.Nodes, stats.Successful, stats.UniqueURLs, stats.DedupedURLs, stats.DedupedNodes)
-		}
-		if len(c.DisabledSubscriptions) > 0 && perSubscriptionCacheErr == nil {
-			subNodes = c.mergeSubscriptionNodeCache(subNodes, perSubscriptionCache)
-			log.Printf("✅ Restored per-subscription cache for paused subscriptions (%d cached nodes total)", len(subNodes))
-		} else if len(activeSubscriptions) == 0 && cacheErr == nil {
-			// Keep the service startable when every subscription is paused. These
-			// legacy aggregate-cache nodes stay suppressed until a subscription is
-			// restored from its per-subscription cache by the runtime manager.
+		if perSubscriptionCacheErr == nil && len(perSubscriptionCache) > 0 {
+			subNodes = c.mergeSubscriptionNodeCache(nil, perSubscriptionCache)
+			log.Printf("✅ Restored %d subscription nodes from local per-subscription cache", len(subNodes))
+		} else if cacheErr == nil {
+			// Legacy aggregate cache has no ownership metadata. It is safe to use as
+			// the active startup set, except when every subscription is paused.
 			subNodes = cachedNodes
+			allSubscriptionsPaused := len(c.ActiveSubscriptions()) == 0
 			for idx := range subNodes {
-				subNodes[idx].Source = NodeSourceSubscription
-				subNodes[idx].Disabled = true
+				subNodes[idx].Disabled = allSubscriptionsPaused
 			}
+			log.Printf("✅ Restored %d subscription nodes from local aggregate cache", len(subNodes))
+		} else {
+			log.Printf("⚠️ No local subscription node cache is available; use manual refresh after startup")
 		}
-		// Mark subscription nodes and write to nodes.txt
+
 		for idx := range subNodes {
 			subNodes[idx].Source = NodeSourceSubscription
-		}
-		useCached, reason := false, ""
-		if len(activeSubscriptions) > 0 && len(c.DisabledSubscriptions) == 0 {
-			useCached, reason = shouldUseCachedSubscriptionNodes(subNodes, cachedNodes, cacheErr, stats)
-		}
-		if useCached {
-			log.Printf("⚠️  Keeping cached subscription nodes from %s (%d cached vs %d fetched): %s",
-				nodesFilePath, len(cachedNodes), len(subNodes), reason)
-			for idx := range cachedNodes {
-				cachedNodes[idx].Source = NodeSourceSubscription
-			}
-			subNodes = cachedNodes
-		} else if len(subNodes) > 0 {
-			// Write subscription nodes to nodes.txt
-			if err := writeNodesToFile(nodesFilePath, subNodes); err != nil {
-				log.Printf("⚠️ Failed to write nodes to %q: %v", nodesFilePath, err)
-			} else {
-				log.Printf("✅ Written %d subscription nodes to %s", len(subNodes), nodesFilePath)
-			}
 		}
 		for _, node := range subNodes {
 			if node.Disabled {
@@ -1121,19 +1091,6 @@ func (c *Config) mergeSubscriptionNodeCache(fetched []NodeConfig, cached map[str
 		}
 	}
 	return merged
-}
-
-func shouldUseCachedSubscriptionNodes(fetched []NodeConfig, cached []NodeConfig, cacheErr error, stats SubscriptionFetchStats) (bool, string) {
-	if cacheErr != nil || len(cached) == 0 {
-		return false, ""
-	}
-	if len(fetched) == 0 {
-		return true, "all subscriptions failed or returned no usable nodes"
-	}
-	if stats.Failed > 0 && len(fetched) < len(cached) {
-		return true, "partial refresh would reduce the node set"
-	}
-	return false, ""
 }
 
 func normalizeSubscriptionFetchConcurrency(v int) int {

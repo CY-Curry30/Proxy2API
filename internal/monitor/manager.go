@@ -90,7 +90,7 @@ type ProbeResult struct {
 	TraceAttempts     int
 }
 
-type probeFunc func(ctx context.Context) (ProbeResult, error)
+type probeFunc func(ctx context.Context, report func(ProbeResult)) (ProbeResult, error)
 type releaseFunc func()
 
 type EntryHandle struct {
@@ -416,10 +416,8 @@ func (m *Manager) StartPeriodicHealthCheck(interval, timeout time.Duration) {
 	m.SetProbeSchedule(interval, timeout)
 	m.periodicOnce.Do(func() {
 		go func() {
-			// Run one sweep immediately, then use the live schedule.
-			_, currentTimeout := m.probeSchedule()
-			m.probeAllNodes(currentTimeout)
-
+			// Startup only arms the timer. Initial probing is manual; automatic
+			// probing begins after the first configured interval elapses.
 			currentInterval, _ := m.probeSchedule()
 			timer := time.NewTimer(currentInterval)
 			defer timer.Stop()
@@ -429,7 +427,7 @@ func (m *Manager) StartPeriodicHealthCheck(interval, timeout time.Duration) {
 				case <-m.ctx.Done():
 					return
 				case <-timer.C:
-					_, currentTimeout = m.probeSchedule()
+					_, currentTimeout := m.probeSchedule()
 					m.probeAllNodes(currentTimeout)
 					currentInterval, _ = m.probeSchedule()
 					timer.Reset(currentInterval)
@@ -561,34 +559,7 @@ func (m *Manager) runProbeSweep(timeout time.Duration) {
 			ctx, cancel := context.WithTimeout(m.ctx, timeout)
 			defer cancel()
 
-			// Race the probe against its deadline. Some sing-box protocol dials
-			// block inside DialContext without honoring ctx, so a direct
-			// probe(ctx) call could never return — wedging this worker's
-			// semaphore slot and hanging the whole sweep (wg.Wait never returns;
-			// the dashboard shows a stuck init and 0 available even though the
-			// nodes are reachable). Run the probe in its own goroutine and select
-			// on ctx.Done() so the worker always returns within timeout. The
-			// buffered channel lets the stalled goroutine deliver its result
-			// later (its connection watchdog force-closes on ctx.Done) without
-			// blocking on send.
-			type probeOutcome struct {
-				result ProbeResult
-				err    error
-			}
-			resCh := make(chan probeOutcome, 1)
-			go func() {
-				result, err := probe(ctx)
-				resCh <- probeOutcome{result: result, err: err}
-			}()
-
-			var result ProbeResult
-			var err error
-			select {
-			case out := <-resCh:
-				result, err = out.result, out.err
-			case <-ctx.Done():
-				err = ctx.Err()
-			}
+			result, err := executeProbe(ctx, probe, entry.applyProbeProgress)
 
 			entry.mu.RLock()
 			uri := entry.info.URI
@@ -761,38 +732,80 @@ func (m *Manager) ProbeWithResult(ctx context.Context, tag string) (ProbeResult,
 		return ProbeResult{}, errors.New("node belongs to a paused subscription")
 	}
 
-	// Enforce the context deadline at this level. Some sing-box outbound
-	// protocols block inside DialContext without honoring ctx cancellation, so a
-	// probe could otherwise never return — which in batch mode occupies a
-	// semaphore slot forever and freezes the whole run (wg.Wait never returns,
-	// WebUI stuck at "N/M"). Run the probe in its own goroutine and race it
-	// against ctx: if ctx fires first we return a timeout error and let the
-	// stuck goroutine unwind on its own (its conn watchdog force-closes on
-	// ctx.Done). The result channel is buffered so that late goroutine never
-	// blocks on send.
-	type probeOutcome struct {
-		result ProbeResult
-		err    error
-	}
-	resCh := make(chan probeOutcome, 1)
-	go func() {
-		result, err := e.probe(ctx)
-		resCh <- probeOutcome{result: result, err: err}
-	}()
-
-	var result ProbeResult
-	select {
-	case out := <-resCh:
-		result, err = out.result, out.err
-	case <-ctx.Done():
-		err = ctx.Err()
-	}
+	result, err := executeProbe(ctx, e.probe, e.applyProbeProgress)
 
 	e.applyProbeResult(result, err)
 	if err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+// executeProbe enforces the outer deadline while retaining sub-probe progress.
+// Some outbound protocols do not promptly honor context cancellation, so the
+// probe still runs in a goroutine. Progress is merged synchronously before it is
+// applied, which prevents an outer timeout from replacing a successful latency
+// or location result with a zero-value ProbeResult.
+func executeProbe(ctx context.Context, probe probeFunc, onProgress func(ProbeResult)) (ProbeResult, error) {
+	type probeOutcome struct {
+		result ProbeResult
+		err    error
+	}
+
+	var progressMu sync.Mutex
+	var latest ProbeResult
+	report := func(update ProbeResult) {
+		progressMu.Lock()
+		latest = mergeProbeResult(latest, update)
+		snapshot := latest
+		progressMu.Unlock()
+		if onProgress != nil {
+			onProgress(snapshot)
+		}
+	}
+
+	resCh := make(chan probeOutcome, 1)
+	go func() {
+		result, err := probe(ctx, report)
+		resCh <- probeOutcome{result: result, err: err}
+	}()
+
+	select {
+	case out := <-resCh:
+		progressMu.Lock()
+		result := mergeProbeResult(latest, out.result)
+		progressMu.Unlock()
+		return result, out.err
+	case <-ctx.Done():
+		progressMu.Lock()
+		result := latest
+		progressMu.Unlock()
+		return result, ctx.Err()
+	}
+}
+
+func mergeProbeResult(current, update ProbeResult) ProbeResult {
+	if update.ConnectivityOK {
+		current.ConnectivityOK = true
+		current.ConnectivityError = ""
+		current.Latency = update.Latency
+	} else if update.ConnectivityError != "" {
+		current.ConnectivityError = update.ConnectivityError
+	}
+
+	if update.TraceOK {
+		current.TraceOK = true
+		current.TraceError = ""
+		current.IP = update.IP
+		current.Region = update.Region
+		current.Country = update.Country
+	} else if update.TraceError != "" {
+		current.TraceError = update.TraceError
+	}
+	if update.TraceAttempts > current.TraceAttempts {
+		current.TraceAttempts = update.TraceAttempts
+	}
+	return current
 }
 
 // Release clears blacklist state for the given node.
@@ -881,7 +894,33 @@ func (e *entry) applyProbeResult(result ProbeResult, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.initialCheckDone = true
+	e.applyProbeProgressLocked(result)
 
+	healthy := err == nil && result.ConnectivityOK && result.TraceOK
+	e.available = healthy
+	if healthy {
+		e.lastOK = time.Now()
+		e.lastError = ""
+		return
+	}
+
+	e.lastFail = time.Now()
+	if err != nil {
+		e.lastError = err.Error()
+	} else {
+		// Defensive fallback for custom probe functions returning an incomplete
+		// result without an error.
+		e.lastError = "probe incomplete: generate_204 and trace must both succeed"
+	}
+}
+
+func (e *entry) applyProbeProgress(result ProbeResult) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.applyProbeProgressLocked(result)
+}
+
+func (e *entry) applyProbeProgressLocked(result ProbeResult) {
 	// Each successful sub-probe updates only the data it owns. Failed checks do
 	// not erase the last known-good value from the other check.
 	if result.ConnectivityOK {
@@ -899,21 +938,18 @@ func (e *entry) applyProbeResult(result ProbeResult, err error) {
 		}
 	}
 
-	healthy := err == nil && result.ConnectivityOK && result.TraceOK
-	e.available = healthy
-	if healthy {
-		e.lastOK = time.Now()
-		e.lastError = ""
-		return
+	var progressErrors []string
+	if result.ConnectivityError != "" {
+		progressErrors = append(progressErrors, "generate_204 failed: "+result.ConnectivityError)
 	}
-
-	e.lastFail = time.Now()
-	if err != nil {
-		e.lastError = err.Error()
-	} else {
-		// Defensive fallback for custom probe functions returning an incomplete
-		// result without an error.
-		e.lastError = "probe incomplete: generate_204 and trace must both succeed"
+	if result.TraceError != "" {
+		progressErrors = append(progressErrors, "trace failed: "+result.TraceError)
+	}
+	if len(progressErrors) > 0 {
+		e.initialCheckDone = true
+		e.available = false
+		e.lastFail = time.Now()
+		e.lastError = strings.Join(progressErrors, "; ")
 	}
 }
 
@@ -1032,8 +1068,9 @@ func (h *EntryHandle) DecActive() {
 	h.ref.decActive()
 }
 
-// SetProbe assigns a probe function.
-func (h *EntryHandle) SetProbe(fn func(ctx context.Context) (ProbeResult, error)) {
+// SetProbe assigns a probe function. The probe reports each completed sub-check
+// so successful partial data is persisted even if the overall deadline expires.
+func (h *EntryHandle) SetProbe(fn func(ctx context.Context, report func(ProbeResult)) (ProbeResult, error)) {
 	if h == nil || h.ref == nil {
 		return
 	}

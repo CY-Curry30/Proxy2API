@@ -912,7 +912,7 @@ func (p *poolOutbound) probeConnectivity(ctx context.Context, member *memberStat
 // probeMember always runs both independent checks. Each successful check returns
 // its own data, but the node is healthy only when both checks succeed. Neither
 // path changes client request counters.
-func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool) (monitor.ProbeResult, error) {
+func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
 	attemptTimeout := p.monitor.ProbeAttemptTimeout()
 	result := monitor.ProbeResult{}
 	var probeErrors []error
@@ -926,6 +926,9 @@ func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, des
 	} else {
 		result.ConnectivityOK = true
 		result.Latency = duration
+	}
+	if report != nil {
+		report(result)
 	}
 
 	locationCtx, cancel := context.WithTimeout(ctx, time.Duration(probeTraceMaxAttempts)*attemptTimeout)
@@ -943,6 +946,9 @@ func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, des
 		result.IP = location.IP
 		result.Region = location.Region
 		result.Country = location.Country
+	}
+	if report != nil {
+		report(result)
 	}
 
 	if len(probeErrors) > 0 {
@@ -994,25 +1000,25 @@ func isRetryableProbeHandshakeError(err error) bool {
 	return strings.Contains(s, "connection reset") || strings.Contains(s, "reset by peer")
 }
 
-func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Context) (monitor.ProbeResult, error) {
+func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Context, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
 	if p.monitor == nil {
 		return nil
 	}
-	return func(ctx context.Context) (monitor.ProbeResult, error) {
+	return func(ctx context.Context, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
 		destination, host, path, useTLS, tlsInsecure, ok := p.monitor.DestinationForProbe()
 		if !ok {
 			return monitor.ProbeResult{}, E.New("probe target is not configured")
 		}
-		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure)
+		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure, report)
 	}
 }
 
 // makeProbeByTagFunc creates a probe function that works before member initialization
-func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) (monitor.ProbeResult, error) {
+func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
 	if p.monitor == nil {
 		return nil
 	}
-	return func(ctx context.Context) (monitor.ProbeResult, error) {
+	return func(ctx context.Context, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
 		destination, host, path, useTLS, tlsInsecure, ok := p.monitor.DestinationForProbe()
 		if !ok {
 			return monitor.ProbeResult{}, E.New("probe target is not configured")
@@ -1039,7 +1045,7 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 		if member == nil {
 			return monitor.ProbeResult{}, E.New("member not found: ", tag)
 		}
-		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure)
+		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure, report)
 	}
 }
 

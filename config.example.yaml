@@ -93,7 +93,7 @@ management:
   enabled: true                                      # 是否启用管理面板
   listen: 0.0.0.0:9091                               # 监听地址
   probe_target: http://cp.cloudflare.com/generate_204  # 延迟及连通性探测目标，可在系统设置中修改
-  probe_interval: 5m                                  # 自动全量探测间隔
+  probe_interval: 5m                                  # 自动全量探测间隔；启动不探测，首次在该间隔后执行
   probe_timeout: 1m50s                                # 总预算；主探测和每次 Trace 使用总值的 1/5
   probe_concurrency: 32                               # 并发探测节点数
   password: ""                                       # WebUI 访问密码，为空则不需要密码

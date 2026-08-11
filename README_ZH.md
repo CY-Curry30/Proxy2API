@@ -85,6 +85,8 @@ dns:
 nodes_file: nodes.txt
 ```
 
+服务启动时不会自动探测节点。节点初始显示为“未测试”，需在 WebUI 手动探测；启用周期探测后，首次自动探测在 `probe_interval` 到期时执行。
+
 ## 粘性代理（可选，仅 Pool/Hybrid 模式）
 
 开启后会额外监听一个独立端口（默认 `listener.port + 1`，即 `2324`），与原 `2323` 端口共存。粘性入口可通过监控面板指定出口节点；未指定时默认选择最低延迟节点，再按**来源 IP** 保持绑定。原主入口始终按 `pool.mode` 调度，不受粘性入口的指定节点影响。监听地址与认证复用 `listener` 配置。
@@ -129,9 +131,9 @@ dns:
 ## 节点来源行为
 
 - 配置了 `subscriptions` 时：
-  - 会抓取订阅节点并追加到运行节点列表
-  - `nodes_file` 作为订阅节点写入路径
-  - 启动阶段不再从 `nodes_file` 读取节点
+  - 启动时只读取 `.subscription-cache.json` 或 `nodes_file` 的本地缓存，不联网更新，也不改写节点文件
+  - 通过 WebUI 的“更新”按钮或刷新 API 手动抓取订阅；只有显式开启 `subscription_refresh.enabled` 后才会定时刷新
+  - `nodes_file` 作为手动/定时订阅更新后的节点写入路径
   - 可通过 `subscription_refresh.fetch_concurrency` 调整订阅抓取并发数（默认 16，最大 32）
 - `nodes`（内联节点）只要存在就会参与运行。
 - **多来源节点合并**：当同时配置 `nodes` 和 `subscriptions` 时：

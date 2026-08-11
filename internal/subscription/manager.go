@@ -172,8 +172,7 @@ func (m *Manager) seedNodeCacheFromConfig() {
 		fromConfig[node.SubscriptionURL] = append(fromConfig[node.SubscriptionURL], node)
 	}
 	for rawURL, nodes := range fromConfig {
-		// Config loading may have just fetched fresher active nodes than the
-		// sidecar cache. Prefer that exact startup set for future pause/resume.
+		// Prefer the exact local startup set for future pause/resume operations.
 		m.nodeCache[rawURL] = nodes
 	}
 }
@@ -249,7 +248,8 @@ func (m *Manager) reconcileSubscriptionStateLocked(urls []string) {
 	}
 }
 
-// Start begins the periodic refresh loop.
+// Start begins the periodic refresh loop without fetching immediately. Manual
+// refresh remains available through RefreshNow regardless of the auto flag.
 func (m *Manager) Start() {
 	if len(m.baseCfg.Subscriptions) == 0 {
 		m.logger.Infof("no subscriptions configured, refresh disabled")
@@ -260,12 +260,6 @@ func (m *Manager) Start() {
 	m.logger.Infof("starting subscription manager, auto-refresh=%v, interval=%s", m.baseCfg.SubscriptionRefresh.Enabled, interval)
 
 	go m.refreshLoop(interval)
-	if m.baseCfg.SubscriptionRefresh.Enabled {
-		select {
-		case m.manualRefresh <- struct{}{}:
-		default:
-		}
-	}
 }
 
 // Stop stops the periodic refresh.

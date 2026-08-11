@@ -169,18 +169,6 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}
 
-	// Wait for initial health check if min nodes configured
-	if cfg.SubscriptionRefresh.MinAvailableNodes > 0 {
-		timeout := cfg.SubscriptionRefresh.HealthCheckTimeout
-		if timeout <= 0 {
-			timeout = defaultHealthCheckTimeout
-		}
-		if err := m.waitForHealthCheck(timeout); err != nil {
-			m.logger.Warnf("initial health check warning: %v", err)
-			// Don't fail startup, just warn
-		}
-	}
-
 	m.logger.Infof("sing-box instance started with %d nodes", len(cfg.Nodes))
 
 	return nil

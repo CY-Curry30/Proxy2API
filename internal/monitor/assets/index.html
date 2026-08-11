@@ -1485,7 +1485,7 @@
 
       // Latency Chart Data
       const sorted = allNodesCache
-        .filter(n => n.initial_check_done && n.available && !n.blacklisted && n.last_latency_ms > 0)
+        .filter(n => !n.blacklisted && n.last_latency_ms > 0)
         .sort((a,b) => a.last_latency_ms - b.last_latency_ms)
         .slice(0, 10);
       const latencyX = sorted.map(n => n.name || n.tag);
@@ -1658,7 +1658,7 @@
       tbody.innerHTML = visible.map(n => {
         const measuredMs = Number.isFinite(n.last_latency_ms) ? n.last_latency_ms : -1;
         const currentHealthy = n.initial_check_done && n.available && !n.blacklisted;
-        const ms = currentHealthy ? measuredMs : -1;
+        const ms = measuredMs;
         const calls = (n.success_count || 0) + (n.failure_count || 0);
         const successRate = calls > 0 ? ((n.success_count || 0) / calls * 100) : null;
         const entryPortBadges = (entryExitPortsByTag.get(n.tag) || [])
@@ -1734,6 +1734,7 @@
 
     async function probeNode(tag) {
       showToast('探测中...');
+      const partialRefreshTimer = setInterval(() => refresh(), 2000);
       try {
         const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/probe', {method:'POST'});
         const d = await r.json();
@@ -1749,8 +1750,11 @@
           details.push(`Trace 失败：${d.trace_error || d.error || '未知错误'}`);
         }
         showToast(details.join('；'), d.healthy ? undefined : 'error');
-        refresh();
       } catch(e) { showToast(e.message, 'error'); }
+      finally {
+        clearInterval(partialRefreshTimer);
+        refresh();
+      }
     }
 
     async function setStickyNode(tag) {
