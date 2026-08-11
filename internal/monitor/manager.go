@@ -79,12 +79,15 @@ type Snapshot struct {
 
 // ProbeResult contains connectivity information discovered by a probe.
 type ProbeResult struct {
-	Latency       time.Duration
-	IP            string
-	Region        string
-	Country       string
-	TraceError    string
-	TraceAttempts int
+	Latency           time.Duration
+	ConnectivityOK    bool
+	ConnectivityError string
+	IP                string
+	Region            string
+	Country           string
+	TraceOK           bool
+	TraceError        string
+	TraceAttempts     int
 }
 
 type probeFunc func(ctx context.Context) (ProbeResult, error)
@@ -538,16 +541,13 @@ func (m *Manager) runProbeSweep(timeout time.Duration) {
 		e.mu.RUnlock()
 
 		if probeFn == nil {
-			// No probe function (probe target not configured): the node cannot be
-			// verified, so optimistically mark it checked+available — matching the
-			// old per-pool startup probe's "no target → mark available" behavior.
-			// Skipping it instead would leave initialCheckDone=false forever and
-			// exclude it from export and the healthy-online count.
-			e.mu.Lock()
-			e.initialCheckDone = true
-			e.available = true
-			e.mu.Unlock()
-			m.probeSweepOK.Add(1)
+			// A healthy node must pass both connectivity and Trace checks. Without
+			// a probe function neither can be verified, so record a completed failure
+			// instead of leaving the node unchecked or optimistically available.
+			probeErr := errors.New("probe not available for this node")
+			e.applyProbeResult(ProbeResult{}, probeErr)
+			failedCount.Add(1)
+			m.probeSweepFail.Add(1)
 			m.probeSweepDone.Add(1)
 			continue
 		}
@@ -741,10 +741,7 @@ func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 // probeAllNodes loop.
 func (m *Manager) Probe(ctx context.Context, tag string) (time.Duration, error) {
 	result, err := m.ProbeWithResult(ctx, tag)
-	if err != nil {
-		return 0, err
-	}
-	return result.Latency, nil
+	return result.Latency, err
 }
 
 // ProbeWithResult triggers a manual health check and returns both latency and
@@ -884,24 +881,40 @@ func (e *entry) applyProbeResult(result ProbeResult, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.initialCheckDone = true
-	if err != nil {
-		e.lastError = err.Error()
-		e.lastFail = time.Now()
-		e.available = false
+
+	// Each successful sub-probe updates only the data it owns. Failed checks do
+	// not erase the last known-good value from the other check.
+	if result.ConnectivityOK {
+		e.lastProbe = result.Latency
+	}
+	if result.TraceOK {
+		if result.IP != "" {
+			e.ip = result.IP
+		}
+		if result.Region != "" {
+			e.region = result.Region
+		}
+		if result.Country != "" {
+			e.country = result.Country
+		}
+	}
+
+	healthy := err == nil && result.ConnectivityOK && result.TraceOK
+	e.available = healthy
+	if healthy {
+		e.lastOK = time.Now()
+		e.lastError = ""
 		return
 	}
-	e.lastOK = time.Now()
-	e.lastProbe = result.Latency
-	if result.IP != "" {
-		e.ip = result.IP
+
+	e.lastFail = time.Now()
+	if err != nil {
+		e.lastError = err.Error()
+	} else {
+		// Defensive fallback for custom probe functions returning an incomplete
+		// result without an error.
+		e.lastError = "probe incomplete: generate_204 and trace must both succeed"
 	}
-	if result.Region != "" {
-		e.region = result.Region
-	}
-	if result.Country != "" {
-		e.country = result.Country
-	}
-	e.available = true
 }
 
 func (e *entry) recordFailure(err error) {
@@ -1073,6 +1086,18 @@ func (h *EntryHandle) Suppressed() bool {
 	h.ref.mu.RLock()
 	defer h.ref.mu.RUnlock()
 	return h.ref.suppressed
+}
+
+// Healthy reports whether the node has completed a probe and both required
+// checks succeeded. Blacklist eligibility is maintained by the pool's shared
+// state and is checked separately during member selection.
+func (h *EntryHandle) Healthy() bool {
+	if h == nil || h.ref == nil {
+		return false
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return h.ref.initialCheckDone && h.ref.available && !h.ref.suppressed
 }
 
 // LastLatency returns the last measured probe latency.

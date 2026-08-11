@@ -1737,16 +1737,19 @@
       try {
         const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/probe', {method:'POST'});
         const d = await r.json();
-        if(d.error) {
-          showToast(`延迟探测失败：${d.error}`, 'error');
+        const details = [];
+        if(d.connectivity_ok) {
+          details.push(`延迟探测成功：${d.latency_ms}ms`);
         } else {
-          if(d.trace_ok) {
-            showToast(`延迟探测成功：${d.latency_ms}ms；Trace 成功：IP ${d.trace_ip || '-'}`);
-          } else {
-            showToast(`延迟探测成功：${d.latency_ms}ms；Trace 失败：${d.trace_error || '未知错误'}`, 'error');
-          }
-          refresh();
+          details.push(`延迟探测失败：${d.connectivity_error || d.error || '未知错误'}`);
         }
+        if(d.trace_ok) {
+          details.push(`Trace 成功：IP ${d.trace_ip || '-'}，区域 ${d.trace_country || d.trace_region || '-'}`);
+        } else {
+          details.push(`Trace 失败：${d.trace_error || d.error || '未知错误'}`);
+        }
+        showToast(details.join('；'), d.healthy ? undefined : 'error');
+        refresh();
       } catch(e) { showToast(e.message, 'error'); }
     }
 

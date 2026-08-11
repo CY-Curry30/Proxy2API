@@ -489,8 +489,10 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf []*memberState) []*memberState {
 	result := buf[:0]
 	for _, member := range p.members {
-		if member.entry != nil && member.entry.Suppressed() {
-			continue
+		if member.entry != nil {
+			if member.entry.Suppressed() || !member.entry.Healthy() {
+				continue
+			}
 		}
 		// Check blacklist via shared state (auto-clears if expired)
 		if member.shared != nil && member.shared.isBlacklisted(now) {
@@ -766,8 +768,9 @@ const (
 )
 
 // probeLocation obtains exit metadata through the same upstream node using a
-// dedicated, fixed Cloudflare trace request. Failure is display-only and does
-// not turn a successful latency probe into a failed health check.
+// dedicated, fixed Cloudflare trace request. Trace is an independent required
+// part of the health check: its data is returned even when connectivity failed,
+// and its failure is returned even when latency was measured successfully.
 func (p *poolOutbound) probeLocation(ctx context.Context, member *memberState, tlsInsecure bool, attemptTimeout time.Duration) (monitor.ProbeResult, error) {
 	var lastErr error
 	attempts := 0
@@ -778,6 +781,7 @@ func (p *poolOutbound) probeLocation(ctx context.Context, member *memberState, t
 		cancel()
 		result.TraceAttempts = attempts
 		if err == nil {
+			result.TraceOK = true
 			return result, nil
 		}
 		lastErr = err
@@ -790,7 +794,7 @@ func (p *poolOutbound) probeLocation(ctx context.Context, member *memberState, t
 	}
 	traceErr := fmt.Errorf("trace request failed after %d attempts: %w", attempts, lastErr)
 	return monitor.ProbeResult{
-		TraceError:    lastErr.Error(),
+		TraceError:    traceErr.Error(),
 		TraceAttempts: attempts,
 	}, traceErr
 }
@@ -905,33 +909,50 @@ func (p *poolOutbound) probeConnectivity(ctx context.Context, member *memberStat
 	return time.Since(start), nil
 }
 
-// probeMember runs the primary connectivity check followed by the display-only
-// Cloudflare Trace lookup. Neither path changes client request counters.
+// probeMember always runs both independent checks. Each successful check returns
+// its own data, but the node is healthy only when both checks succeed. Neither
+// path changes client request counters.
 func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool) (monitor.ProbeResult, error) {
 	attemptTimeout := p.monitor.ProbeAttemptTimeout()
+	result := monitor.ProbeResult{}
+	var probeErrors []error
+
 	requestCtx, requestCancel := context.WithTimeout(ctx, attemptTimeout)
-	duration, err := p.probeConnectivity(requestCtx, member, destination, host, path, useTLS, tlsInsecure, attemptTimeout)
+	duration, connectivityErr := p.probeConnectivity(requestCtx, member, destination, host, path, useTLS, tlsInsecure, attemptTimeout)
 	requestCancel()
-	if err != nil {
-		return monitor.ProbeResult{}, err
+	if connectivityErr != nil {
+		result.ConnectivityError = connectivityErr.Error()
+		probeErrors = append(probeErrors, fmt.Errorf("generate_204 failed: %w", connectivityErr))
+	} else {
+		result.ConnectivityOK = true
+		result.Latency = duration
 	}
 
-	// Clear pool blacklist on successful probe — a node that passes health check
-	// should be available for selection immediately (fixes #8, #9).
-	if member.shared != nil {
-		member.shared.forceRelease()
-	}
-
-	result := monitor.ProbeResult{Latency: duration}
-	locationCtx, cancel := context.WithTimeout(ctx, time.Duration(probeTraceMaxAttempts-1)*attemptTimeout)
+	locationCtx, cancel := context.WithTimeout(ctx, time.Duration(probeTraceMaxAttempts)*attemptTimeout)
 	location, locationErr := p.probeLocation(locationCtx, member, tlsInsecure, attemptTimeout)
 	cancel()
 	result.TraceError = location.TraceError
 	result.TraceAttempts = location.TraceAttempts
-	if locationErr == nil {
+	if locationErr != nil {
+		if result.TraceError == "" {
+			result.TraceError = locationErr.Error()
+		}
+		probeErrors = append(probeErrors, fmt.Errorf("trace failed: %w", locationErr))
+	} else {
+		result.TraceOK = true
 		result.IP = location.IP
 		result.Region = location.Region
 		result.Country = location.Country
+	}
+
+	if len(probeErrors) > 0 {
+		return result, errors.Join(probeErrors...)
+	}
+
+	// Only a fully healthy node is released from a previous automatic or manual
+	// blacklist. A partial success must remain ineligible for healthy routing.
+	if member.shared != nil {
+		member.shared.forceRelease()
 	}
 	return result, nil
 }

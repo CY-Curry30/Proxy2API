@@ -574,23 +574,32 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), s.currentProbeTimeout())
 		defer cancel()
 		result, err := s.mgr.ProbeWithResult(ctx, tag)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			writeJSON(w, map[string]any{"error": err.Error()})
-			return
+		latencyMs := int64(-1)
+		if result.ConnectivityOK {
+			latencyMs = result.Latency.Milliseconds()
 		}
-		latencyMs := result.Latency.Milliseconds()
 		if latencyMs == 0 && result.Latency > 0 {
 			latencyMs = 1 // Round up sub-millisecond latencies to 1ms
 		}
-		writeJSON(w, map[string]any{
-			"message":        "探测成功",
-			"latency_ms":     latencyMs,
-			"trace_ok":       result.TraceError == "",
-			"trace_ip":       result.IP,
-			"trace_error":    result.TraceError,
-			"trace_attempts": result.TraceAttempts,
-		})
+		payload := map[string]any{
+			"message":            "探测成功",
+			"healthy":            err == nil,
+			"latency_ms":         latencyMs,
+			"connectivity_ok":    result.ConnectivityOK,
+			"connectivity_error": result.ConnectivityError,
+			"trace_ok":           result.TraceOK,
+			"trace_ip":           result.IP,
+			"trace_region":       result.Region,
+			"trace_country":      result.Country,
+			"trace_error":        result.TraceError,
+			"trace_attempts":     result.TraceAttempts,
+		}
+		if err != nil {
+			payload["message"] = "探测未通过"
+			payload["error"] = err.Error()
+			w.WriteHeader(http.StatusBadRequest)
+		}
+		writeJSON(w, payload)
 	case "release":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -714,12 +723,13 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 
 	// Probe all nodes with semaphore control
 	type probeResult struct {
-		tag           string
-		name          string
-		latency       int64
-		err           string
-		traceErr      string
-		traceAttempts int
+		tag             string
+		name            string
+		latency         int64
+		err             string
+		connectivityErr string
+		traceErr        string
+		traceAttempts   int
 	}
 	results := make(chan probeResult, total)
 	var wg sync.WaitGroup
@@ -746,23 +756,32 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 			defer probeCancel()
 
 			probe, err := s.mgr.ProbeWithResult(probeCtx, snap.Tag)
+			latency := int64(-1)
+			if probe.ConnectivityOK {
+				latency = probe.Latency.Milliseconds()
+				if latency == 0 && probe.Latency > 0 {
+					latency = 1
+				}
+			}
 			if err != nil {
 				results <- probeResult{
-					tag:           snap.Tag,
-					name:          snap.Name,
-					latency:       -1,
-					err:           err.Error(),
-					traceErr:      probe.TraceError,
-					traceAttempts: probe.TraceAttempts,
+					tag:             snap.Tag,
+					name:            snap.Name,
+					latency:         latency,
+					err:             err.Error(),
+					connectivityErr: probe.ConnectivityError,
+					traceErr:        probe.TraceError,
+					traceAttempts:   probe.TraceAttempts,
 				}
 			} else {
 				results <- probeResult{
-					tag:           snap.Tag,
-					name:          snap.Name,
-					latency:       probe.Latency.Milliseconds(),
-					err:           "",
-					traceErr:      probe.TraceError,
-					traceAttempts: probe.TraceAttempts,
+					tag:             snap.Tag,
+					name:            snap.Name,
+					latency:         latency,
+					err:             "",
+					connectivityErr: probe.ConnectivityError,
+					traceErr:        probe.TraceError,
+					traceAttempts:   probe.TraceAttempts,
 				}
 			}
 		}(snap)
@@ -802,17 +821,18 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 		}
 
 		eventPayload := map[string]any{
-			"type":           "progress",
-			"tag":            result.tag,
-			"name":           result.name,
-			"latency":        result.latency,
-			"status":         status,
-			"error":          result.err,
-			"trace_error":    result.traceErr,
-			"trace_attempts": result.traceAttempts,
-			"current":        count,
-			"total":          total,
-			"progress":       float64(count) / float64(total) * 100,
+			"type":               "progress",
+			"tag":                result.tag,
+			"name":               result.name,
+			"latency":            result.latency,
+			"status":             status,
+			"error":              result.err,
+			"connectivity_error": result.connectivityErr,
+			"trace_error":        result.traceErr,
+			"trace_attempts":     result.traceAttempts,
+			"current":            count,
+			"total":              total,
+			"progress":           float64(count) / float64(total) * 100,
 		}
 		eventData, _ := json.Marshal(eventPayload)
 		fmt.Fprintf(w, "data: %s\n\n", eventData)
