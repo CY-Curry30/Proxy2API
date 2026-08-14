@@ -29,6 +29,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 	metadata := make(map[string]poolout.MemberMeta)
 	var failedNodes []string
 	usedTags := make(map[string]int) // Track tag usage for uniqueness
+	usedStateKeys := make(map[string]int)
 
 	totalNodes := len(cfg.Nodes)
 	for i, node := range cfg.Nodes {
@@ -48,6 +49,8 @@ func Build(cfg *config.Config) (option.Options, error) {
 		} else {
 			usedTags[baseTag] = 1
 		}
+		stateOccurrence := usedStateKeys[node.NodeKey()]
+		usedStateKeys[node.NodeKey()] = stateOccurrence + 1
 
 		outbound, err := buildNodeOutbound(tag, node.URI, cfg.SkipCertVerify)
 		if err != nil {
@@ -58,8 +61,13 @@ func Build(cfg *config.Config) (option.Options, error) {
 		memberTags = append(memberTags, tag)
 		baseOutbounds = append(baseOutbounds, outbound)
 		meta := poolout.MemberMeta{
+			ID:              node.StateIDForOccurrence(stateOccurrence),
+			Order:           i,
 			Name:            node.Name,
 			URI:             node.URI,
+			Source:          string(node.Source),
+			Username:        node.Username,
+			Password:        node.Password,
 			Mode:            cfg.Mode,
 			SubscriptionURL: node.SubscriptionURL,
 			Suppressed:      node.Disabled,
@@ -239,11 +247,18 @@ func Build(cfg *config.Config) (option.Options, error) {
 		Route:     &route,
 		Experimental: &option.ExperimentalOptions{
 			ClashAPI: &option.ClashAPIOptions{
-				ExternalController: "127.0.0.1:9092",
+				ExternalController: fmt.Sprintf("127.0.0.1:%d", clashAPIPort(cfg)),
 			},
 		},
 	}
 	return opts, nil
+}
+
+func clashAPIPort(cfg *config.Config) uint16 {
+	if cfg != nil && cfg.ClashAPIPort > 0 {
+		return cfg.ClashAPIPort
+	}
+	return 9092
 }
 
 func buildPoolInbound(cfg *config.Config) (option.Inbound, error) {

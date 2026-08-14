@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,12 +13,16 @@ import (
 // sharedMemberState holds failure/blacklist state shared across all pool instances.
 // This enables hybrid mode where pool and multi-port modes share the same node state.
 type sharedMemberState struct {
-	mu               sync.Mutex
-	failures         int
-	blacklisted      bool
-	blacklistedUntil time.Time
-	entry            atomic.Pointer[monitor.EntryHandle]
-	active           atomic.Int32
+	mu                sync.Mutex
+	failures          int
+	blacklisted       bool
+	blacklistedUntil  time.Time
+	releaseTimer      *time.Timer
+	releaseProbe      func()
+	restored          bool
+	activationPending bool
+	entry             atomic.Pointer[monitor.EntryHandle]
+	active            atomic.Int32
 }
 
 // transientCooldown is how long a node is skipped after a transient failure
@@ -51,31 +56,79 @@ func isTransientError(err error) bool {
 	return false
 }
 
-var sharedStateStore sync.Map // map[tag]*sharedMemberState
+// SharedStateStore owns the mutable pool state for one project runtime. Pool
+// and multi-port outbounds inside the same project share this store, while
+// separate projects receive separate instances.
+type SharedStateStore struct {
+	states sync.Map // map[tag]*sharedMemberState
+}
+
+// NewSharedStateStore creates an isolated pool state container.
+func NewSharedStateStore() *SharedStateStore {
+	return &SharedStateStore{}
+}
+
+type sharedStateStoreContextKey struct{}
+
+var defaultSharedStateStore = NewSharedStateStore()
+
+// ContextWithSharedStateStore makes a project state container available to
+// every custom pool outbound constructed by sing-box.
+func ContextWithSharedStateStore(ctx context.Context, store *SharedStateStore) context.Context {
+	if store == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sharedStateStoreContextKey{}, store)
+}
+
+func sharedStateStoreFromContext(ctx context.Context) *SharedStateStore {
+	if store, ok := ctx.Value(sharedStateStoreContextKey{}).(*SharedStateStore); ok && store != nil {
+		return store
+	}
+	return defaultSharedStateStore
+}
 
 // acquireSharedState returns the shared state for a tag, creating if needed.
-func acquireSharedState(tag string) *sharedMemberState {
-	if v, ok := sharedStateStore.Load(tag); ok {
+func (s *SharedStateStore) acquire(tag string) *sharedMemberState {
+	if s == nil {
+		s = defaultSharedStateStore
+	}
+	if v, ok := s.states.Load(tag); ok {
 		return v.(*sharedMemberState)
 	}
 	state := &sharedMemberState{}
-	actual, _ := sharedStateStore.LoadOrStore(tag, state)
+	actual, _ := s.states.LoadOrStore(tag, state)
 	return actual.(*sharedMemberState)
 }
 
 // lookupSharedState returns the shared state if it exists.
-func lookupSharedState(tag string) (*sharedMemberState, bool) {
-	v, ok := sharedStateStore.Load(tag)
+func (s *SharedStateStore) lookup(tag string) (*sharedMemberState, bool) {
+	if s == nil {
+		s = defaultSharedStateStore
+	}
+	v, ok := s.states.Load(tag)
 	if !ok {
 		return nil, false
 	}
 	return v.(*sharedMemberState), true
 }
 
-// ResetSharedStateStore clears all shared state (used during config reload).
-func ResetSharedStateStore() {
-	sharedStateStore.Range(func(key, _ any) bool {
-		sharedStateStore.Delete(key)
+// Reset clears this project's shared state during reload or shutdown.
+func (s *SharedStateStore) Reset() {
+	if s == nil {
+		return
+	}
+	s.states.Range(func(key, value any) bool {
+		state := value.(*sharedMemberState)
+		state.mu.Lock()
+		if state.releaseTimer != nil {
+			state.releaseTimer.Stop()
+			state.releaseTimer = nil
+		}
+		state.blacklisted = false
+		state.releaseProbe = nil
+		state.mu.Unlock()
+		s.states.Delete(key)
 		return true
 	})
 }
@@ -89,6 +142,69 @@ func (s *sharedMemberState) attachEntry(entry *monitor.EntryHandle) {
 
 func (s *sharedMemberState) entryHandle() *monitor.EntryHandle {
 	return s.entry.Load()
+}
+
+func (s *sharedMemberState) setReleaseProbe(fn func()) {
+	s.mu.Lock()
+	s.releaseProbe = fn
+	s.mu.Unlock()
+}
+
+func (s *sharedMemberState) restore(entry *monitor.EntryHandle) {
+	if entry == nil {
+		return
+	}
+	failures, blacklisted, until := entry.RestoredPoolState()
+	s.mu.Lock()
+	if s.restored {
+		s.mu.Unlock()
+		return
+	}
+	s.restored = true
+	s.failures = failures
+	s.blacklisted = blacklisted
+	s.blacklistedUntil = until
+	if blacklisted {
+		s.activationPending = true
+	}
+	s.mu.Unlock()
+}
+
+func (s *sharedMemberState) activateRestoredBlacklist() {
+	s.mu.Lock()
+	if !s.activationPending || !s.blacklisted {
+		s.mu.Unlock()
+		return
+	}
+	s.activationPending = false
+	s.scheduleReleaseLocked(s.blacklistedUntil)
+	s.mu.Unlock()
+}
+
+// ActivateRestoredBlacklists starts expiry timers only after sing-box has
+// completed startup, so an already-expired entry cannot probe a half-started
+// outbound during construction.
+func (s *SharedStateStore) ActivateRestoredBlacklists() {
+	if s == nil {
+		return
+	}
+	s.states.Range(func(_, value any) bool {
+		value.(*sharedMemberState).activateRestoredBlacklist()
+		return true
+	})
+}
+
+func (s *sharedMemberState) scheduleReleaseLocked(until time.Time) {
+	if s.releaseTimer != nil {
+		s.releaseTimer.Stop()
+	}
+	delay := time.Until(until)
+	if delay < 0 {
+		delay = 0
+	}
+	s.releaseTimer = time.AfterFunc(delay, func() {
+		s.isBlacklisted(time.Now())
+	})
 }
 
 // recordFailure records a failure and decides whether to blacklist the node.
@@ -105,6 +221,7 @@ func (s *sharedMemberState) recordFailure(cause error, threshold int, duration t
 
 	s.mu.Lock()
 	var count int
+	var persistedFailures int
 	triggered := false
 	var until time.Time
 	if transient {
@@ -113,6 +230,7 @@ func (s *sharedMemberState) recordFailure(cause error, threshold int, duration t
 		until = time.Now().Add(transientCooldown)
 		s.blacklisted = true
 		s.blacklistedUntil = until
+		s.scheduleReleaseLocked(until)
 	} else {
 		s.failures++
 		count = s.failures
@@ -122,12 +240,14 @@ func (s *sharedMemberState) recordFailure(cause error, threshold int, duration t
 			s.failures = 0
 			s.blacklisted = true
 			s.blacklistedUntil = until
+			s.scheduleReleaseLocked(until)
 		}
 	}
+	persistedFailures = s.failures
 	s.mu.Unlock()
 
 	if entry := s.entry.Load(); entry != nil {
-		entry.RecordFailure(cause)
+		entry.RecordFailure(cause, persistedFailures)
 		if triggered || transient {
 			entry.Blacklist(until)
 		}
@@ -148,10 +268,18 @@ func (s *sharedMemberState) recordSuccess() {
 // isBlacklisted checks if the node is currently blacklisted, auto-clearing if expired.
 func (s *sharedMemberState) isBlacklisted(now time.Time) bool {
 	s.mu.Lock()
-	expired := s.blacklisted && now.After(s.blacklistedUntil)
+	expired := s.blacklisted && !now.Before(s.blacklistedUntil)
+	var releaseProbe func()
 	if expired {
+		if s.releaseTimer != nil {
+			s.releaseTimer.Stop()
+			s.releaseTimer = nil
+		}
 		s.blacklisted = false
+		s.activationPending = false
 		s.blacklistedUntil = time.Time{}
+		s.failures = 0
+		releaseProbe = s.releaseProbe
 	}
 	blacklisted := s.blacklisted
 	s.mu.Unlock()
@@ -159,6 +287,9 @@ func (s *sharedMemberState) isBlacklisted(now time.Time) bool {
 	if expired {
 		if entry := s.entry.Load(); entry != nil {
 			entry.ClearBlacklist()
+		}
+		if releaseProbe != nil {
+			releaseProbe()
 		}
 	}
 	return blacklisted
@@ -183,13 +314,25 @@ func (s *sharedMemberState) blacklistRemaining(now time.Time) time.Duration {
 
 func (s *sharedMemberState) forceRelease() {
 	s.mu.Lock()
+	wasBlacklisted := s.blacklisted
+	if s.releaseTimer != nil {
+		s.releaseTimer.Stop()
+		s.releaseTimer = nil
+	}
 	s.failures = 0
 	s.blacklisted = false
+	s.activationPending = false
 	s.blacklistedUntil = time.Time{}
+	releaseProbe := s.releaseProbe
 	s.mu.Unlock()
 
-	if entry := s.entry.Load(); entry != nil {
-		entry.ClearBlacklist()
+	if wasBlacklisted {
+		if entry := s.entry.Load(); entry != nil {
+			entry.ClearBlacklist()
+		}
+		if releaseProbe != nil {
+			releaseProbe()
+		}
 	}
 }
 
@@ -211,21 +354,34 @@ func (s *sharedMemberState) activeCount() int32 {
 	return s.active.Load()
 }
 
-// releaseSharedMember clears blacklist state for a tag (called from release functions).
-func releaseSharedMember(tag string) {
-	if state, ok := lookupSharedState(tag); ok {
+// release clears blacklist state for a tag (called from release functions).
+func (s *SharedStateStore) release(tag string) {
+	if state, ok := s.lookup(tag); ok {
 		state.forceRelease()
 	}
 }
 
-// blacklistSharedMember manually blacklists a node in pool shared state.
-func blacklistSharedMember(tag string, duration time.Duration) {
-	if state, ok := lookupSharedState(tag); ok {
+// blacklist manually blacklists a node in this project's pool state.
+func (s *SharedStateStore) blacklist(tag string, duration time.Duration) {
+	if state, ok := s.lookup(tag); ok {
 		until := time.Now().Add(duration)
 		state.mu.Lock()
 		state.blacklisted = true
+		state.activationPending = false
 		state.blacklistedUntil = until
 		state.failures = 0
+		state.scheduleReleaseLocked(until)
 		state.mu.Unlock()
 	}
+}
+
+// ResetSharedStateStore preserves the legacy package API for callers that do
+// not inject a project store. New runtimes should call Reset on their own store.
+func ResetSharedStateStore() {
+	defaultSharedStateStore.Reset()
+}
+
+// ActivateRestoredBlacklists preserves the legacy package API.
+func ActivateRestoredBlacklists() {
+	defaultSharedStateStore.ActivateRestoredBlacklists()
 }

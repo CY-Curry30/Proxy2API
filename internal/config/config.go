@@ -13,11 +13,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"Proxy2API/internal/state"
 
 	"gopkg.in/yaml.v3"
 )
@@ -43,27 +46,35 @@ type Config struct {
 	Pool                  PoolConfig                `yaml:"pool"`
 	Sticky                StickyConfig              `yaml:"sticky"`
 	Management            ManagementConfig          `yaml:"management"`
+	Probe                 ProbeConfig               `yaml:"probe,omitempty"`
 	SubscriptionRefresh   SubscriptionRefreshConfig `yaml:"subscription_refresh"`
 	Log                   LogConfig                 `yaml:"log"`
 	Nodes                 []NodeConfig              `yaml:"nodes"`
 	NodesFile             string                    `yaml:"nodes_file"`                       // 节点文件路径，每行一个 URI
 	Subscriptions         []string                  `yaml:"subscriptions"`                    // 订阅链接列表
 	DisabledSubscriptions []string                  `yaml:"disabled_subscriptions,omitempty"` // 已暂停但保留缓存的订阅
+	SelectedSubscriptions []string                  `yaml:"selected_subscriptions,omitempty"` // 项目选定的订阅子集，空表示全部选中
 	ExternalIP            string                    `yaml:"external_ip"`                      // 外部 IP 地址，用于导出时替换 0.0.0.0
 	LogLevel              string                    `yaml:"log_level"`
 	SkipCertVerify        bool                      `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
+	ClashAPIPort          uint16                    `yaml:"-" json:"-"`       // Runtime-only, assigned by the project registry.
 
-	filePath string `yaml:"-"` // 配置文件路径，用于保存
+	filePath              string `yaml:"-"` // 配置文件路径，用于保存
+	recoveredStateCatalog bool   `yaml:"-"`
+	recoveredCatalogURLs  map[string]struct{}
+	sourcesShared         bool `yaml:"-"`
+	sourcesOnly           bool `yaml:"-"`
+	skipRuntimeRecovery   bool `yaml:"-"`
 }
 
 // LogConfig controls log output and rotation.
 type LogConfig struct {
-	Output     string `yaml:"output"`      // 日志输出: "stdout", "file", 默认 "stdout"
-	File       string `yaml:"file"`        // 日志文件路径，默认 "logs/Proxy2API.log"
-	MaxSize    int    `yaml:"max_size"`    // 单个日志文件最大 MB，默认 50
-	MaxBackups int    `yaml:"max_backups"` // 保留旧日志文件个数，默认 3
-	MaxAge     int    `yaml:"max_age"`     // 保留旧日志文件天数，默认 7
-	Compress   bool   `yaml:"compress"`    // 是否压缩旧日志，默认 false
+	Output     string `yaml:"output" json:"output"`           // 日志输出: "stdout", "file", 默认 "stdout"
+	File       string `yaml:"file" json:"file"`               // 日志文件路径，默认 "logs/Proxy2API.log"
+	MaxSize    int    `yaml:"max_size" json:"max_size"`       // 单个日志文件最大 MB，默认 50
+	MaxBackups int    `yaml:"max_backups" json:"max_backups"` // 保留旧日志文件个数，默认 3
+	MaxAge     int    `yaml:"max_age" json:"max_age"`         // 保留旧日志文件天数，默认 7
+	Compress   bool   `yaml:"compress" json:"compress"`       // 是否压缩旧日志，默认 false
 }
 
 // ListenerConfig defines how the HTTP/SOCKS5 mixed proxy should listen for clients.
@@ -120,11 +131,19 @@ type MultiPortConfig struct {
 type ManagementConfig struct {
 	Enabled          *bool         `yaml:"enabled"`
 	Listen           string        `yaml:"listen"`
-	ProbeTarget      string        `yaml:"probe_target"`
-	ProbeInterval    time.Duration `yaml:"probe_interval"`    // 全量健康探测间隔，默认 5 分钟
-	ProbeTimeout     time.Duration `yaml:"probe_timeout"`     // 单节点探测总超时，默认 110 秒，必须为 5 秒的倍数且不低于 25 秒
-	Password         string        `yaml:"password"`          // WebUI 访问密码，为空则不需要密码
-	ProbeConcurrency int           `yaml:"probe_concurrency"` // 并发探测线程数（8-1024，默认 32），大规模节点可调高以加快探测
+	ProbeTarget      string        `yaml:"probe_target,omitempty"`      // Deprecated: use project-level probe.target.
+	ProbeInterval    time.Duration `yaml:"probe_interval,omitempty"`    // Deprecated: use project-level probe.interval.
+	ProbeTimeout     time.Duration `yaml:"probe_timeout,omitempty"`     // Deprecated: use project-level probe.timeout.
+	Password         string        `yaml:"password"`                    // WebUI 访问密码，为空则不需要密码
+	ProbeConcurrency int           `yaml:"probe_concurrency,omitempty"` // Deprecated: use project-level probe.concurrency.
+}
+
+// ProbeConfig controls health checks for one project runtime.
+type ProbeConfig struct {
+	Target      string        `yaml:"target" json:"target"`
+	Interval    time.Duration `yaml:"interval" json:"interval"`
+	Timeout     time.Duration `yaml:"timeout" json:"timeout"`
+	Concurrency int           `yaml:"concurrency" json:"concurrency"`
 }
 
 // SubscriptionRefreshConfig controls subscription auto-refresh and reload settings.
@@ -199,6 +218,7 @@ type NodeConfig struct {
 	Source          NodeSource `yaml:"-" json:"source,omitempty"` // Runtime only, not persisted
 	SubscriptionURL string     `yaml:"-" json:"-"`                // Runtime owner used for per-subscription enable/disable
 	Disabled        bool       `yaml:"-" json:"disabled,omitempty"`
+	StateKey        string     `yaml:"-" json:"-"`
 }
 
 // NodeKey returns a stable identifier for the node, used to preserve port
@@ -211,6 +231,25 @@ type NodeConfig struct {
 // keeps the same key — and therefore the same proxy port.
 func (n *NodeConfig) NodeKey() string {
 	return stableNodeKey(n.URI)
+}
+
+// StateID is the non-reversible persistent identifier used by the runtime
+// state database. It remains stable across display-name and query-order changes.
+func (n *NodeConfig) StateID() string {
+	return n.StateIDForOccurrence(0)
+}
+
+// StateIDForOccurrence distinguishes duplicate node definitions while keeping
+// the first occurrence compatible with the ordinary stable node ID.
+func (n *NodeConfig) StateIDForOccurrence(occurrence int) string {
+	if n.StateKey != "" {
+		return n.StateKey
+	}
+	key := n.NodeKey()
+	if occurrence > 0 {
+		key = fmt.Sprintf("%s\x00%d", key, occurrence)
+	}
+	return state.NodeID(key)
 }
 
 // stableNodeKey derives a port-stable identity from a proxy URI by stripping the
@@ -270,6 +309,43 @@ func (c *Config) ActiveSubscriptions() []string {
 	return active
 }
 
+// EffectiveSubscriptions returns the project's selected subscription URLs. When
+// SelectedSubscriptions is empty, all configured subscriptions are included
+// (backward compatible). Otherwise, only the selected subset is returned.
+func (c *Config) EffectiveSubscriptions() []string {
+	if len(c.SelectedSubscriptions) == 0 {
+		return c.Subscriptions
+	}
+	selected := make(map[string]struct{}, len(c.SelectedSubscriptions))
+	for _, rawURL := range c.SelectedSubscriptions {
+		selected[strings.TrimSpace(rawURL)] = struct{}{}
+	}
+	effective := make([]string, 0, len(c.SelectedSubscriptions))
+	for _, rawURL := range c.Subscriptions {
+		if _, ok := selected[rawURL]; ok {
+			effective = append(effective, rawURL)
+		}
+	}
+	return effective
+}
+
+// EffectiveSubscriptionEnabled reports whether a subscription is both globally
+// enabled and, when a per-project selection exists, actively selected.
+func (c *Config) EffectiveSubscriptionEnabled(rawURL string) bool {
+	if !c.SubscriptionEnabled(rawURL) {
+		return false
+	}
+	if len(c.SelectedSubscriptions) > 0 {
+		for _, selectedURL := range c.SelectedSubscriptions {
+			if selectedURL == rawURL {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
 // SetSubscriptionEnabled updates the persisted pause list without removing the
 // subscription URL or its cached nodes.
 func (c *Config) SetSubscriptionEnabled(rawURL string, enabled bool) {
@@ -318,13 +394,86 @@ func (c *Config) PruneDisabledSubscriptions() {
 
 // Load reads YAML config from disk and applies defaults/validation.
 func Load(path string) (*Config, error) {
+	return load(path, true)
+}
+
+// LoadReadOnly reads and validates a config without updating its persisted
+// node-port sidecar. It is intended for control-plane summaries of stopped
+// projects, where a read request must not mutate project data.
+func LoadReadOnly(path string) (*Config, error) {
+	return load(path, false)
+}
+
+// LoadShared reads the standalone shared node/subscription catalog. Runtime
+// settings in this file are intentionally not used by project runtimes.
+func LoadShared(path string) (*Config, error) {
+	cfg, err := decodeConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	cfg.sourcesOnly = true
+	cfg.skipRuntimeRecovery = true
+	if err := cfg.normalize(); err != nil {
+		return nil, err
+	}
+	for idx := range cfg.Nodes {
+		cfg.Nodes[idx].Port = 0
+		cfg.Nodes[idx].Username = ""
+		cfg.Nodes[idx].Password = ""
+	}
+	return cfg, nil
+}
+
+// LoadProjectWithShared reads project-owned runtime settings and overlays the
+// supplied shared source catalog.
+func LoadProjectWithShared(path string, shared *Config) (*Config, error) {
+	return loadProjectWithShared(path, shared, true)
+}
+
+// LoadProjectReadOnlyWithShared is the read-only counterpart of
+// LoadProjectWithShared.
+func LoadProjectReadOnlyWithShared(path string, shared *Config) (*Config, error) {
+	return loadProjectWithShared(path, shared, false)
+}
+
+func load(path string, restorePersistedPorts bool) (*Config, error) {
+	cfg, err := decodeConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.normalize(); err != nil {
+		return nil, err
+	}
+
+	if restorePersistedPorts {
+		// Restore persisted proxy ports so a restart keeps the same port per node.
+		if err := cfg.applyPersistedPorts(); err != nil {
+			return nil, err
+		}
+	}
+
+	return cfg, nil
+}
+
+func decodeConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	cfg := &Config{}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
+	}
+	// Keep the historical bool representation while allowing omitted project
+	// settings to use the product default of skipping certificate validation.
+	var presence struct {
+		SkipCertVerify *bool `yaml:"skip_cert_verify"`
+	}
+	if err := yaml.Unmarshal(data, &presence); err != nil {
+		return nil, fmt.Errorf("decode config defaults: %w", err)
+	}
+	if presence.SkipCertVerify == nil {
+		cfg.SkipCertVerify = true
 	}
 	cfg.filePath = path
 
@@ -333,17 +482,132 @@ func Load(path string) (*Config, error) {
 		configDir := filepath.Dir(path)
 		cfg.NodesFile = filepath.Join(configDir, cfg.NodesFile)
 	}
+	return cfg, nil
+}
 
-	if err := cfg.normalize(); err != nil {
+// LoadProject reads project-owned runtime settings while sourcing node and
+// subscription definitions from the shared/default config. Subscription
+// caches and runtime state remain rooted beside the project config.
+func LoadProject(path, sharedPath string) (*Config, error) {
+	return loadProject(path, sharedPath, true)
+}
+
+// LoadProjectReadOnly builds the same effective project configuration without
+// updating the project's node-port sidecar.
+func LoadProjectReadOnly(path, sharedPath string) (*Config, error) {
+	return loadProject(path, sharedPath, false)
+}
+
+func loadProject(path, sharedPath string, persistPorts bool) (*Config, error) {
+	projectAbs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve project config: %w", err)
+	}
+	sharedAbs, err := filepath.Abs(sharedPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve shared config: %w", err)
+	}
+	if filepath.Clean(projectAbs) == filepath.Clean(sharedAbs) {
+		if persistPorts {
+			return Load(projectAbs)
+		}
+		return LoadReadOnly(projectAbs)
+	}
+
+	shared, err := LoadShared(sharedAbs)
+	if err != nil {
+		return nil, fmt.Errorf("load shared node sources: %w", err)
+	}
+	return loadProjectWithShared(path, shared, persistPorts)
+}
+
+func loadProjectWithShared(path string, shared *Config, persistPorts bool) (*Config, error) {
+	if shared == nil {
+		return nil, errors.New("shared source config is nil")
+	}
+	projectAbs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve project config: %w", err)
+	}
+	sharedAbs, err := filepath.Abs(shared.FilePath())
+	if err != nil {
+		return nil, fmt.Errorf("resolve shared config: %w", err)
+	}
+	if filepath.Clean(projectAbs) == filepath.Clean(sharedAbs) {
+		if persistPorts {
+			return Load(projectAbs)
+		}
+		return LoadReadOnly(projectAbs)
+	}
+	project, err := decodeConfig(projectAbs)
+	if err != nil {
+		return nil, err
+	}
+	project.sourcesShared = true
+	project.Subscriptions = append([]string(nil), shared.Subscriptions...)
+	project.DisabledSubscriptions = append([]string(nil), shared.DisabledSubscriptions...)
+	// Apply per-project subscription selection filter. When selected_subscriptions
+	// is empty, the project uses all shared subscriptions (backward compatible).
+	if len(project.SelectedSubscriptions) > 0 {
+		effective := project.EffectiveSubscriptions()
+		project.Subscriptions = effective
+	}
+	project.Nodes = make([]NodeConfig, 0, len(shared.Nodes))
+	for _, node := range shared.Nodes {
+		if node.Source == NodeSourceSubscription {
+			continue
+		}
+		node.Port = 0
+		node.Username = ""
+		node.Password = ""
+		project.Nodes = append(project.Nodes, node)
+	}
+	// Without subscriptions, nodes_file belongs to the shared source catalog,
+	// not to the project runtime.
+	if len(project.Subscriptions) == 0 {
+		project.NodesFile = ""
+	}
+	if err := project.normalize(); err != nil {
 		return nil, err
 	}
 
-	// Restore persisted proxy ports so a restart keeps the same port per node.
-	if err := cfg.applyPersistedPorts(); err != nil {
-		return nil, err
+	// A new project has no local subscription cache yet. Seed missing URLs from
+	// the shared cache so it can start with the current catalog without sharing
+	// status, refresh timestamps, or subsequent cache writes. Only seed
+	// subscriptions that are in the project's effective subscription list.
+	projectSubscriptionURLs := make(map[string]struct{}, len(project.Subscriptions))
+	for _, node := range project.Nodes {
+		if node.Source == NodeSourceSubscription && node.SubscriptionURL != "" {
+			projectSubscriptionURLs[node.SubscriptionURL] = struct{}{}
+		}
 	}
-
-	return &cfg, nil
+	effectiveURLs := make(map[string]struct{}, len(project.Subscriptions))
+	for _, rawURL := range project.Subscriptions {
+		effectiveURLs[rawURL] = struct{}{}
+	}
+	for _, node := range shared.Nodes {
+		if node.Source != NodeSourceSubscription || node.SubscriptionURL == "" {
+			continue
+		}
+		if _, present := projectSubscriptionURLs[node.SubscriptionURL]; present {
+			continue
+		}
+		// Skip nodes from subscriptions not selected by this project
+		if _, effective := effectiveURLs[node.SubscriptionURL]; !effective {
+			continue
+		}
+		node.Port = 0
+		node.Username = ""
+		node.Password = ""
+		project.Nodes = append(project.Nodes, node)
+	}
+	project.Nodes, _ = dedupeNodesByKey(project.Nodes)
+	if persistPorts {
+		if err := project.applyPersistedPorts(); err != nil {
+			return nil, err
+		}
+	}
+	return project, nil
 }
 
 // ExtractNodeName extracts a human-readable name from a proxy URI.
@@ -433,15 +697,7 @@ func (c *Config) normalize() error {
 	if c.Management.Listen == "" {
 		c.Management.Listen = "127.0.0.1:9091"
 	}
-	if c.Management.ProbeTarget == "" {
-		c.Management.ProbeTarget = "http://cp.cloudflare.com/generate_204"
-	}
-	if c.Management.ProbeInterval <= 0 {
-		c.Management.ProbeInterval = 5 * time.Minute
-	}
-	if c.Management.ProbeTimeout <= 0 {
-		c.Management.ProbeTimeout = DefaultProbeTimeout
-	} else if err := ValidateProbeTimeout(c.Management.ProbeTimeout); err != nil {
+	if err := c.normalizeProbeConfig(); err != nil {
 		return err
 	}
 	if c.Management.Enabled == nil {
@@ -524,6 +780,82 @@ func (c *Config) normalize() error {
 				continue
 			}
 			c.Nodes = append(c.Nodes, node)
+		}
+	}
+
+	if c.filePath != "" && !c.skipRuntimeRecovery {
+		storedNodes, _, _, hasCatalog, catalogURLs, err := state.LoadRecoverySnapshot(c.filePath)
+		if err != nil {
+			return fmt.Errorf("load runtime recovery state: %w", err)
+		}
+		configuredSubscriptions := make(map[string]bool, len(c.Subscriptions))
+		for _, rawURL := range c.Subscriptions {
+			configuredSubscriptions[rawURL] = c.SubscriptionEnabled(rawURL)
+		}
+		existing := make(map[string]struct{}, len(c.Nodes))
+		for idx := range c.Nodes {
+			existing[c.Nodes[idx].NodeKey()] = struct{}{}
+		}
+		appendRecovered := func(node NodeConfig) {
+			key := node.NodeKey()
+			if key == "" {
+				return
+			}
+			if _, ok := existing[key]; ok {
+				return
+			}
+			existing[key] = struct{}{}
+			c.Nodes = append(c.Nodes, node)
+		}
+		if hasCatalog {
+			// The active catalog is committed only after sing-box starts. It is the
+			// authoritative subscription node set after an abnormal exit, including
+			// an intentionally empty set.
+			c.recoveredStateCatalog = true
+			c.recoveredCatalogURLs = make(map[string]struct{}, len(catalogURLs))
+			for _, rawURL := range catalogURLs {
+				c.recoveredCatalogURLs[rawURL] = struct{}{}
+			}
+			kept := c.Nodes[:0]
+			for _, node := range c.Nodes {
+				_, wasCommitted := c.recoveredCatalogURLs[node.SubscriptionURL]
+				if node.Source != NodeSourceSubscription || (node.SubscriptionURL != "" && !wasCommitted) {
+					kept = append(kept, node)
+				}
+			}
+			c.Nodes = kept
+			existing = make(map[string]struct{}, len(c.Nodes))
+			for idx := range c.Nodes {
+				existing[c.Nodes[idx].NodeKey()] = struct{}{}
+			}
+			activeRecords := make([]state.NodeRecord, 0, len(storedNodes))
+			for _, record := range storedNodes {
+				if !record.Active || record.Source != string(NodeSourceSubscription) {
+					continue
+				}
+				if _, configured := configuredSubscriptions[record.SubscriptionURL]; !configured {
+					continue
+				}
+				activeRecords = append(activeRecords, record)
+			}
+			sort.SliceStable(activeRecords, func(i, j int) bool {
+				if activeRecords[i].Order == activeRecords[j].Order {
+					return activeRecords[i].ID < activeRecords[j].ID
+				}
+				return activeRecords[i].Order < activeRecords[j].Order
+			})
+			for _, record := range activeRecords {
+				enabled := configuredSubscriptions[record.SubscriptionURL]
+				if !enabled {
+					continue
+				}
+				appendRecovered(NodeConfig{
+					Name: record.Name, URI: record.URI, Port: record.Port,
+					Username: record.Username, Password: record.Password,
+					Source: NodeSourceSubscription, SubscriptionURL: record.SubscriptionURL,
+					StateKey: record.ID,
+				})
+			}
 		}
 	}
 
@@ -779,15 +1111,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 	if c.Management.Listen == "" {
 		c.Management.Listen = "127.0.0.1:9091"
 	}
-	if c.Management.ProbeTarget == "" {
-		c.Management.ProbeTarget = "http://cp.cloudflare.com/generate_204"
-	}
-	if c.Management.ProbeInterval <= 0 {
-		c.Management.ProbeInterval = 5 * time.Minute
-	}
-	if c.Management.ProbeTimeout <= 0 {
-		c.Management.ProbeTimeout = DefaultProbeTimeout
-	} else if err := ValidateProbeTimeout(c.Management.ProbeTimeout); err != nil {
+	if err := c.normalizeProbeConfig(); err != nil {
 		return err
 	}
 	if c.Management.Enabled == nil {
@@ -966,6 +1290,36 @@ func (c *Config) normalizeLogConfig() {
 	}
 }
 
+func (c *Config) normalizeProbeConfig() error {
+	if c.Probe.Target == "" {
+		c.Probe.Target = c.Management.ProbeTarget
+	}
+	if c.Probe.Interval <= 0 {
+		c.Probe.Interval = c.Management.ProbeInterval
+	}
+	if c.Probe.Timeout <= 0 {
+		c.Probe.Timeout = c.Management.ProbeTimeout
+	}
+	if c.Probe.Concurrency <= 0 {
+		c.Probe.Concurrency = c.Management.ProbeConcurrency
+	}
+	if c.Probe.Target == "" {
+		c.Probe.Target = "http://cp.cloudflare.com/generate_204"
+	}
+	if c.Probe.Interval <= 0 {
+		c.Probe.Interval = 5 * time.Minute
+	}
+	if c.Probe.Timeout <= 0 {
+		c.Probe.Timeout = DefaultProbeTimeout
+	} else if err := ValidateProbeTimeout(c.Probe.Timeout); err != nil {
+		return err
+	}
+	if c.Probe.Concurrency <= 0 {
+		c.Probe.Concurrency = 32
+	}
+	return nil
+}
+
 // ManagementEnabled reports whether the monitoring endpoint should run.
 func (c *Config) ManagementEnabled() bool {
 	if c.Management.Enabled == nil {
@@ -977,7 +1331,7 @@ func (c *Config) ManagementEnabled() bool {
 // ProbeConcurrencyOrDefault returns the configured probe concurrency clamped
 // to a safe range (1-1024). When unset or invalid, a sensible default is used.
 func (c *Config) ProbeConcurrencyOrDefault() int {
-	v := c.Management.ProbeConcurrency
+	v := c.Probe.Concurrency
 	if v <= 0 {
 		return 32
 	}
@@ -989,18 +1343,26 @@ func (c *Config) ProbeConcurrencyOrDefault() int {
 
 // ProbeIntervalOrDefault returns the interval between automatic full probes.
 func (c *Config) ProbeIntervalOrDefault() time.Duration {
-	if c.Management.ProbeInterval <= 0 {
+	if c.Probe.Interval <= 0 {
 		return 5 * time.Minute
 	}
-	return c.Management.ProbeInterval
+	return c.Probe.Interval
 }
 
 // ProbeTimeoutOrDefault returns the timeout applied to each node probe.
 func (c *Config) ProbeTimeoutOrDefault() time.Duration {
-	if c.Management.ProbeTimeout <= 0 {
+	if c.Probe.Timeout <= 0 {
 		return DefaultProbeTimeout
 	}
-	return c.Management.ProbeTimeout
+	return c.Probe.Timeout
+}
+
+// ProbeTargetOrDefault returns this project's health-check destination.
+func (c *Config) ProbeTargetOrDefault() string {
+	if strings.TrimSpace(c.Probe.Target) == "" {
+		return "http://cp.cloudflare.com/generate_204"
+	}
+	return c.Probe.Target
 }
 
 const (
@@ -2183,6 +2545,29 @@ func (c *Config) FilePath() string {
 	return c.filePath
 }
 
+// SourcesShared reports whether node and subscription definitions are owned by
+// the workspace's shared/default config instead of this project file.
+func (c *Config) SourcesShared() bool {
+	return c != nil && c.sourcesShared
+}
+
+// RecoveredStateCatalog reports that subscription nodes came from the last
+// successfully started runtime catalog instead of a compatibility cache.
+func (c *Config) RecoveredStateCatalog() bool {
+	return c != nil && c.recoveredStateCatalog
+}
+
+// RecoveredSubscriptionURL reports whether a subscription belonged to the
+// committed runtime catalog. It distinguishes a committed empty node set from
+// a subscription added after the previous process stopped.
+func (c *Config) RecoveredSubscriptionURL(rawURL string) bool {
+	if c == nil || !c.recoveredStateCatalog {
+		return false
+	}
+	_, ok := c.recoveredCatalogURLs[rawURL]
+	return ok
+}
+
 // SetFilePath sets the config file path (used when creating config programmatically).
 func (c *Config) SetFilePath(path string) {
 	if c != nil {
@@ -2211,6 +2596,12 @@ func writeNodesToFile(path string, nodes []NodeConfig) error {
 func (c *Config) SaveNodes() error {
 	if c == nil {
 		return errors.New("config is nil")
+	}
+	if c.sourcesOnly {
+		return c.saveSharedNodes()
+	}
+	if c.sourcesShared {
+		return errors.New("node sources are shared and must be edited through the global catalog")
 	}
 	if c.filePath == "" {
 		return errors.New("config file path is unknown")
@@ -2303,6 +2694,9 @@ func (c *Config) SaveSettings() error {
 	if c.filePath == "" {
 		return errors.New("config file path is unknown")
 	}
+	if c.sourcesOnly {
+		return c.saveSharedSettings()
+	}
 
 	data, err := os.ReadFile(c.filePath)
 	if err != nil {
@@ -2314,11 +2708,14 @@ func (c *Config) SaveSettings() error {
 	}
 
 	saveCfg.ExternalIP = c.ExternalIP
-	saveCfg.Management.ProbeTarget = c.Management.ProbeTarget
+	saveCfg.Probe = c.Probe
 	saveCfg.SkipCertVerify = c.SkipCertVerify
 	saveCfg.Log = c.Log
-	saveCfg.Subscriptions = c.Subscriptions
-	saveCfg.DisabledSubscriptions = c.DisabledSubscriptions
+	if !c.sourcesShared {
+		saveCfg.Subscriptions = c.Subscriptions
+		saveCfg.DisabledSubscriptions = c.DisabledSubscriptions
+	}
+	saveCfg.SelectedSubscriptions = c.SelectedSubscriptions
 	saveCfg.SubscriptionRefresh = c.SubscriptionRefresh
 	saveCfg.Mode = c.Mode
 	saveCfg.Listener = c.Listener
@@ -2326,6 +2723,12 @@ func (c *Config) SaveSettings() error {
 	saveCfg.Pool = c.Pool
 	saveCfg.Sticky = c.Sticky
 	saveCfg.Management = c.Management
+	// Deprecated probe fields are accepted on load but new saves use the
+	// project-level probe section exclusively.
+	saveCfg.Management.ProbeTarget = ""
+	saveCfg.Management.ProbeInterval = 0
+	saveCfg.Management.ProbeTimeout = 0
+	saveCfg.Management.ProbeConcurrency = 0
 
 	newData, err := yaml.Marshal(&saveCfg)
 	if err != nil {
@@ -2337,6 +2740,101 @@ func (c *Config) SaveSettings() error {
 		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
+}
+
+type sharedSourcesDocument struct {
+	NodesFile             string       `yaml:"nodes_file,omitempty"`
+	Subscriptions         []string     `yaml:"subscriptions,omitempty"`
+	DisabledSubscriptions []string     `yaml:"disabled_subscriptions,omitempty"`
+	Nodes                 []NodeConfig `yaml:"nodes,omitempty"`
+}
+
+func (c *Config) loadSharedDocument() (sharedSourcesDocument, error) {
+	if c == nil || c.filePath == "" {
+		return sharedSourcesDocument{}, errors.New("shared config file path is unknown")
+	}
+	data, err := os.ReadFile(c.filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return sharedSourcesDocument{}, nil
+		}
+		return sharedSourcesDocument{}, fmt.Errorf("read shared config: %w", err)
+	}
+	var doc sharedSourcesDocument
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return sharedSourcesDocument{}, fmt.Errorf("decode shared config: %w", err)
+	}
+	return doc, nil
+}
+
+func (c *Config) saveSharedDocument(doc sharedSourcesDocument) error {
+	if c == nil || c.filePath == "" {
+		return errors.New("shared config file path is unknown")
+	}
+	if doc.NodesFile == "" && c.NodesFile != "" {
+		doc.NodesFile = relativeOrAbsolute(filepath.Dir(c.filePath), c.NodesFile)
+	}
+	data, err := yaml.Marshal(&doc)
+	if err != nil {
+		return fmt.Errorf("encode shared config: %w", err)
+	}
+	if err := writeFileWithLock(c.filePath, data, 0o644); err != nil {
+		return fmt.Errorf("write shared config: %w", err)
+	}
+	return nil
+}
+
+func (c *Config) saveSharedSettings() error {
+	doc, err := c.loadSharedDocument()
+	if err != nil {
+		return err
+	}
+	doc.Subscriptions = append([]string(nil), c.Subscriptions...)
+	doc.DisabledSubscriptions = append([]string(nil), c.DisabledSubscriptions...)
+	c.normalizeDisabledSubscriptions()
+	doc.DisabledSubscriptions = append([]string(nil), c.DisabledSubscriptions...)
+	return c.saveSharedDocument(doc)
+}
+
+func (c *Config) saveSharedNodes() error {
+	doc, err := c.loadSharedDocument()
+	if err != nil {
+		return err
+	}
+	var inlineNodes []NodeConfig
+	var fileNodes []NodeConfig
+	for _, node := range c.Nodes {
+		clean := NodeConfig{
+			Name: node.Name, URI: node.URI,
+			Source: node.Source, SubscriptionURL: node.SubscriptionURL,
+		}
+		switch node.Source {
+		case NodeSourceInline:
+			inlineNodes = append(inlineNodes, clean)
+		case NodeSourceFile, NodeSourceSubscription:
+			fileNodes = append(fileNodes, clean)
+		default:
+			inlineNodes = append(inlineNodes, clean)
+		}
+	}
+	if len(fileNodes) > 0 || c.NodesFile != "" || doc.NodesFile != "" {
+		nodesPath := c.NodesFile
+		if nodesPath == "" {
+			nodesPath = doc.NodesFile
+			if nodesPath != "" && !filepath.IsAbs(nodesPath) {
+				nodesPath = filepath.Join(filepath.Dir(c.filePath), nodesPath)
+			}
+		}
+		if nodesPath == "" {
+			nodesPath = filepath.Join(filepath.Dir(c.filePath), "nodes.txt")
+		}
+		if err := writeNodesToFile(nodesPath, fileNodes); err != nil {
+			return fmt.Errorf("write shared nodes file: %w", err)
+		}
+		doc.NodesFile = relativeOrAbsolute(filepath.Dir(c.filePath), nodesPath)
+	}
+	doc.Nodes = inlineNodes
+	return c.saveSharedDocument(doc)
 }
 
 // IsPortAvailable checks if a port is available for binding.

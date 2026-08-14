@@ -25,41 +25,45 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	workspace, err := config.LoadWorkspace(configPath, cfg)
+	if err != nil {
+		log.Fatalf("load project workspace: %v", err)
+	}
 
 	// Setup logging based on config
-	setupLogging(cfg)
+	setupLogging(workspace.Log)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := app.Run(ctx, cfg); err != nil {
+	if err := app.RunWorkspace(ctx, workspace); err != nil {
 		fmt.Fprintf(os.Stderr, "proxy pool exited with error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func setupLogging(cfg *config.Config) {
+func setupLogging(logCfg config.LogConfig) {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
 	// Always include the in-memory ring buffer for dashboard console
 	writers := []io.Writer{os.Stdout, monitor.LogWriter()}
 
-	if cfg.Log.Output == "file" {
+	if logCfg.Output == "file" {
 		// Ensure log directory exists
-		logDir := filepath.Dir(cfg.Log.File)
+		logDir := filepath.Dir(logCfg.File)
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			log.Printf("\u26a0\ufe0f Failed to create log dir %s: %v, falling back to stdout", logDir, err)
 		} else {
 			lj := &lumberjack.Logger{
-				Filename:   cfg.Log.File,
-				MaxSize:    cfg.Log.MaxSize, // MB
-				MaxBackups: cfg.Log.MaxBackups,
-				MaxAge:     cfg.Log.MaxAge, // days
-				Compress:   cfg.Log.Compress,
+				Filename:   logCfg.File,
+				MaxSize:    logCfg.MaxSize, // MB
+				MaxBackups: logCfg.MaxBackups,
+				MaxAge:     logCfg.MaxAge, // days
+				Compress:   logCfg.Compress,
 			}
 			writers = append(writers, lj)
 			log.Printf("\u2705 Log rotation enabled: file=%s, maxSize=%dMB, maxBackups=%d, maxAge=%dd",
-				cfg.Log.File, cfg.Log.MaxSize, cfg.Log.MaxBackups, cfg.Log.MaxAge)
+				logCfg.File, logCfg.MaxSize, logCfg.MaxBackups, logCfg.MaxAge)
 		}
 	}
 

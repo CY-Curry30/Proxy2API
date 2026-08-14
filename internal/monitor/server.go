@@ -94,12 +94,18 @@ type SubscriptionInfo struct {
 
 // Server exposes HTTP endpoints for monitoring.
 type Server struct {
-	cfg    Config
-	cfgMu  sync.RWMutex   // 保护动态配置字段
-	cfgSrc *config.Config // 可持久化的配置对象
-	mgr    *Manager
-	srv    *http.Server
-	logger *log.Logger
+	cfg         Config
+	cfgMu       *sync.RWMutex  // 保护动态配置字段；项目视图共享所属项目的锁
+	cfgSrc      *config.Config // 可持久化的配置对象
+	sharedCfg   *config.Config
+	sharedCfgMu *sync.RWMutex
+	mgr         *Manager
+	srv         *http.Server
+	logger      *log.Logger
+	projects    ProjectController
+	projectID   string
+	catalogOnly bool
+	logBuffer   *LogBuffer
 
 	// Session management
 	sessionMu  sync.RWMutex
@@ -109,7 +115,11 @@ type Server struct {
 	// probeAllInFlight bounds batch "probe all" to a single concurrent run.
 	// Without it, N simultaneous requests each spin up to `concurrency` probes,
 	// multiplying total in-flight dials and starving host fd/memory limits.
-	probeAllInFlight atomic.Bool
+	probeAllInFlight *atomic.Bool
+	projectProbeMu   sync.Mutex
+	projectProbeGate map[string]*atomic.Bool
+	projectConfigMu  sync.Mutex
+	projectConfigMap map[string]*sync.RWMutex
 
 	subRefresher SubscriptionRefresher
 	nodeMgr      NodeManager
@@ -117,7 +127,7 @@ type Server struct {
 
 // NewServer constructs a server; it can be nil when disabled.
 func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
-	if !cfg.Enabled || mgr == nil {
+	if !cfg.Enabled {
 		return nil
 	}
 	if logger == nil {
@@ -125,11 +135,16 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	}
 
 	s := &Server{
-		cfg:        cfg,
-		mgr:        mgr,
-		logger:     logger,
-		sessions:   make(map[string]*Session),
-		sessionTTL: 24 * time.Hour,
+		cfg:              cfg,
+		cfgMu:            &sync.RWMutex{},
+		mgr:              mgr,
+		logger:           logger,
+		logBuffer:        SharedLogBuffer,
+		sessions:         make(map[string]*Session),
+		sessionTTL:       24 * time.Hour,
+		probeAllInFlight: &atomic.Bool{},
+		projectProbeGate: make(map[string]*atomic.Bool),
+		projectConfigMap: make(map[string]*sync.RWMutex),
 	}
 
 	// Start session cleanup goroutine
@@ -138,32 +153,368 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/auth", s.handleAuth)
-	mux.HandleFunc("/api/settings", s.withAuth(s.handleSettings))
-	mux.HandleFunc("/api/nodes", s.withAuth(s.handleNodes))
-	mux.HandleFunc("/api/nodes/online", s.withAuth(s.handleOnlineNodes))
-	mux.HandleFunc("/api/nodes/by-port", s.withAuth(s.handleNodeByPort))
-	mux.HandleFunc("/api/nodes/config", s.withAuth(s.handleConfigNodes))
-	mux.HandleFunc("/api/nodes/config/", s.withAuth(s.handleConfigNodeItem))
-	mux.HandleFunc("/api/nodes/import", s.withAuth(s.handleNodeImport))
-	mux.HandleFunc("/api/nodes/probe-all", s.withAuth(s.handleProbeAll))
-	mux.HandleFunc("/api/nodes/", s.withAuth(s.handleNodeAction))
-	mux.HandleFunc("/api/debug", s.withAuth(s.handleDebug))
-	mux.HandleFunc("/api/export", s.withAuth(s.handleExport))
-	mux.HandleFunc("/api/subscription/status", s.withAuth(s.handleSubscriptionStatus))
-	mux.HandleFunc("/api/subscription/refresh", s.withAuth(s.handleSubscriptionRefresh))
-	mux.HandleFunc("/api/subscription/config", s.withAuth(s.handleSubscriptionConfig))
-	mux.HandleFunc("/api/subscriptions", s.withAuth(s.handleSubscriptions))
-	mux.HandleFunc("/api/subscriptions/settings", s.withAuth(s.handleSubscriptionSettings))
-	mux.HandleFunc("/api/subscriptions/refresh", s.withAuth(s.handleManagedSubscriptionRefresh))
-	mux.HandleFunc("/api/sticky/fixed-node", s.withAuth(s.handleStickyNode))
+	mux.HandleFunc("/api/projects", s.withAuth(s.handleProjects))
+	mux.HandleFunc("/api/projects/", s.withAuth(s.handleProjectRoute))
+	mux.HandleFunc("/api/system/settings", s.withAuth(s.handleSystemSettings))
+	mux.HandleFunc("/api/settings", s.withAuth(s.withDefaultProject((*Server).handleSettings)))
+	mux.HandleFunc("/api/nodes", s.withAuth(s.withDefaultProject((*Server).handleNodes)))
+	mux.HandleFunc("/api/nodes/online", s.withAuth(s.withDefaultProject((*Server).handleOnlineNodes)))
+	mux.HandleFunc("/api/nodes/by-port", s.withAuth(s.withDefaultProject((*Server).handleNodeByPort)))
+	mux.HandleFunc("/api/nodes/config", s.withAuth(s.withDefaultProject((*Server).handleConfigNodes)))
+	mux.HandleFunc("/api/nodes/config/", s.withAuth(s.withDefaultProject((*Server).handleConfigNodeItem)))
+	mux.HandleFunc("/api/nodes/import", s.withAuth(s.withDefaultProject((*Server).handleNodeImport)))
+	mux.HandleFunc("/api/nodes/probe-all", s.withAuth(s.withDefaultProject((*Server).handleProbeAll)))
+	mux.HandleFunc("/api/nodes/", s.withAuth(s.withDefaultProject((*Server).handleNodeAction)))
+	mux.HandleFunc("/api/debug", s.withAuth(s.withDefaultProject((*Server).handleDebug)))
+	mux.HandleFunc("/api/export", s.withAuth(s.withDefaultProject((*Server).handleExport)))
+	mux.HandleFunc("/api/subscription/status", s.withAuth(s.withDefaultProject((*Server).handleSubscriptionStatus)))
+	mux.HandleFunc("/api/subscription/refresh", s.withAuth(s.withDefaultProject((*Server).handleSubscriptionRefresh)))
+	mux.HandleFunc("/api/subscription/config", s.withAuth(s.withDefaultProject((*Server).handleSubscriptionConfig)))
+	mux.HandleFunc("/api/subscriptions", s.withAuth(s.withDefaultProject((*Server).handleSubscriptions)))
+	mux.HandleFunc("/api/subscriptions/settings", s.withAuth(s.withDefaultProject((*Server).handleSubscriptionSettings)))
+	mux.HandleFunc("/api/subscriptions/refresh", s.withAuth(s.withDefaultProject((*Server).handleManagedSubscriptionRefresh)))
+	mux.HandleFunc("/api/sticky/fixed-node", s.withAuth(s.withDefaultProject((*Server).handleStickyNode)))
 	// Keep the old endpoint as a compatibility alias; its behavior now targets
 	// the sticky listener instead of the primary pool listener.
-	mux.HandleFunc("/api/pool/fixed-node", s.withAuth(s.handleStickyNode))
-	mux.HandleFunc("/api/reload", s.withAuth(s.handleReload))
-	mux.HandleFunc("/api/traffic", s.withAuth(s.handleTraffic))
-	mux.HandleFunc("/api/logs", s.withAuth(s.handleLogs))
+	mux.HandleFunc("/api/pool/fixed-node", s.withAuth(s.withDefaultProject((*Server).handleStickyNode)))
+	mux.HandleFunc("/api/reload", s.withAuth(s.withDefaultProject((*Server).handleReload)))
+	mux.HandleFunc("/api/traffic", s.withAuth(s.withDefaultProject((*Server).handleTraffic)))
+	mux.HandleFunc("/api/logs", s.withAuth(s.withDefaultProject((*Server).handleLogs)))
 	s.srv = &http.Server{Addr: cfg.Listen, Handler: mux}
 	return s
+}
+
+type scopedProjectHandler func(*Server, http.ResponseWriter, *http.Request)
+
+// SetProjectController switches the server to multi-project routing. Existing
+// top-level API paths continue to resolve through the configured default
+// project.
+func (s *Server) SetProjectController(controller ProjectController) {
+	if s != nil {
+		s.projects = controller
+	}
+}
+
+func (s *Server) withDefaultProject(next scopedProjectHandler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.projects == nil {
+			next(s, w, r)
+			return
+		}
+		projectID := strings.TrimSpace(s.projects.DefaultProjectID())
+		if projectID == "" {
+			binding, err := s.projects.SharedCatalog()
+			if err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				writeJSON(w, map[string]any{"error": err.Error()})
+				return
+			}
+			next(s.scopedProject(binding), w, r)
+			return
+		}
+		binding, err := s.projects.Project(projectID)
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeJSON(w, map[string]any{"error": err.Error()})
+			return
+		}
+		next(s.scopedProject(binding), w, r)
+	}
+}
+
+func (s *Server) scopedProject(binding ProjectBinding) *Server {
+	cfg := s.cfg
+	cfg.StateStore = nil
+	cfg.ProbeTarget = binding.Config.ProbeTargetOrDefault()
+	cfg.ProbeInterval = binding.Config.ProbeIntervalOrDefault()
+	cfg.ProbeTimeout = binding.Config.ProbeTimeoutOrDefault()
+	cfg.ProbeConcurrency = binding.Config.ProbeConcurrencyOrDefault()
+	cfg.ExternalIP = binding.Config.ExternalIP
+	cfg.SkipCertVerify = binding.Config.SkipCertVerify
+	cfg.StickyNode = binding.Config.Sticky.FixedNode
+	cfg.TrafficAPI = fmt.Sprintf("http://127.0.0.1:%d/traffic", binding.Config.ClashAPIPort)
+	if binding.Config.Mode == "multi-port" || binding.Config.Mode == "hybrid" {
+		cfg.ProxyUsername = binding.Config.MultiPort.Username
+		cfg.ProxyPassword = binding.Config.MultiPort.Password
+	} else {
+		cfg.ProxyUsername = binding.Config.Listener.Username
+		cfg.ProxyPassword = binding.Config.Listener.Password
+	}
+	logBuffer := binding.LogBuffer
+	if logBuffer == nil {
+		logBuffer = SharedLogBuffer
+	}
+	return &Server{
+		cfg:              cfg,
+		cfgMu:            s.configLock(binding.ID),
+		cfgSrc:           binding.Config,
+		sharedCfg:        binding.SharedConfig,
+		sharedCfgMu:      binding.SharedConfigMu,
+		mgr:              binding.Monitor,
+		logger:           s.logger,
+		projects:         s.projects,
+		projectID:        binding.ID,
+		catalogOnly:      binding.CatalogOnly,
+		logBuffer:        logBuffer,
+		probeAllInFlight: s.probeGate(binding.ID),
+		subRefresher:     binding.SubscriptionRefresher,
+		nodeMgr:          binding.NodeManager,
+	}
+}
+
+func (s *Server) ensureSharedSourceOwner(w http.ResponseWriter) bool {
+	if s.projects == nil || s.sharedCfg != nil {
+		return true
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+	writeJSON(w, map[string]any{"error": "共享节点和订阅配置未初始化"})
+	return false
+}
+
+func (s *Server) sharedSourceConfig() *config.Config {
+	if s.sharedCfg != nil {
+		return s.sharedCfg
+	}
+	return s.cfgSrc
+}
+
+func (s *Server) sharedSourceLock() *sync.RWMutex {
+	if s.sharedCfgMu != nil {
+		return s.sharedCfgMu
+	}
+	return s.cfgMu
+}
+
+func (s *Server) reloadSharedSources(ctx context.Context, response map[string]any) {
+	if s.projects == nil {
+		return
+	}
+	if err := s.projects.ReloadSharedSources(ctx); err != nil {
+		response["shared_reload_error"] = err.Error()
+		return
+	}
+	response["shared_reloaded"] = true
+}
+
+func (s *Server) configLock(projectID string) *sync.RWMutex {
+	s.projectConfigMu.Lock()
+	defer s.projectConfigMu.Unlock()
+	if lock := s.projectConfigMap[projectID]; lock != nil {
+		return lock
+	}
+	lock := &sync.RWMutex{}
+	s.projectConfigMap[projectID] = lock
+	return lock
+}
+
+func (s *Server) probeGate(projectID string) *atomic.Bool {
+	s.projectProbeMu.Lock()
+	defer s.projectProbeMu.Unlock()
+	if gate := s.projectProbeGate[projectID]; gate != nil {
+		return gate
+	}
+	gate := &atomic.Bool{}
+	s.projectProbeGate[projectID] = gate
+	return gate
+}
+
+func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
+	if s.projects == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		writeJSON(w, map[string]any{"error": "project management is not enabled"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{
+			"default_project": s.projects.DefaultProjectID(),
+			"items":           s.projects.ListProjects(),
+		})
+	case http.MethodPost:
+		var request ProjectCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "invalid request body"})
+			return
+		}
+		created, err := s.projects.CreateProject(r.Context(), request)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": err.Error()})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, created)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
+	if s.projects == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		writeJSON(w, map[string]any{"error": "project management is not enabled"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		settings := s.projects.SystemSettings()
+		writeJSON(w, map[string]any{
+			"management": map[string]any{
+				"enabled":  settings.Management.Enabled,
+				"listen":   settings.Management.Listen,
+				"password": settings.Management.Password,
+			},
+			"log": settings.Log,
+		})
+	case http.MethodPut:
+		var settings SystemSettings
+		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "invalid request body"})
+			return
+		}
+		if err := s.projects.UpdateSystemSettings(r.Context(), settings); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]any{"message": "system settings saved", "need_restart": true})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleProjectRoute(w http.ResponseWriter, r *http.Request) {
+	if s.projects == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		writeJSON(w, map[string]any{"error": "project management is not enabled"})
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/projects/")
+	parts := strings.SplitN(path, "/", 2)
+	projectID, err := url.PathUnescape(parts[0])
+	if err != nil || strings.TrimSpace(projectID) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "invalid project id"})
+		return
+	}
+	if len(parts) == 1 || parts[1] == "" {
+		s.handleProjectItem(w, r, projectID)
+		return
+	}
+	actionOrAPI := parts[1]
+	if actionOrAPI == "start" || actionOrAPI == "stop" || actionOrAPI == "reload" {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var actionErr error
+		switch actionOrAPI {
+		case "start":
+			actionErr = s.projects.StartProject(r.Context(), projectID)
+		case "stop":
+			actionErr = s.projects.StopProject(r.Context(), projectID)
+		case "reload":
+			actionErr = s.projects.ReloadProject(r.Context(), projectID)
+		}
+		if actionErr != nil {
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]any{"error": actionErr.Error()})
+			return
+		}
+		writeJSON(w, map[string]any{"message": actionOrAPI + " completed"})
+		return
+	}
+
+	binding, err := s.projects.Project(projectID)
+	if err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	scoped := s.scopedProject(binding)
+	request := r.Clone(r.Context())
+	clonedURL := *r.URL
+	clonedURL.Path = "/api/" + actionOrAPI
+	clonedURL.RawPath = ""
+	request.URL = &clonedURL
+	runtimeProjectMux(scoped).ServeHTTP(w, request)
+}
+
+func (s *Server) handleProjectItem(w http.ResponseWriter, r *http.Request, projectID string) {
+	switch r.Method {
+	case http.MethodGet:
+		for _, project := range s.projects.ListProjects() {
+			if project.ID == projectID {
+				writeJSON(w, project)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"error": "project not found"})
+	case http.MethodPatch:
+		var request ProjectUpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "invalid request body"})
+			return
+		}
+		updated, err := s.projects.UpdateProject(r.Context(), projectID, request)
+		if err != nil {
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, updated)
+	case http.MethodDelete:
+		deleteData := false
+		if raw := strings.TrimSpace(r.URL.Query().Get("delete_data")); raw != "" {
+			var err error
+			deleteData, err = strconv.ParseBool(raw)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]any{"error": "delete_data must be true or false"})
+				return
+			}
+		}
+		result, err := s.projects.DeleteProjectWithData(r.Context(), projectID, deleteData)
+		if err != nil {
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, result)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func runtimeProjectMux(s *Server) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/nodes", s.handleNodes)
+	mux.HandleFunc("/api/nodes/online", s.handleOnlineNodes)
+	mux.HandleFunc("/api/nodes/by-port", s.handleNodeByPort)
+	mux.HandleFunc("/api/nodes/config", s.handleConfigNodes)
+	mux.HandleFunc("/api/nodes/config/", s.handleConfigNodeItem)
+	mux.HandleFunc("/api/nodes/import", s.handleNodeImport)
+	mux.HandleFunc("/api/nodes/probe-all", s.handleProbeAll)
+	mux.HandleFunc("/api/nodes/", s.handleNodeAction)
+	mux.HandleFunc("/api/debug", s.handleDebug)
+	mux.HandleFunc("/api/export", s.handleExport)
+	mux.HandleFunc("/api/subscription/status", s.handleSubscriptionStatus)
+	mux.HandleFunc("/api/subscription/refresh", s.handleSubscriptionRefresh)
+	mux.HandleFunc("/api/subscription/config", s.handleSubscriptionConfig)
+	mux.HandleFunc("/api/subscriptions", s.handleSubscriptions)
+	mux.HandleFunc("/api/subscriptions/settings", s.handleSubscriptionSettings)
+	mux.HandleFunc("/api/subscriptions/refresh", s.handleManagedSubscriptionRefresh)
+	mux.HandleFunc("/api/sticky/fixed-node", s.handleStickyNode)
+	mux.HandleFunc("/api/pool/fixed-node", s.handleStickyNode)
+	mux.HandleFunc("/api/reload", s.handleReload)
+	mux.HandleFunc("/api/traffic", s.handleTraffic)
+	mux.HandleFunc("/api/logs", s.handleLogs)
+	return mux
 }
 
 // SetSubscriptionRefresher sets the subscription refresher for API endpoints.
@@ -199,7 +550,7 @@ func (s *Server) SetConfig(cfg *config.Config) {
 	s.cfgSrc = cfg
 	if cfg != nil {
 		s.cfg.ExternalIP = cfg.ExternalIP
-		s.cfg.ProbeTarget = cfg.Management.ProbeTarget
+		s.cfg.ProbeTarget = cfg.ProbeTargetOrDefault()
 		s.cfg.ProbeInterval = cfg.ProbeIntervalOrDefault()
 		s.cfg.ProbeTimeout = cfg.ProbeTimeoutOrDefault()
 		s.cfg.SkipCertVerify = cfg.SkipCertVerify
@@ -212,7 +563,7 @@ func (s *Server) SetConfig(cfg *config.Config) {
 			// Re-derive the probe destination and strict-TLS mode so changes to
 			// probe_target / skip_cert_verify take effect on the long-lived
 			// manager without a full process restart.
-			s.mgr.SetProbeTarget(cfg.Management.ProbeTarget, cfg.SkipCertVerify)
+			s.mgr.SetProbeTarget(cfg.ProbeTargetOrDefault(), cfg.SkipCertVerify)
 		}
 		// Sync proxy credentials based on mode
 		if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
@@ -275,7 +626,7 @@ func (s *Server) updateSettings(externalIP, probeTarget string, skipCertVerify b
 	}
 
 	s.cfgSrc.ExternalIP = externalIP
-	s.cfgSrc.Management.ProbeTarget = probeTarget
+	s.cfgSrc.Probe.Target = probeTarget
 	s.cfgSrc.SkipCertVerify = skipCertVerify
 
 	if logCfg != nil {
@@ -454,6 +805,11 @@ func (s *Server) handleNodeByPort(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStickyNode(w http.ResponseWriter, r *http.Request) {
+	if s.catalogOnly && r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusConflict)
+		writeJSON(w, map[string]any{"error": "无项目时不能修改节点运行状态"})
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, map[string]any{"tag": s.mgr.StickyNode()})
@@ -564,6 +920,11 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 	action := ""
 	if len(parts) > 1 {
 		action = parts[1]
+	}
+	if s.catalogOnly && action != "probe" {
+		w.WriteHeader(http.StatusConflict)
+		writeJSON(w, map[string]any{"error": "无项目时只允许探测节点，不能修改节点运行状态"})
+		return
 	}
 	switch action {
 	case "probe":
@@ -1222,7 +1583,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var logCfg *config.LogConfig
-		if req.Log != nil {
+		if req.Log != nil && s.projects == nil {
 			logCfg = &config.LogConfig{
 				Output:     req.Log.Output,
 				MaxSize:    req.Log.MaxSize,
@@ -1273,16 +1634,18 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				s.cfgSrc.Sticky.Port = req.Sticky.Port
 			}
 			if req.Management != nil {
-				s.cfgSrc.Management.Listen = req.Management.Listen
-				s.cfgSrc.Management.Password = req.Management.Password
+				if s.projects == nil {
+					s.cfgSrc.Management.Listen = req.Management.Listen
+					s.cfgSrc.Management.Password = req.Management.Password
+				}
 				if req.Management.ProbeConcurrency > 0 {
-					s.cfgSrc.Management.ProbeConcurrency = req.Management.ProbeConcurrency
+					s.cfgSrc.Probe.Concurrency = req.Management.ProbeConcurrency
 				}
 				if probeInterval > 0 {
-					s.cfgSrc.Management.ProbeInterval = probeInterval
+					s.cfgSrc.Probe.Interval = probeInterval
 				}
 				if probeTimeout > 0 {
-					s.cfgSrc.Management.ProbeTimeout = probeTimeout
+					s.cfgSrc.Probe.Timeout = probeTimeout
 				}
 			}
 			saveErr = s.cfgSrc.SaveSettings()
@@ -1367,12 +1730,17 @@ func (s *Server) handleSubscriptionRefresh(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.cfgMu.RLock()
 		var urls []string
 		var enabled bool
 		var interval string
+		sharedLock := s.sharedSourceLock()
+		sharedLock.RLock()
+		if shared := s.sharedSourceConfig(); shared != nil {
+			urls = append([]string(nil), shared.Subscriptions...)
+		}
+		sharedLock.RUnlock()
+		s.cfgMu.RLock()
 		if s.cfgSrc != nil {
-			urls = s.cfgSrc.Subscriptions
 			enabled = s.cfgSrc.SubscriptionRefresh.Enabled
 			interval = s.cfgSrc.SubscriptionRefresh.Interval.String()
 		}
@@ -1384,6 +1752,14 @@ func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request
 		})
 
 	case http.MethodPut:
+		if s.catalogOnly {
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]any{"error": "无项目时请通过订阅页面管理共享订阅，自动更新计划仅属于项目"})
+			return
+		}
+		if !s.ensureSharedSourceOwner(w) {
+			return
+		}
 		var req struct {
 			Subscriptions []string `json:"subscriptions"`
 			Enabled       bool     `json:"enabled"`
@@ -1412,13 +1788,30 @@ func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request
 			}
 		}
 
-		// Update in-memory config and persist to disk
+		// Persist shared URLs independently from this project's refresh schedule.
+		sharedLock := s.sharedSourceLock()
+		sharedLock.Lock()
+		shared := s.sharedSourceConfig()
+		if shared == nil {
+			sharedLock.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeJSON(w, map[string]any{"error": "共享订阅配置未初始化"})
+			return
+		}
+		shared.Subscriptions = cleanURLs
+		shared.PruneDisabledSubscriptions()
+		if err := shared.SaveSettings(); err != nil {
+			sharedLock.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]any{"error": fmt.Sprintf("保存共享订阅配置失败: %v", err)})
+			return
+		}
+		sharedLock.Unlock()
+
 		s.cfgMu.Lock()
 		if s.cfgSrc != nil {
-			s.cfgSrc.Subscriptions = cleanURLs
 			s.cfgSrc.SubscriptionRefresh.Enabled = req.Enabled
 			s.cfgSrc.SubscriptionRefresh.Interval = interval
-			// Always persist to disk regardless of subscription manager state
 			if err := s.cfgSrc.SaveSettings(); err != nil {
 				s.cfgMu.Unlock()
 				w.WriteHeader(http.StatusInternalServerError)
@@ -1449,8 +1842,21 @@ func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
+		if s.projects != nil && !s.catalogOnly {
+			if err := s.projects.ReloadSharedSources(r.Context()); err != nil {
+				writeJSON(w, map[string]any{
+					"message":             "订阅配置已保存，但部分项目重载失败",
+					"subscriptions":       cleanURLs,
+					"shared_reload_error": err.Error(),
+				})
+				return
+			}
+		}
 
-		status := s.subRefresher.Status()
+		status := SubscriptionStatus{}
+		if s.subRefresher != nil {
+			status = s.subRefresher.Status()
+		}
 		writeJSON(w, map[string]any{
 			"message":       "订阅配置已更新并生效",
 			"subscriptions": cleanURLs,
@@ -1512,14 +1918,19 @@ func validateSubscriptionURL(rawURL string) error {
 }
 
 func (s *Server) subscriptionConfigSnapshot() (urls []string, enabled bool, interval time.Duration) {
-	s.cfgMu.RLock()
-	defer s.cfgMu.RUnlock()
-	if s.cfgSrc == nil {
-		return nil, false, time.Hour
+	sharedLock := s.sharedSourceLock()
+	sharedLock.RLock()
+	if shared := s.sharedSourceConfig(); shared != nil {
+		urls = append([]string(nil), shared.Subscriptions...)
 	}
-	urls = append([]string(nil), s.cfgSrc.Subscriptions...)
-	enabled = s.cfgSrc.SubscriptionRefresh.Enabled
-	interval = s.cfgSrc.SubscriptionRefresh.Interval
+	sharedLock.RUnlock()
+
+	s.cfgMu.RLock()
+	if s.cfgSrc != nil {
+		enabled = s.cfgSrc.SubscriptionRefresh.Enabled
+		interval = s.cfgSrc.SubscriptionRefresh.Interval
+	}
+	s.cfgMu.RUnlock()
 	if interval <= 0 {
 		interval = time.Hour
 	}
@@ -1528,13 +1939,27 @@ func (s *Server) subscriptionConfigSnapshot() (urls []string, enabled bool, inte
 
 func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval time.Duration, refreshURLs ...string) error {
 	urls = append([]string(nil), urls...)
+	sharedLock := s.sharedSourceLock()
+	sharedLock.Lock()
+	shared := s.sharedSourceConfig()
+	if shared == nil {
+		sharedLock.Unlock()
+		return errors.New("共享订阅配置未初始化")
+	}
+	shared.Subscriptions = urls
+	shared.PruneDisabledSubscriptions()
+	if err := shared.SaveSettings(); err != nil {
+		sharedLock.Unlock()
+		return fmt.Errorf("保存共享订阅配置失败: %w", err)
+	}
+	sharedLock.Unlock()
+
 	s.cfgMu.Lock()
 	if s.cfgSrc == nil {
 		s.cfgMu.Unlock()
 		return errors.New("配置管理未启用")
 	}
 	s.cfgSrc.Subscriptions = urls
-	s.cfgSrc.PruneDisabledSubscriptions()
 	s.cfgSrc.SubscriptionRefresh.Enabled = enabled
 	s.cfgSrc.SubscriptionRefresh.Interval = interval
 	if err := s.cfgSrc.SaveSettings(); err != nil {
@@ -1545,10 +1970,38 @@ func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval t
 	if s.subRefresher == nil {
 		return errors.New("订阅管理器未启用")
 	}
+	var refreshErr error
 	if len(refreshURLs) > 0 {
-		return s.subRefresher.UpdateConfigAndRefreshSelected(urls, enabled, interval, refreshURLs)
+		refreshErr = s.subRefresher.UpdateConfigAndRefreshSelected(urls, enabled, interval, refreshURLs)
+	} else {
+		refreshErr = s.subRefresher.UpdateConfigAndRefresh(urls, enabled, interval)
 	}
-	return s.subRefresher.UpdateConfigAndRefresh(urls, enabled, interval)
+	if s.projects != nil && !s.catalogOnly {
+		if reloadErr := s.projects.ReloadSharedSources(context.Background()); reloadErr != nil {
+			return errors.Join(refreshErr, reloadErr)
+		}
+	}
+	return refreshErr
+}
+
+func (s *Server) applySubscriptionSchedule(enabled bool, interval time.Duration) error {
+	urls, _, _ := s.subscriptionConfigSnapshot()
+	s.cfgMu.Lock()
+	if s.cfgSrc == nil {
+		s.cfgMu.Unlock()
+		return errors.New("配置管理未启用")
+	}
+	s.cfgSrc.SubscriptionRefresh.Enabled = enabled
+	s.cfgSrc.SubscriptionRefresh.Interval = interval
+	if err := s.cfgSrc.SaveSettings(); err != nil {
+		s.cfgMu.Unlock()
+		return fmt.Errorf("保存配置失败: %w", err)
+	}
+	s.cfgMu.Unlock()
+	if s.subRefresher != nil {
+		s.subRefresher.UpdateConfig(urls, enabled, interval)
+	}
+	return nil
 }
 
 func (s *Server) subscriptionManagementPayload() map[string]any {
@@ -1560,9 +2013,11 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 		status = s.subRefresher.Status()
 	} else {
 		for _, rawURL := range urls {
-			s.cfgMu.RLock()
-			subscriptionEnabled := s.cfgSrc == nil || s.cfgSrc.SubscriptionEnabled(rawURL)
-			s.cfgMu.RUnlock()
+			sharedLock := s.sharedSourceLock()
+			sharedLock.RLock()
+			shared := s.sharedSourceConfig()
+			subscriptionEnabled := shared == nil || shared.SubscriptionEnabled(rawURL)
+			sharedLock.RUnlock()
 			statusName := "pending"
 			if !subscriptionEnabled {
 				statusName = "disabled"
@@ -1592,6 +2047,9 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, s.subscriptionManagementPayload())
 		return
 	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+		if !s.ensureSharedSourceOwner(w) {
+			return
+		}
 		var req subscriptionMutationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -1644,12 +2102,13 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if req.OriginalURL != req.URL {
-				s.cfgMu.Lock()
-				if s.cfgSrc != nil && !s.cfgSrc.SubscriptionEnabled(req.OriginalURL) {
-					s.cfgSrc.SetSubscriptionEnabled(req.OriginalURL, true)
-					s.cfgSrc.SetSubscriptionEnabled(req.URL, false)
+				sharedLock := s.sharedSourceLock()
+				sharedLock.Lock()
+				if shared := s.sharedSourceConfig(); shared != nil && !shared.SubscriptionEnabled(req.OriginalURL) {
+					shared.SetSubscriptionEnabled(req.OriginalURL, true)
+					shared.SetSubscriptionEnabled(req.URL, false)
 				}
-				s.cfgMu.Unlock()
+				sharedLock.Unlock()
 			}
 		case http.MethodDelete:
 			target := req.URL
@@ -1668,11 +2127,12 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			urls = filtered
-			s.cfgMu.Lock()
-			if s.cfgSrc != nil {
-				s.cfgSrc.SetSubscriptionEnabled(target, true)
+			sharedLock := s.sharedSourceLock()
+			sharedLock.Lock()
+			if shared := s.sharedSourceConfig(); shared != nil {
+				shared.SetSubscriptionEnabled(target, true)
 			}
-			s.cfgMu.Unlock()
+			sharedLock.Unlock()
 		case http.MethodPatch:
 			if req.URL == "" || req.Enabled == nil {
 				w.WriteHeader(http.StatusBadRequest)
@@ -1689,18 +2149,23 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, map[string]any{"error": err.Error()})
 				return
 			}
-			s.cfgMu.Lock()
-			if s.cfgSrc != nil {
-				s.cfgSrc.SetSubscriptionEnabled(req.URL, *req.Enabled)
-				if err := s.cfgSrc.SaveSettings(); err != nil {
-					s.cfgMu.Unlock()
+			sharedLock := s.sharedSourceLock()
+			sharedLock.Lock()
+			if shared := s.sharedSourceConfig(); shared != nil {
+				shared.SetSubscriptionEnabled(req.URL, *req.Enabled)
+				if err := shared.SaveSettings(); err != nil {
+					sharedLock.Unlock()
 					w.WriteHeader(http.StatusInternalServerError)
 					writeJSON(w, map[string]any{"error": fmt.Sprintf("保存订阅状态失败: %v", err)})
 					return
 				}
 			}
-			s.cfgMu.Unlock()
-			writeJSON(w, s.subscriptionManagementPayload())
+			sharedLock.Unlock()
+			payload := s.subscriptionManagementPayload()
+			if !s.catalogOnly {
+				s.reloadSharedSources(r.Context(), payload)
+			}
+			writeJSON(w, payload)
 			return
 		}
 
@@ -1715,6 +2180,11 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSubscriptionSettings(w http.ResponseWriter, r *http.Request) {
+	if s.catalogOnly {
+		w.WriteHeader(http.StatusConflict)
+		writeJSON(w, map[string]any{"error": "无项目时不设置自动订阅计划，请手动更新订阅"})
+		return
+	}
 	if r.Method != http.MethodPut {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -1734,9 +2204,9 @@ func (s *Server) handleSubscriptionSettings(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, map[string]any{"error": "刷新间隔不能小于 5 分钟"})
 		return
 	}
-	urls, _, _ := s.subscriptionConfigSnapshot()
-	if err := s.applySubscriptionConfig(urls, req.Enabled, interval); err != nil {
-		writeJSON(w, map[string]any{"message": "自动刷新配置已保存，但刷新失败", "refresh_error": err.Error()})
+	if err := s.applySubscriptionSchedule(req.Enabled, interval); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"error": err.Error()})
 		return
 	}
 	writeJSON(w, s.subscriptionManagementPayload())
@@ -1756,9 +2226,37 @@ func (s *Server) handleManagedSubscriptionRefresh(w http.ResponseWriter, r *http
 		writeJSON(w, s.subscriptionManagementPayload())
 		return
 	}
-	if err := s.subRefresher.RefreshNow(); err != nil {
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "请求格式错误"})
+		return
+	}
+	req.URL = strings.TrimSpace(req.URL)
+	var refreshErr error
+	if req.URL == "" {
+		refreshErr = s.subRefresher.RefreshNow()
+	} else {
+		urls, enabled, interval := s.subscriptionConfigSnapshot()
+		found := false
+		for _, configuredURL := range urls {
+			if configuredURL == req.URL {
+				found = true
+				break
+			}
+		}
+		if !found {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]any{"error": "订阅不存在"})
+			return
+		}
+		refreshErr = s.subRefresher.UpdateConfigAndRefreshSelected(urls, enabled, interval, []string{req.URL})
+	}
+	if refreshErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		writeJSON(w, map[string]any{"error": err.Error()})
+		writeJSON(w, map[string]any{"error": refreshErr.Error()})
 		return
 	}
 	writeJSON(w, s.subscriptionManagementPayload())
@@ -1798,6 +2296,9 @@ func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]any{"nodes": nodes})
 	case http.MethodPost:
+		if !s.ensureSharedSourceOwner(w) {
+			return
+		}
 		var payload nodePayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -1833,6 +2334,9 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPut:
+		if !s.ensureSharedSourceOwner(w) {
+			return
+		}
 		var payload nodePayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -1848,6 +2352,9 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 		s.reloadAfterNodeChange(r.Context(), response, "节点已更新并重载生效")
 		writeJSON(w, response)
 	case http.MethodDelete:
+		if !s.ensureSharedSourceOwner(w) {
+			return
+		}
 		if err := s.nodeMgr.DeleteNode(r.Context(), nodeName); err != nil {
 			s.respondNodeError(w, err)
 			return
@@ -1867,6 +2374,9 @@ func (s *Server) handleNodeImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.ensureNodeManager(w) {
+		return
+	}
+	if !s.ensureSharedSourceOwner(w) {
 		return
 	}
 
@@ -1910,9 +2420,7 @@ func (s *Server) handleNodeImport(w http.ResponseWriter, r *http.Request) {
 		"message": fmt.Sprintf("已导入 %d 个节点", len(added)),
 	}
 	if len(added) > 0 {
-		if err := s.nodeMgr.TriggerReload(r.Context()); err != nil {
-			response["reload_error"] = err.Error()
-		}
+		s.reloadAfterNodeChange(r.Context(), response, fmt.Sprintf("已导入 %d 个节点并重载生效", len(added)))
 	}
 	writeJSON(w, response)
 }
@@ -1931,9 +2439,10 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		s.respondNodeError(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{
+	response := map[string]any{
 		"message": "重载成功，现有连接已被中断",
-	})
+	}
+	writeJSON(w, response)
 }
 
 func (s *Server) ensureNodeManager(w http.ResponseWriter) bool {
@@ -1946,12 +2455,20 @@ func (s *Server) ensureNodeManager(w http.ResponseWriter) bool {
 }
 
 func (s *Server) reloadAfterNodeChange(ctx context.Context, response map[string]any, successMessage string) {
-	if err := s.nodeMgr.TriggerReload(ctx); err != nil {
-		response["message"] = "节点配置已保存，但自动重载失败"
-		response["reload_error"] = err.Error()
-		return
+	if s.projects == nil {
+		if err := s.nodeMgr.TriggerReload(ctx); err != nil {
+			response["message"] = "节点配置已保存，但自动重载失败"
+			response["reload_error"] = err.Error()
+			return
+		}
+		response["reloaded"] = true
+	} else {
+		s.reloadSharedSources(ctx, response)
+		if _, failed := response["shared_reload_error"]; failed {
+			response["message"] = "节点配置已保存，但部分项目重载失败"
+			return
+		}
 	}
-	response["reloaded"] = true
 	response["message"] = successMessage
 }
 
@@ -1971,7 +2488,17 @@ func (s *Server) respondNodeError(w http.ResponseWriter, err error) {
 // Clash API /traffic returns newline-delimited JSON; we convert to SSE for browser EventSource.
 func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	// Connect to sing-box Clash API
-	resp, err := http.Get("http://127.0.0.1:9092/traffic")
+	trafficAPI := s.cfg.TrafficAPI
+	if trafficAPI == "" {
+		trafficAPI = "http://127.0.0.1:9092/traffic"
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, trafficAPI, nil)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"error": "无法创建流量统计请求", "details": err.Error()})
+		return
+	}
+	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		writeJSON(w, map[string]any{"error": "无法连接到流量统计接口", "details": err.Error()})
@@ -2019,7 +2546,11 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 
 // handleLogs returns recent console log content from the in-memory ring buffer.
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
-	content := SharedLogBuffer.Content()
+	buffer := s.logBuffer
+	if buffer == nil {
+		buffer = SharedLogBuffer
+	}
+	content := buffer.Content()
 	writeJSON(w, map[string]any{"logs": content})
 }
 

@@ -65,8 +65,13 @@ type Options struct {
 
 // MemberMeta carries optional descriptive information for monitoring UI.
 type MemberMeta struct {
+	ID              string
+	Order           int
 	Name            string
 	URI             string
+	Source          string
+	Username        string
+	Password        string
 	Mode            string
 	ListenAddress   string
 	Port            uint16
@@ -99,6 +104,7 @@ type poolOutbound struct {
 	rng             *rand.Rand
 	rngMu           sync.Mutex // protects rng for random mode
 	monitor         *monitor.Manager
+	sharedStates    *SharedStateStore
 	candidatesPool  sync.Pool
 	sticky          bool
 	stickyMu        sync.Mutex        // protects stickyMap
@@ -115,18 +121,20 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 		return nil, E.New("missing outbound manager in context")
 	}
 	monitorMgr := monitor.FromContext(ctx)
+	sharedStates := sharedStateStoreFromContext(ctx)
 	normalized := normalizeOptions(options)
 	memberCount := len(normalized.Members)
 	p := &poolOutbound{
-		Adapter: outbound.NewAdapter(Type, tag, []string{N.NetworkTCP, N.NetworkUDP}, normalized.Members),
-		ctx:     ctx,
-		logger:  logger,
-		manager: manager,
-		options: normalized,
-		mode:    normalized.Mode,
-		rng:     rand.New(rand.NewSource(time.Now().UnixNano())),
-		monitor: monitorMgr,
-		sticky:  normalized.Sticky,
+		Adapter:      outbound.NewAdapter(Type, tag, []string{N.NetworkTCP, N.NetworkUDP}, normalized.Members),
+		ctx:          ctx,
+		logger:       logger,
+		manager:      manager,
+		options:      normalized,
+		mode:         normalized.Mode,
+		rng:          rand.New(rand.NewSource(time.Now().UnixNano())),
+		monitor:      monitorMgr,
+		sharedStates: sharedStates,
+		sticky:       normalized.Sticky,
 		candidatesPool: sync.Pool{
 			New: func() any {
 				return make([]*memberState, 0, memberCount)
@@ -145,10 +153,12 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 		registeredCount := 0
 		for _, memberTag := range normalized.Members {
 			// Acquire shared state for this tag (creates if not exists)
-			state := acquireSharedState(memberTag)
+			state := p.sharedStates.acquire(memberTag)
 
 			meta := normalized.Metadata[memberTag]
 			info := monitor.NodeInfo{
+				ID:              meta.ID,
+				Order:           meta.Order,
 				Tag:             memberTag,
 				Name:            meta.Name,
 				URI:             meta.URI,
@@ -156,12 +166,16 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 				ListenAddress:   meta.ListenAddress,
 				Port:            meta.Port,
 				SubscriptionURL: meta.SubscriptionURL,
+				Source:          meta.Source,
+				Username:        meta.Username,
+				Password:        meta.Password,
 				Suppressed:      meta.Suppressed,
 			}
 			entry := monitorMgr.Register(info)
 			if entry != nil {
 				// Attach entry to shared state so all pool instances share it
 				state.attachEntry(entry)
+				state.setReleaseProbe(p.makeReleaseProbeFunc(memberTag))
 				registeredCount++
 				// Set probe, release, and blacklist functions immediately
 				entry.SetRelease(p.makeReleaseByTagFunc(memberTag))
@@ -169,6 +183,7 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 				if probeFn := p.makeProbeByTagFunc(memberTag); probeFn != nil {
 					entry.SetProbe(probeFn)
 				}
+				state.restore(entry)
 			} else {
 				logger.Warn("failed to register node: ", memberTag)
 			}
@@ -241,7 +256,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 		}
 
 		// Acquire shared state (creates if not exists, reuses if already created)
-		state := acquireSharedState(tag)
+		state := p.sharedStates.acquire(tag)
 
 		member := &memberState{
 			outbound: detour,
@@ -254,6 +269,8 @@ func (p *poolOutbound) initializeMembersLocked() error {
 		if p.monitor != nil {
 			meta := p.options.Metadata[tag]
 			info := monitor.NodeInfo{
+				ID:              meta.ID,
+				Order:           meta.Order,
 				Tag:             tag,
 				Name:            meta.Name,
 				URI:             meta.URI,
@@ -261,17 +278,22 @@ func (p *poolOutbound) initializeMembersLocked() error {
 				ListenAddress:   meta.ListenAddress,
 				Port:            meta.Port,
 				SubscriptionURL: meta.SubscriptionURL,
+				Source:          meta.Source,
+				Username:        meta.Username,
+				Password:        meta.Password,
 				Suppressed:      meta.Suppressed,
 			}
 			entry := p.monitor.Register(info)
 			if entry != nil {
 				state.attachEntry(entry)
+				state.setReleaseProbe(p.makeReleaseProbeFunc(member.tag))
 				member.entry = entry
 				entry.SetRelease(p.makeReleaseFunc(member))
 				entry.SetBlacklistFn(p.makeBlacklistByTagFunc(member.tag))
 				if probe := p.makeProbeFunc(member); probe != nil {
 					entry.SetProbe(probe)
 				}
+				state.restore(entry)
 			}
 		}
 		members = append(members, member)
@@ -405,14 +427,6 @@ func (p *poolOutbound) pickMemberFiltered(network string, tried map[string]bool,
 	candidates = p.availableMembersLocked(now, network, candidates)
 	p.mu.Unlock()
 
-	if len(candidates) == 0 {
-		p.mu.Lock()
-		if p.releaseIfAllBlacklistedLocked(now) {
-			candidates = p.availableMembersLocked(now, network, candidates[:0])
-		}
-		p.mu.Unlock()
-	}
-
 	if p.options.HonorStickySelection && p.monitor != nil {
 		selectedTag := p.monitor.StickyNode()
 		p.syncStickySelection(selectedTag)
@@ -469,14 +483,6 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 	p.mu.Unlock()
 
 	if len(candidates) == 0 {
-		p.mu.Lock()
-		if p.releaseIfAllBlacklistedLocked(now) {
-			candidates = p.availableMembersLocked(now, network, candidates)
-		}
-		p.mu.Unlock()
-	}
-
-	if len(candidates) == 0 {
 		p.putCandidateBuffer(candidates)
 		return nil, E.New("no healthy proxy available")
 	}
@@ -489,12 +495,8 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf []*memberState) []*memberState {
 	result := buf[:0]
 	for _, member := range p.members {
-		if member.entry != nil {
-			if member.entry.Suppressed() || !member.entry.Healthy() {
-				continue
-			}
-		}
-		// Check blacklist via shared state (auto-clears if expired)
+		// Check blacklist first so expiry can release a node even though entering
+		// the blacklist also marks it unavailable pending the release probe.
 		if member.shared != nil && member.shared.isBlacklisted(now) {
 			// Log blacklisted nodes for debugging
 			remaining := member.shared.blacklistRemaining(now)
@@ -503,43 +505,17 @@ func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf
 			}
 			continue
 		}
+		if member.entry != nil {
+			if member.entry.Suppressed() || !member.entry.Healthy() {
+				continue
+			}
+		}
 		if network != "" && !common.Contains(member.outbound.Network(), network) {
 			continue
 		}
 		result = append(result, member)
 	}
 	return result
-}
-
-func (p *poolOutbound) releaseIfAllBlacklistedLocked(now time.Time) bool {
-	if len(p.members) == 0 {
-		return false
-	}
-	// Check if all members are blacklisted
-	activeMembers := 0
-	for _, member := range p.members {
-		if member.entry != nil && member.entry.Suppressed() {
-			continue
-		}
-		activeMembers++
-		if member.shared == nil || !member.shared.isBlacklisted(now) {
-			return false
-		}
-	}
-	if activeMembers == 0 {
-		return false
-	}
-	// All blacklisted, force release all
-	for _, member := range p.members {
-		if member.entry != nil && member.entry.Suppressed() {
-			continue
-		}
-		if member.shared != nil {
-			member.shared.forceRelease()
-		}
-	}
-	p.logger.Warn("all upstream proxies were blacklisted, releasing them for retry")
-	return true
 }
 
 const stickyFallbackKey = "_global_"
@@ -955,11 +931,6 @@ func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, des
 		return result, errors.Join(probeErrors...)
 	}
 
-	// Only a fully healthy node is released from a previous automatic or manual
-	// blacklist. A partial success must remain ineligible for healthy routing.
-	if member.shared != nil {
-		member.shared.forceRelease()
-	}
 	return result, nil
 }
 
@@ -1052,14 +1023,22 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context, 
 // makeReleaseByTagFunc creates a release function that works before member initialization
 func (p *poolOutbound) makeReleaseByTagFunc(tag string) func() {
 	return func() {
-		releaseSharedMember(tag)
+		p.sharedStates.release(tag)
+	}
+}
+
+func (p *poolOutbound) makeReleaseProbeFunc(tag string) func() {
+	return func() {
+		if p.monitor != nil {
+			p.monitor.ProbeAfterRelease(tag)
+		}
 	}
 }
 
 // makeBlacklistByTagFunc creates a blacklist function for manual ban via API
 func (p *poolOutbound) makeBlacklistByTagFunc(tag string) func(time.Duration) {
 	return func(duration time.Duration) {
-		blacklistSharedMember(tag, duration)
+		p.sharedStates.blacklist(tag, duration)
 	}
 }
 

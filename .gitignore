@@ -5,9 +5,12 @@ Proxy2API-*
 
 # Configuration (contains sensitive data)
 config.yaml
+projects.yaml
+projects/
 nodes.txt
 node_ports.json
 .subscription-cache.json
+.proxy2api-state.db
 
 # GeoIP database (auto-downloaded)
 *.mmdb
@@ -33,6 +36,7 @@ logs/
 # Go
 vendor/
 .go-cache/
+.gocache/
 
 # Test artifacts
 coverage.out

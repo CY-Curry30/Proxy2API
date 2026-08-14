@@ -15,6 +15,7 @@ import (
 	"Proxy2API/internal/config"
 	"Proxy2API/internal/monitor"
 	"Proxy2API/internal/outbound/pool"
+	"Proxy2API/internal/state"
 
 	"github.com/sagernet/sing-box"
 	C "github.com/sagernet/sing-box/constant"
@@ -46,6 +47,28 @@ func WithLogger(l Logger) Option {
 	return func(m *Manager) { m.logger = l }
 }
 
+// WithConfigValidator installs a project-aware validation hook. It runs before
+// listeners are replaced so a cross-project port conflict cannot interrupt the
+// currently active instance.
+func WithConfigValidator(validate func(*config.Config) error) Option {
+	return func(m *Manager) { m.configValidator = validate }
+}
+
+// WithSharedConfig supplies the standalone node/subscription catalog used by
+// config-node CRUD while m.cfg continues to own project runtime settings.
+func WithSharedConfig(shared *config.Config, mu *sync.RWMutex) Option {
+	return func(m *Manager) {
+		m.sharedCfg = shared
+		m.sharedMu = mu
+	}
+}
+
+// WithAutomaticHealthChecks controls background and post-reload probes. It is
+// disabled by the projectless shared catalog, where probes are manual only.
+func WithAutomaticHealthChecks(enabled bool) Option {
+	return func(m *Manager) { m.automaticHealthChecks = enabled }
+}
+
 // Manager owns the lifecycle of the active sing-box instance.
 type Manager struct {
 	mu sync.RWMutex
@@ -54,21 +77,30 @@ type Manager struct {
 	monitorMgr    *monitor.Manager
 	monitorServer *monitor.Server
 	cfg           *config.Config
+	sharedCfg     *config.Config
+	sharedMu      *sync.RWMutex
 	monitorCfg    monitor.Config
+	poolState     *pool.SharedStateStore
 
 	drainTimeout      time.Duration
 	minAvailableNodes int
 	logger            Logger
+	configValidator   func(*config.Config) error
 
-	baseCtx            context.Context
-	healthCheckStarted bool
+	baseCtx               context.Context
+	healthCheckStarted    bool
+	automaticHealthChecks bool
+	closeOnce             sync.Once
+	closeErr              error
 }
 
 // New creates a BoxManager with the given config.
 func New(cfg *config.Config, monitorCfg monitor.Config, opts ...Option) *Manager {
 	m := &Manager{
-		cfg:        cfg,
-		monitorCfg: monitorCfg,
+		cfg:                   cfg,
+		monitorCfg:            monitorCfg,
+		poolState:             pool.NewSharedStateStore(),
+		automaticHealthChecks: true,
 	}
 	m.applyConfigSettings(cfg)
 	for _, opt := range opts {
@@ -105,11 +137,17 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.baseCtx = ctx
 	cfg := m.cfg
 	m.mu.Unlock()
+	if err := m.validateConfig(cfg); err != nil {
+		return err
+	}
 
 	if len(cfg.Nodes) == 0 {
+		if err := m.persistActiveNodeCatalog(cfg); err != nil {
+			m.logger.Warnf("failed to persist empty active node catalog: %v", err)
+		}
 		m.mu.Lock()
 		monitorMgr := m.monitorMgr
-		startHealthCheck := monitorMgr != nil && !m.healthCheckStarted
+		startHealthCheck := m.automaticHealthChecks && monitorMgr != nil && !m.healthCheckStarted
 		if startHealthCheck {
 			m.healthCheckStarted = true
 		}
@@ -139,7 +177,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			if conflictPort := extractPortFromBindError(err); conflictPort > 0 {
 				m.logger.Warnf("port %d is in use, reassigning and retrying...", conflictPort)
 				if reassigned := reassignConflictingPort(cfg, conflictPort); reassigned {
-					pool.ResetSharedStateStore() // Reset shared state for rebuild
+					m.poolState.Reset() // Reset only this project's state for rebuild
 					continue
 				}
 			}
@@ -151,11 +189,15 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	m.currentBox = instance
 	m.mu.Unlock()
+	m.poolState.ActivateRestoredBlacklists()
+	if err := m.persistActiveNodeCatalog(cfg); err != nil {
+		m.logger.Warnf("failed to persist active node catalog: %v", err)
+	}
 
 	// Start periodic health check after nodes are registered
 	m.mu.Lock()
 	monitorMgr := m.monitorMgr
-	startHealthCheck := monitorMgr != nil && !m.healthCheckStarted
+	startHealthCheck := m.automaticHealthChecks && monitorMgr != nil && !m.healthCheckStarted
 	if startHealthCheck {
 		m.healthCheckStarted = true
 	}
@@ -164,7 +206,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		monitorMgr.SetProbeSchedule(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
 		if startHealthCheck {
 			monitorMgr.StartPeriodicHealthCheck(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
-		} else {
+		}
+		if !startHealthCheck || monitorMgr.HasRecoveredNodes() {
 			go monitorMgr.ProbeAllNow(cfg.ProbeTimeoutOrDefault())
 		}
 	}
@@ -179,6 +222,9 @@ func (m *Manager) Start(ctx context.Context) error {
 func (m *Manager) Reload(newCfg *config.Config) error {
 	if newCfg == nil {
 		return errors.New("new config is nil")
+	}
+	if err := m.validateConfig(newCfg); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
@@ -211,7 +257,7 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 	time.Sleep(500 * time.Millisecond)
 
 	// Reset shared state store to ensure clean state for new config
-	pool.ResetSharedStateStore()
+	m.poolState.Reset()
 
 	// Clear stale monitor nodes so the dashboard reflects the new config
 	if m.monitorMgr != nil {
@@ -266,7 +312,7 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 		if retry >= maxRetries/2 {
 			if reassignConflictingPort(newCfg, conflictPort) {
 				m.logger.Warnf("port %d persistently in use; reassigned the affected node to a fresh port", conflictPort)
-				pool.ResetSharedStateStore()
+				m.poolState.Reset()
 			}
 		}
 	}
@@ -286,6 +332,10 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 	m.currentBox = instance
 	m.cfg = newCfg
 	m.mu.Unlock()
+	m.poolState.ActivateRestoredBlacklists()
+	if err := m.persistActiveNodeCatalog(newCfg); err != nil {
+		m.logger.Warnf("failed to persist active node catalog: %v", err)
+	}
 
 	// Sync config to monitor server so future WebUI settings changes target the current config pointer
 	if m.monitorServer != nil {
@@ -295,7 +345,9 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 	// Trigger initial health check for newly registered nodes
 	if m.monitorMgr != nil {
 		m.monitorMgr.SetProbeSchedule(newCfg.ProbeIntervalOrDefault(), newCfg.ProbeTimeoutOrDefault())
-		go m.monitorMgr.ProbeAllNow(newCfg.ProbeTimeoutOrDefault())
+		if m.automaticHealthChecks {
+			go m.monitorMgr.ProbePendingNow(newCfg.ProbeTimeoutOrDefault())
+		}
 	}
 
 	m.logger.Infof("reload completed successfully with %d nodes", len(newCfg.Nodes))
@@ -309,6 +361,14 @@ func (m *Manager) rollbackToOldConfig(ctx context.Context, oldCfg *config.Config
 		return
 	}
 	m.logger.Warnf("attempting rollback to previous config...")
+	if err := m.validateConfig(oldCfg); err != nil {
+		m.logger.Errorf("rollback config validation failed: %v", err)
+		return
+	}
+	m.poolState.Reset()
+	if m.monitorMgr != nil {
+		m.monitorMgr.ClearNodes()
+	}
 
 	// The rollback binds the same ports the failed start attempted, which may
 	// still be draining. Retry with backoff so a transient bind conflict does
@@ -338,6 +398,10 @@ func (m *Manager) rollbackToOldConfig(ctx context.Context, oldCfg *config.Config
 	m.currentBox = instance
 	m.cfg = oldCfg
 	m.mu.Unlock()
+	m.poolState.ActivateRestoredBlacklists()
+	if err := m.persistActiveNodeCatalog(oldCfg); err != nil {
+		m.logger.Warnf("failed to restore active node catalog after rollback: %v", err)
+	}
 	// Sync config pointer to monitor server after rollback
 	if m.monitorServer != nil {
 		m.monitorServer.SetConfig(m.cfg)
@@ -345,27 +409,84 @@ func (m *Manager) rollbackToOldConfig(ctx context.Context, oldCfg *config.Config
 	m.logger.Infof("rollback successful")
 }
 
+func (m *Manager) validateConfig(cfg *config.Config) error {
+	if m.configValidator == nil {
+		return nil
+	}
+	if err := m.configValidator(cfg); err != nil {
+		return fmt.Errorf("validate project config: %w", err)
+	}
+	return nil
+}
+
 // Close terminates the active instance and auxiliary components.
 func (m *Manager) Close() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.closeOnce.Do(func() {
+		m.mu.RLock()
+		instance := m.currentBox
+		server := m.monitorServer
+		monitorMgr := m.monitorMgr
+		m.mu.RUnlock()
 
-	var err error
-	if m.currentBox != nil {
-		err = m.currentBox.Close()
+		// Drain management requests first, then cancel and wait for every tracked
+		// probe before the state store is closed by the app.
+		if server != nil {
+			server.Shutdown(context.Background())
+		}
+		if monitorMgr != nil {
+			monitorMgr.Stop()
+		}
+		if instance != nil {
+			m.closeErr = instance.Close()
+		}
+		m.poolState.Reset()
+		if monitorMgr != nil {
+			monitorMgr.ClearNodes()
+		}
+
+		m.mu.Lock()
 		m.currentBox = nil
-	}
-	if m.monitorServer != nil {
-		m.monitorServer.Shutdown(context.Background())
 		m.monitorServer = nil
-	}
-	if m.monitorMgr != nil {
-		m.monitorMgr.Stop()
 		m.monitorMgr = nil
 		m.healthCheckStarted = false
+		m.baseCtx = nil
+		m.mu.Unlock()
+	})
+	return m.closeErr
+}
+
+func (m *Manager) persistActiveNodeCatalog(cfg *config.Config) error {
+	if cfg == nil || m.monitorCfg.StateStore == nil {
+		return nil
 	}
-	m.baseCtx = nil
-	return err
+	if m.monitorMgr == nil {
+		return errors.New("monitor manager is unavailable")
+	}
+	snapshots := m.monitorMgr.Snapshot()
+	records := make([]state.NodeRecord, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		timeline := make([]state.TimelineEvent, 0, len(snapshot.Timeline))
+		for _, event := range snapshot.Timeline {
+			timeline = append(timeline, state.TimelineEvent{
+				Time: event.Time, Success: event.Success,
+				LatencyMS: event.LatencyMs, Error: event.Error,
+			})
+		}
+		records = append(records, state.NodeRecord{
+			ID: snapshot.ID, Name: snapshot.Name, URI: snapshot.URI,
+			Source: snapshot.Source, SubscriptionURL: snapshot.SubscriptionURL,
+			Port: snapshot.Port, Username: snapshot.Username, Password: snapshot.Password,
+			Disabled: snapshot.Suppressed, Order: snapshot.Order, Active: true,
+			IP: snapshot.IP, Region: snapshot.Region, Country: snapshot.Country,
+			FailureCount: snapshot.FailureCount, SuccessCount: snapshot.SuccessCount,
+			Blacklisted: snapshot.Blacklisted, BlacklistedUntil: snapshot.BlacklistedUntil,
+			LastError: snapshot.LastError, LastFailure: snapshot.LastFailure,
+			LastSuccess: snapshot.LastSuccess, LastProbeLatency: snapshot.LastProbeLatency,
+			InitialCheckDone: snapshot.InitialCheckDone, Available: snapshot.Available,
+			Timeline: timeline,
+		})
+	}
+	return m.monitorCfg.StateStore.ReconcileActiveNodes(records, cfg.Subscriptions)
 }
 
 // MonitorManager returns the shared monitor manager.
@@ -426,6 +547,7 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 
 		boxCtx := box.Context(ctx, inboundRegistry, outboundRegistry, endpointRegistry, dnsRegistry, serviceRegistry)
 		boxCtx = monitor.ContextWith(boxCtx, m.monitorMgr)
+		boxCtx = pool.ContextWithSharedStateStore(boxCtx, m.poolState)
 
 		instance, err := newBoxRecover(box.Options{Context: boxCtx, Options: opts})
 		if err == nil {
@@ -679,16 +801,30 @@ func (a monitorLoggerAdapter) Warn(args ...any) {
 
 var errConfigUnavailable = errors.New("config is not initialized")
 
-// ListConfigNodes returns a copy of all configured nodes.
+func (m *Manager) sourceConfigLocked() *config.Config {
+	if m.sharedCfg != nil {
+		return m.sharedCfg
+	}
+	return m.cfg
+}
+
+// ListConfigNodes returns the effective nodes loaded by this runtime. A project
+// manager therefore exposes only that project's nodes, while the catalog
+// runtime exposes the complete source catalog.
 func (m *Manager) ListConfigNodes(ctx context.Context) ([]config.NodeConfig, error) {
 	_ = ctx
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.sharedMu != nil {
+		m.sharedMu.RLock()
+		defer m.sharedMu.RUnlock()
+	}
 
-	if m.cfg == nil {
+	cfg := m.cfg
+	if cfg == nil {
 		return nil, errConfigUnavailable
 	}
-	return cloneNodes(m.cfg.Nodes), nil
+	return cloneNodes(cfg.Nodes), nil
 }
 
 // CreateNode adds a new node to the config and saves it.
@@ -701,8 +837,13 @@ func (m *Manager) CreateNode(ctx context.Context, node config.NodeConfig) (confi
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.sharedMu != nil {
+		m.sharedMu.Lock()
+		defer m.sharedMu.Unlock()
+	}
 
-	if m.cfg == nil {
+	cfg := m.sourceConfigLocked()
+	if cfg == nil {
 		return config.NodeConfig{}, errConfigUnavailable
 	}
 
@@ -718,9 +859,9 @@ func (m *Manager) CreateNode(ctx context.Context, node config.NodeConfig) (confi
 	// (createNewConfig preserves only inline nodes), silently losing the node.
 	normalized.Source = config.NodeSourceInline
 
-	m.cfg.Nodes = append(m.cfg.Nodes, normalized)
-	if err := m.cfg.Save(); err != nil {
-		m.cfg.Nodes = m.cfg.Nodes[:len(m.cfg.Nodes)-1]
+	cfg.Nodes = append(cfg.Nodes, normalized)
+	if err := cfg.Save(); err != nil {
+		cfg.Nodes = cfg.Nodes[:len(cfg.Nodes)-1]
 		return config.NodeConfig{}, fmt.Errorf("save config: %w", err)
 	}
 	return normalized, nil
@@ -740,14 +881,19 @@ func (m *Manager) ImportConfigNodes(ctx context.Context, nodes []config.NodeConf
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cfg == nil {
+	if m.sharedMu != nil {
+		m.sharedMu.Lock()
+		defer m.sharedMu.Unlock()
+	}
+	cfg := m.sourceConfigLocked()
+	if cfg == nil {
 		return nil, 0, errConfigUnavailable
 	}
 
-	backup := cloneNodes(m.cfg.Nodes)
-	existingKeys := make(map[string]struct{}, len(m.cfg.Nodes)+len(nodes))
-	for idx := range m.cfg.Nodes {
-		existingKeys[m.cfg.Nodes[idx].NodeKey()] = struct{}{}
+	backup := cloneNodes(cfg.Nodes)
+	existingKeys := make(map[string]struct{}, len(cfg.Nodes)+len(nodes))
+	for idx := range cfg.Nodes {
+		existingKeys[cfg.Nodes[idx].NodeKey()] = struct{}{}
 	}
 
 	added := make([]config.NodeConfig, 0, len(nodes))
@@ -755,7 +901,7 @@ func (m *Manager) ImportConfigNodes(ctx context.Context, nodes []config.NodeConf
 	for _, node := range nodes {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
-				m.cfg.Nodes = backup
+				cfg.Nodes = backup
 				return nil, skipped, err
 			}
 		}
@@ -783,7 +929,7 @@ func (m *Manager) ImportConfigNodes(ctx context.Context, nodes []config.NodeConf
 			continue
 		}
 		normalized.Source = config.NodeSourceInline
-		m.cfg.Nodes = append(m.cfg.Nodes, normalized)
+		cfg.Nodes = append(cfg.Nodes, normalized)
 		existingKeys[key] = struct{}{}
 		added = append(added, normalized)
 	}
@@ -791,8 +937,8 @@ func (m *Manager) ImportConfigNodes(ctx context.Context, nodes []config.NodeConf
 	if len(added) == 0 {
 		return []config.NodeConfig{}, skipped, nil
 	}
-	if err := m.cfg.Save(); err != nil {
-		m.cfg.Nodes = backup
+	if err := cfg.Save(); err != nil {
+		cfg.Nodes = backup
 		return nil, skipped, fmt.Errorf("save imported nodes: %w", err)
 	}
 	return added, skipped, nil
@@ -809,8 +955,13 @@ func (m *Manager) UpdateNode(ctx context.Context, name string, node config.NodeC
 	name = strings.TrimSpace(name)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.sharedMu != nil {
+		m.sharedMu.Lock()
+		defer m.sharedMu.Unlock()
+	}
 
-	if m.cfg == nil {
+	cfg := m.sourceConfigLocked()
+	if cfg == nil {
 		return config.NodeConfig{}, errConfigUnavailable
 	}
 
@@ -825,12 +976,12 @@ func (m *Manager) UpdateNode(ctx context.Context, name string, node config.NodeC
 	}
 
 	// Preserve the original source
-	normalized.Source = m.cfg.Nodes[idx].Source
+	normalized.Source = cfg.Nodes[idx].Source
 
-	prev := m.cfg.Nodes[idx]
-	m.cfg.Nodes[idx] = normalized
-	if err := m.cfg.Save(); err != nil {
-		m.cfg.Nodes[idx] = prev
+	prev := cfg.Nodes[idx]
+	cfg.Nodes[idx] = normalized
+	if err := cfg.Save(); err != nil {
+		cfg.Nodes[idx] = prev
 		return config.NodeConfig{}, fmt.Errorf("save config: %w", err)
 	}
 	return normalized, nil
@@ -847,8 +998,13 @@ func (m *Manager) DeleteNode(ctx context.Context, name string) error {
 	name = strings.TrimSpace(name)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.sharedMu != nil {
+		m.sharedMu.Lock()
+		defer m.sharedMu.Unlock()
+	}
 
-	if m.cfg == nil {
+	cfg := m.sourceConfigLocked()
+	if cfg == nil {
 		return errConfigUnavailable
 	}
 
@@ -857,10 +1013,10 @@ func (m *Manager) DeleteNode(ctx context.Context, name string) error {
 		return monitor.ErrNodeNotFound
 	}
 
-	backup := cloneNodes(m.cfg.Nodes)
-	m.cfg.Nodes = append(m.cfg.Nodes[:idx], m.cfg.Nodes[idx+1:]...)
-	if err := m.cfg.Save(); err != nil {
-		m.cfg.Nodes = backup
+	backup := cloneNodes(cfg.Nodes)
+	cfg.Nodes = append(cfg.Nodes[:idx], cfg.Nodes[idx+1:]...)
+	if err := cfg.Save(); err != nil {
+		cfg.Nodes = backup
 		return fmt.Errorf("save config: %w", err)
 	}
 	return nil
@@ -897,13 +1053,16 @@ func (m *Manager) deactivateProxyCore(newCfg *config.Config) error {
 			m.logger.Warnf("error closing proxy core for empty node pool: %v", err)
 		}
 	}
-	pool.ResetSharedStateStore()
+	m.poolState.Reset()
 	if m.monitorMgr != nil {
 		m.monitorMgr.ClearNodes()
 		m.monitorMgr.SetProbeSchedule(newCfg.ProbeIntervalOrDefault(), newCfg.ProbeTimeoutOrDefault())
 	}
 	if m.monitorServer != nil {
 		m.monitorServer.SetConfig(newCfg)
+	}
+	if err := m.persistActiveNodeCatalog(newCfg); err != nil {
+		m.logger.Warnf("failed to persist empty active node catalog: %v", err)
 	}
 	m.applyConfigSettings(newCfg)
 	m.logger.Warnf("proxy core stopped because no active nodes remain")
@@ -916,6 +1075,9 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 		return errors.New("new config is nil")
 	}
 	if len(newCfg.Nodes) == 0 {
+		if err := m.validateConfig(newCfg); err != nil {
+			return err
+		}
 		return m.deactivateProxyCore(newCfg)
 	}
 
@@ -935,7 +1097,7 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 		m.mu.Lock()
 		m.cfg = newCfg
 		m.mu.Unlock()
-		pool.ResetSharedStateStore()
+		m.poolState.Reset()
 		if m.monitorMgr != nil {
 			m.monitorMgr.ClearNodes()
 		}
@@ -1043,6 +1205,15 @@ func (m *Manager) CurrentConfigSnapshot() *config.Config {
 	return m.copyConfigLocked()
 }
 
+// CurrentConfig returns the live persistable configuration object. Callers
+// must use it only for the existing settings API contract, which serializes
+// mutations before triggering a reload.
+func (m *Manager) CurrentConfig() *config.Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cfg
+}
+
 func (m *Manager) copyConfigLocked() *config.Config {
 	if m.cfg == nil {
 		return nil
@@ -1062,7 +1233,11 @@ func (m *Manager) copyConfigLocked() *config.Config {
 }
 
 func (m *Manager) nodeIndexLocked(name string) int {
-	for idx, node := range m.cfg.Nodes {
+	cfg := m.sourceConfigLocked()
+	if cfg == nil {
+		return -1
+	}
+	for idx, node := range cfg.Nodes {
 		if node.Name == name {
 			return idx
 		}
@@ -1090,7 +1265,11 @@ func (m *Manager) portInUseLocked(port uint16, currentName string) bool {
 	if port == 0 {
 		return false
 	}
-	for _, node := range m.cfg.Nodes {
+	cfg := m.sourceConfigLocked()
+	if cfg == nil {
+		return false
+	}
+	for _, node := range cfg.Nodes {
 		if node.Name == currentName {
 			continue
 		}
@@ -1106,8 +1285,12 @@ func (m *Manager) nextAvailablePortLocked() uint16 {
 	if base == 0 {
 		base = 24000
 	}
-	used := make(map[uint16]struct{}, len(m.cfg.Nodes))
-	for _, node := range m.cfg.Nodes {
+	cfg := m.sourceConfigLocked()
+	if cfg == nil {
+		return base
+	}
+	used := make(map[uint16]struct{}, len(cfg.Nodes))
+	for _, node := range cfg.Nodes {
 		if node.Port > 0 {
 			used[node.Port] = struct{}{}
 		}
@@ -1126,6 +1309,10 @@ func (m *Manager) nextAvailablePortLocked() uint16 {
 }
 
 func (m *Manager) prepareNodeLocked(node config.NodeConfig, currentName string) (config.NodeConfig, error) {
+	sourceCfg := m.sourceConfigLocked()
+	if sourceCfg == nil || m.cfg == nil {
+		return config.NodeConfig{}, errConfigUnavailable
+	}
 	node.Name = strings.TrimSpace(node.Name)
 	node.URI = strings.TrimSpace(node.URI)
 
@@ -1142,15 +1329,21 @@ func (m *Manager) prepareNodeLocked(node config.NodeConfig, currentName string) 
 		}
 		// Fallback to auto-generated name
 		if node.Name == "" {
-			node.Name = fmt.Sprintf("node-%d", len(m.cfg.Nodes)+1)
+			node.Name = fmt.Sprintf("node-%d", len(sourceCfg.Nodes)+1)
 		}
 	}
 
 	// Check for name conflict (excluding current node when updating)
 	if idx := m.nodeIndexLocked(node.Name); idx != -1 {
-		if currentName == "" || m.cfg.Nodes[idx].Name != currentName {
+		if currentName == "" || sourceCfg.Nodes[idx].Name != currentName {
 			return config.NodeConfig{}, fmt.Errorf("%w: 节点 %s 已存在", monitor.ErrNodeConflict, node.Name)
 		}
+	}
+	if m.sharedCfg != nil {
+		node.Port = 0
+		node.Username = ""
+		node.Password = ""
+		return node, nil
 	}
 
 	// Handle multi-port mode specifics

@@ -12,12 +12,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"Proxy2API/internal/state"
+
 	M "github.com/sagernet/sing/common/metadata"
 )
 
 // Config mirrors user settings needed by the monitoring server.
 type Config struct {
 	Enabled          bool
+	StateStore       *state.Store
 	Listen           string
 	ProbeTarget      string
 	ProbeInterval    time.Duration
@@ -29,17 +32,23 @@ type Config struct {
 	SkipCertVerify   bool   // 全局跳过 SSL 证书验证
 	ProbeConcurrency int    // 并发探测线程数（批量探测与周期健康检查共用）
 	StickyNode       string // 粘性入口指定节点；空值默认选择最低延迟节点
+	TrafficAPI       string // Project-specific sing-box Clash traffic endpoint.
 }
 
 // NodeInfo is static metadata about a proxy entry.
 type NodeInfo struct {
+	ID              string `json:"id"`
+	Order           int    `json:"-"`
 	Tag             string `json:"tag"`
 	Name            string `json:"name"`
 	URI             string `json:"uri"`
 	Mode            string `json:"mode"`
 	ListenAddress   string `json:"listen_address,omitempty"`
 	Port            uint16 `json:"port,omitempty"`
+	Username        string `json:"-"`
+	Password        string `json:"-"`
 	SubscriptionURL string `json:"-"`
+	Source          string `json:"-"`
 	Suppressed      bool   `json:"-"`
 }
 
@@ -98,27 +107,30 @@ type EntryHandle struct {
 }
 
 type entry struct {
-	info             NodeInfo
-	ip               string
-	region           string
-	country          string
-	failure          int
-	success          int64
-	timeline         []TimelineEvent
-	blacklist        bool
-	until            time.Time
-	lastError        string
-	lastFail         time.Time
-	lastOK           time.Time
-	lastProbe        time.Duration
-	active           atomic.Int32
-	probe            probeFunc
-	release          releaseFunc
-	blacklistFn      func(time.Duration)
-	initialCheckDone bool
-	available        bool
-	suppressed       bool
-	mu               sync.RWMutex
+	info              NodeInfo
+	ip                string
+	region            string
+	country           string
+	failure           int
+	success           int64
+	timeline          []TimelineEvent
+	blacklist         bool
+	until             time.Time
+	availabilityEpoch uint64
+	consecutiveFails  int
+	lastError         string
+	lastFail          time.Time
+	lastOK            time.Time
+	lastProbe         time.Duration
+	active            atomic.Int32
+	probe             probeFunc
+	release           releaseFunc
+	blacklistFn       func(time.Duration)
+	initialCheckDone  bool
+	available         bool
+	suppressed        bool
+	store             *state.Store
+	mu                sync.RWMutex
 }
 
 // Manager aggregates all node states for the UI/API.
@@ -142,6 +154,12 @@ type Manager struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	logger           Logger
+	stateStore       *state.Store
+	restoredNodes    map[string]state.NodeRecord
+	recoveredCount   atomic.Int32
+	asyncMu          sync.Mutex
+	asyncStopped     bool
+	asyncWG          sync.WaitGroup
 
 	// Sweep progress for the WebUI. probeSweepActive is 1 while probeAllNodes
 	// runs; the counters let the dashboard show a live "初始化探测中 3200/8363".
@@ -159,9 +177,10 @@ type Manager struct {
 	// forever. The gate enforces single-flight and coalesces any trigger that
 	// arrives mid-sweep into exactly one follow-up pass (so a reload's newly
 	// registered nodes still get probed).
-	probeGate      sync.Mutex
-	sweepRunning   bool
-	rerunRequested bool
+	probeGate        sync.Mutex
+	sweepRunning     bool
+	rerunRequested   bool
+	rerunPendingOnly bool
 }
 
 // ProbeSweepProgress reports the current health-check sweep progress. active is
@@ -263,6 +282,16 @@ func NewManager(cfg Config) (*Manager, error) {
 		stickyNode:       strings.TrimSpace(cfg.StickyNode),
 		entryExits:       make(map[uint16]string),
 		probeScheduleCh:  make(chan struct{}, 1),
+		stateStore:       cfg.StateStore,
+		restoredNodes:    make(map[string]state.NodeRecord),
+	}
+	if cfg.StateStore != nil {
+		restored, err := cfg.StateStore.LoadNodes()
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("load node runtime state: %w", err)
+		}
+		m.restoredNodes = restored
 	}
 	m.probeDst, m.probeHost, m.probePath, m.probeTLS, m.probeTLSInsecure, m.probeReady = resolveProbeTarget(cfg.ProbeTarget, cfg.SkipCertVerify)
 	return m, nil
@@ -324,6 +353,26 @@ func (m *Manager) ProbeAttemptTimeout() time.Duration {
 	return total / probeTimeoutParts
 }
 
+// ProbeAfterRelease verifies a node after its blacklist expires or is manually
+// cleared. The release path marks the node unavailable before this starts, so it
+// cannot re-enter routing until both required checks pass.
+func (m *Manager) ProbeAfterRelease(tag string) {
+	_, timeout := m.probeSchedule()
+	if !m.beginAsyncWork() {
+		return
+	}
+	go func() {
+		defer m.asyncWG.Done()
+		ctx, cancel := context.WithTimeout(m.ctx, timeout)
+		defer cancel()
+
+		_, err := m.ProbeWithResult(ctx, tag)
+		if err != nil && m.logger != nil {
+			m.logger.Warn("post-release probe failed for ", tag, ": ", err)
+		}
+	}()
+}
+
 // SetStickyNode selects the only node the sticky listener may use. An empty tag
 // restores lowest-latency selection for new sticky bindings.
 func (m *Manager) SetStickyNode(tag string) {
@@ -378,6 +427,7 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) {
 	for _, e := range entries {
 		e.mu.Lock()
 		e.suppressed = !enabled
+		e.persistLocked(true)
 		e.mu.Unlock()
 	}
 }
@@ -415,7 +465,11 @@ func (m *Manager) SetProbeTarget(probeTarget string, skipCertVerify bool) {
 func (m *Manager) StartPeriodicHealthCheck(interval, timeout time.Duration) {
 	m.SetProbeSchedule(interval, timeout)
 	m.periodicOnce.Do(func() {
+		if !m.beginAsyncWork() {
+			return
+		}
 		go func() {
+			defer m.asyncWG.Done()
 			// Startup only arms the timer. Initial probing is manual; automatic
 			// probing begins after the first configured interval elapses.
 			currentInterval, _ := m.probeSchedule()
@@ -452,7 +506,32 @@ func (m *Manager) StartPeriodicHealthCheck(interval, timeout time.Duration) {
 
 // ProbeAllNow triggers a one-time health check on all nodes (e.g. after reload).
 func (m *Manager) ProbeAllNow(timeout time.Duration) {
-	m.probeAllNodes(timeout)
+	if !m.beginAsyncWork() {
+		return
+	}
+	defer m.asyncWG.Done()
+	m.probeNodes(timeout, false)
+}
+
+// ProbePendingNow checks only nodes without a restored/previous health result.
+// Subscription refreshes use it so unchanged nodes keep their project-local
+// state instead of being needlessly re-probed after every reload.
+func (m *Manager) ProbePendingNow(timeout time.Duration) {
+	if !m.beginAsyncWork() {
+		return
+	}
+	defer m.asyncWG.Done()
+	m.probeNodes(timeout, true)
+}
+
+func (m *Manager) beginAsyncWork() bool {
+	m.asyncMu.Lock()
+	defer m.asyncMu.Unlock()
+	if m.asyncStopped {
+		return false
+	}
+	m.asyncWG.Add(1)
+	return true
 }
 
 // probeAllNodes runs a health-check sweep, but only one at a time. If a sweep is
@@ -462,23 +541,37 @@ func (m *Manager) ProbeAllNow(timeout time.Duration) {
 // sweeps that would corrupt the shared progress counters and wedge the WebUI
 // progress bar "active" flag on.
 func (m *Manager) probeAllNodes(timeout time.Duration) {
+	m.probeNodes(timeout, false)
+}
+
+func (m *Manager) probeNodes(timeout time.Duration, pendingOnly bool) {
 	m.probeGate.Lock()
 	if m.sweepRunning {
 		// A sweep is running: request one follow-up pass and return. The running
 		// sweep will pick this up when it drains the gate.
+		hadRerun := m.rerunRequested
 		m.rerunRequested = true
+		if !hadRerun {
+			m.rerunPendingOnly = pendingOnly
+		}
+		if !pendingOnly {
+			m.rerunPendingOnly = false
+		}
 		m.probeGate.Unlock()
 		return
 	}
 	m.sweepRunning = true
 	m.probeGate.Unlock()
 
+	currentPendingOnly := pendingOnly
 	for {
-		m.runProbeSweep(timeout)
+		m.runProbeSweep(timeout, currentPendingOnly)
 
 		m.probeGate.Lock()
 		if m.rerunRequested {
 			m.rerunRequested = false
+			currentPendingOnly = m.rerunPendingOnly
+			m.rerunPendingOnly = false
 			m.probeGate.Unlock()
 			continue // A trigger arrived mid-sweep; run exactly one more pass.
 		}
@@ -491,14 +584,15 @@ func (m *Manager) probeAllNodes(timeout time.Duration) {
 // runProbeSweep checks all registered nodes concurrently. It is only ever
 // invoked by probeAllNodes, which guarantees single-flight execution, so the
 // shared probeSweep* progress counters are never written by two sweeps at once.
-func (m *Manager) runProbeSweep(timeout time.Duration) {
+func (m *Manager) runProbeSweep(timeout time.Duration, pendingOnly bool) {
 	m.mu.RLock()
 	entries := make([]*entry, 0, len(m.nodes))
 	for _, e := range m.nodes {
 		e.mu.RLock()
 		suppressed := e.suppressed
+		initialCheckDone := e.initialCheckDone
 		e.mu.RUnlock()
-		if !suppressed {
+		if !suppressed && (!pendingOnly || !initialCheckDone) {
 			entries = append(entries, e)
 		}
 	}
@@ -543,7 +637,7 @@ func (m *Manager) runProbeSweep(timeout time.Duration) {
 			// a probe function neither can be verified, so record a completed failure
 			// instead of leaving the node unchecked or optimistically available.
 			probeErr := errors.New("probe not available for this node")
-			e.applyProbeResult(ProbeResult{}, probeErr)
+			e.applyProbeResult(ProbeResult{}, probeErr, e.currentAvailabilityEpoch())
 			failedCount.Add(1)
 			m.probeSweepFail.Add(1)
 			m.probeSweepDone.Add(1)
@@ -559,6 +653,7 @@ func (m *Manager) runProbeSweep(timeout time.Duration) {
 			ctx, cancel := context.WithTimeout(m.ctx, timeout)
 			defer cancel()
 
+			availabilityEpoch := entry.currentAvailabilityEpoch()
 			result, err := executeProbe(ctx, probe, entry.applyProbeProgress)
 
 			entry.mu.RLock()
@@ -571,7 +666,7 @@ func (m *Manager) runProbeSweep(timeout time.Duration) {
 				availableCount.Add(1)
 				m.probeSweepOK.Add(1)
 			}
-			entry.applyProbeResult(result, err)
+			entry.applyProbeResult(result, err, availabilityEpoch)
 			m.probeSweepDone.Add(1)
 
 			if err != nil && m.logger != nil {
@@ -588,9 +683,13 @@ func (m *Manager) runProbeSweep(timeout time.Duration) {
 
 // Stop stops the periodic health check.
 func (m *Manager) Stop() {
+	m.asyncMu.Lock()
+	m.asyncStopped = true
 	if m.cancel != nil {
 		m.cancel()
 	}
+	m.asyncMu.Unlock()
+	m.asyncWG.Wait()
 }
 
 func parsePort(value string) uint16 {
@@ -611,12 +710,19 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 			info:       info,
 			suppressed: info.Suppressed,
 			timeline:   make([]TimelineEvent, 0, maxTimelineSize),
+			store:      m.stateStore,
+		}
+		if restored, found := m.restoredNodes[info.ID]; found {
+			e.restore(restored)
+			m.recoveredCount.Add(1)
 		}
 		m.nodes[info.Tag] = e
 	} else {
 		e.mu.Lock()
 		e.info = info
 		e.suppressed = info.Suppressed
+		e.store = m.stateStore
+		e.persistLocked(false)
 		e.mu.Unlock()
 	}
 	return &EntryHandle{ref: e}
@@ -627,8 +733,32 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 func (m *Manager) ClearNodes() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	records := make([]state.NodeRecord, 0, len(m.nodes))
+	for _, e := range m.nodes {
+		e.mu.Lock()
+		if e.store != nil && e.info.ID != "" {
+			records = append(records, e.stateRecordLocked())
+		}
+		e.store = nil
+		e.mu.Unlock()
+	}
+	if m.stateStore != nil {
+		if err := m.stateStore.SaveNodesNow(records); err != nil && m.logger != nil {
+			m.logger.Warn("failed to persist node state before clearing monitor: ", err)
+		}
+		if restored, err := m.stateStore.LoadNodes(); err == nil {
+			m.restoredNodes = restored
+		} else if m.logger != nil {
+			m.logger.Warn("failed to reload persisted node state: ", err)
+		}
+	}
 	m.nodes = make(map[string]*entry)
 	m.entryExits = make(map[uint16]string)
+	m.recoveredCount.Store(0)
+}
+
+func (m *Manager) HasRecoveredNodes() bool {
+	return m.recoveredCount.Load() > 0
 }
 
 // DestinationForProbe exposes the configured destination and HTTP target.
@@ -732,9 +862,10 @@ func (m *Manager) ProbeWithResult(ctx context.Context, tag string) (ProbeResult,
 		return ProbeResult{}, errors.New("node belongs to a paused subscription")
 	}
 
+	availabilityEpoch := e.currentAvailabilityEpoch()
 	result, err := executeProbe(ctx, e.probe, e.applyProbeProgress)
 
-	e.applyProbeResult(result, err)
+	e.applyProbeResult(result, err, availabilityEpoch)
 	if err != nil {
 		return result, err
 	}
@@ -890,14 +1021,92 @@ func (e *entry) snapshot() Snapshot {
 	}
 }
 
-func (e *entry) applyProbeResult(result ProbeResult, err error) {
+func (e *entry) restore(record state.NodeRecord) {
+	e.ip = record.IP
+	e.region = record.Region
+	e.country = record.Country
+	e.failure = record.FailureCount
+	e.success = record.SuccessCount
+	e.consecutiveFails = record.ConsecutiveFails
+	e.blacklist = record.Blacklisted
+	e.until = record.BlacklistedUntil
+	e.lastError = record.LastError
+	e.lastFail = record.LastFailure
+	e.lastOK = record.LastSuccess
+	e.lastProbe = record.LastProbeLatency
+	e.initialCheckDone = record.InitialCheckDone
+	e.available = record.Available && !record.Blacklisted
+	e.timeline = make([]TimelineEvent, 0, maxTimelineSize)
+	start := 0
+	if len(record.Timeline) > maxTimelineSize {
+		start = len(record.Timeline) - maxTimelineSize
+	}
+	for _, event := range record.Timeline[start:] {
+		e.timeline = append(e.timeline, TimelineEvent{
+			Time: event.Time, Success: event.Success,
+			LatencyMs: event.LatencyMS, Error: event.Error,
+		})
+	}
+}
+
+func (e *entry) stateRecordLocked() state.NodeRecord {
+	timeline := make([]state.TimelineEvent, 0, len(e.timeline))
+	for _, event := range e.timeline {
+		timeline = append(timeline, state.TimelineEvent{
+			Time: event.Time, Success: event.Success,
+			LatencyMS: event.LatencyMs, Error: event.Error,
+		})
+	}
+	return state.NodeRecord{
+		ID: e.info.ID, Name: e.info.Name, URI: e.info.URI,
+		Source: e.info.Source, SubscriptionURL: e.info.SubscriptionURL,
+		Port: e.info.Port, Username: e.info.Username, Password: e.info.Password,
+		Disabled: e.suppressed, Order: e.info.Order, Active: true,
+		IP: e.ip, Region: e.region, Country: e.country,
+		FailureCount: e.failure, SuccessCount: e.success,
+		ConsecutiveFails: e.consecutiveFails,
+		Blacklisted:      e.blacklist, BlacklistedUntil: e.until,
+		LastError: e.lastError, LastFailure: e.lastFail, LastSuccess: e.lastOK,
+		LastProbeLatency: e.lastProbe, InitialCheckDone: e.initialCheckDone,
+		Available: e.available, Timeline: timeline, LastSeen: time.Now().UTC(),
+	}
+}
+
+func (e *entry) persistLocked(critical bool) {
+	if e.store == nil || e.info.ID == "" {
+		return
+	}
+	record := e.stateRecordLocked()
+	if critical {
+		if err := e.store.SaveNodeNow(record); err != nil {
+			fmt.Printf("state: persist node %s: %v\n", e.info.Tag, err)
+		}
+		return
+	}
+	e.store.QueueNode(record)
+}
+
+func (e *entry) currentAvailabilityEpoch() uint64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.availabilityEpoch
+}
+
+func (e *entry) applyProbeResult(result ProbeResult, err error, availabilityEpoch uint64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	defer e.persistLocked(true)
 	e.initialCheckDone = true
 	e.applyProbeProgressLocked(result)
 
 	healthy := err == nil && result.ConnectivityOK && result.TraceOK
-	e.available = healthy
+	// Probes performed during a blacklist may refresh latency and exit metadata,
+	// but they must never make the node routable or clear the blacklist. Only
+	// expiry or a manual release can do that, followed by a fresh full probe.
+	if availabilityEpoch != e.availabilityEpoch {
+		return
+	}
+	e.available = healthy && !e.blacklist
 	if healthy {
 		e.lastOK = time.Now()
 		e.lastError = ""
@@ -918,6 +1127,7 @@ func (e *entry) applyProbeProgress(result ProbeResult) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.applyProbeProgressLocked(result)
+	e.persistLocked(false)
 }
 
 func (e *entry) applyProbeProgressLocked(result ProbeResult) {
@@ -953,11 +1163,13 @@ func (e *entry) applyProbeProgressLocked(result ProbeResult) {
 	}
 }
 
-func (e *entry) recordFailure(err error) {
+func (e *entry) recordFailure(err error, consecutive int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	defer e.persistLocked(false)
 	errStr := err.Error()
 	e.failure++
+	e.consecutiveFails = consecutive
 	e.lastError = errStr
 	e.lastFail = time.Now()
 	e.appendTimelineLocked(false, 0, errStr)
@@ -966,7 +1178,9 @@ func (e *entry) recordFailure(err error) {
 func (e *entry) recordSuccess() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	defer e.persistLocked(false)
 	e.success++
+	e.consecutiveFails = 0
 	e.lastOK = time.Now()
 	e.appendTimelineLocked(true, 0, "")
 }
@@ -988,16 +1202,24 @@ func (e *entry) appendTimelineLocked(success bool, latencyMs int64, errStr strin
 
 func (e *entry) blacklistUntil(until time.Time) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	defer e.persistLocked(true)
+	e.availabilityEpoch++
 	e.blacklist = true
 	e.until = until
-	e.mu.Unlock()
+	e.consecutiveFails = 0
+	e.available = false
 }
 
 func (e *entry) clearBlacklist() {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	defer e.persistLocked(true)
+	e.availabilityEpoch++
 	e.blacklist = false
 	e.until = time.Time{}
-	e.mu.Unlock()
+	e.consecutiveFails = 0
+	e.available = false
 }
 
 func (e *entry) incActive() {
@@ -1020,12 +1242,12 @@ func (e *entry) setRelease(fn releaseFunc) {
 	e.release = fn
 }
 
-// RecordFailure updates failure counters.
-func (h *EntryHandle) RecordFailure(err error) {
+// RecordFailure updates failure counters and the pool's consecutive failure count.
+func (h *EntryHandle) RecordFailure(err error, consecutive int) {
 	if h == nil || h.ref == nil {
 		return
 	}
-	h.ref.recordFailure(err)
+	h.ref.recordFailure(err, consecutive)
 }
 
 // RecordSuccess updates the last success timestamp.
@@ -1044,12 +1266,22 @@ func (h *EntryHandle) Blacklist(until time.Time) {
 	h.ref.blacklistUntil(until)
 }
 
-// ClearBlacklist removes the blacklist flag.
+// ClearBlacklist removes the blacklist flag and keeps the node unavailable
+// until the release-triggered full probe completes successfully.
 func (h *EntryHandle) ClearBlacklist() {
 	if h == nil || h.ref == nil {
 		return
 	}
 	h.ref.clearBlacklist()
+}
+
+func (h *EntryHandle) RestoredPoolState() (consecutive int, blacklisted bool, until time.Time) {
+	if h == nil || h.ref == nil {
+		return 0, false, time.Time{}
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return h.ref.consecutiveFails, h.ref.blacklist, h.ref.until
 }
 
 // IncActive increments the active connection counter.
@@ -1103,6 +1335,7 @@ func (h *EntryHandle) MarkInitialCheckDone(available bool) {
 	h.ref.mu.Lock()
 	h.ref.initialCheckDone = true
 	h.ref.available = available
+	h.ref.persistLocked(false)
 	h.ref.mu.Unlock()
 }
 
@@ -1113,6 +1346,7 @@ func (h *EntryHandle) MarkAvailable(available bool) {
 	}
 	h.ref.mu.Lock()
 	h.ref.available = available
+	h.ref.persistLocked(false)
 	h.ref.mu.Unlock()
 }
 

@@ -21,6 +21,7 @@ import (
 	"Proxy2API/internal/boxmgr"
 	"Proxy2API/internal/config"
 	"Proxy2API/internal/monitor"
+	"Proxy2API/internal/state"
 )
 
 // Logger defines logging interface.
@@ -38,6 +39,10 @@ func WithLogger(l Logger) Option {
 	return func(m *Manager) { m.logger = l }
 }
 
+func WithStateStore(store *state.Store) Option {
+	return func(m *Manager) { m.stateStore = store }
+}
+
 // Manager handles periodic subscription refresh.
 type Manager struct {
 	mu sync.RWMutex
@@ -51,9 +56,13 @@ type Manager struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	refreshMu     sync.Mutex // prevents concurrent refreshes
+	loopMu        sync.Mutex
+	loopWG        sync.WaitGroup
+	stopped       bool
 	manualRefresh chan struct{}
 	items         map[string]monitor.SubscriptionInfo
 	nodeCache     map[string][]config.NodeConfig
+	stateStore    *state.Store
 
 	// Track nodes.txt content hash to detect modifications
 	lastSubHash      string    // Hash of nodes.txt content after last subscription refresh
@@ -108,7 +117,126 @@ func New(cfg *config.Config, boxMgr *boxmgr.Manager, opts ...Option) *Manager {
 	}
 	m.loadNodeCache()
 	m.seedNodeCacheFromConfig()
+	m.restorePersistentState()
 	return m
+}
+
+func (m *Manager) restorePersistentState() {
+	if m.stateStore == nil {
+		return
+	}
+	stored, found, err := m.stateStore.LoadSubscriptionState()
+	if err != nil {
+		m.logger.Warnf("failed to restore subscription state: %v", err)
+		return
+	}
+	if !found {
+		return
+	}
+	configured := make(map[string]struct{}, len(m.baseCfg.Subscriptions))
+	for _, rawURL := range m.baseCfg.Subscriptions {
+		configured[rawURL] = struct{}{}
+	}
+	m.status.LastRefresh = stored.LastRefresh
+	m.status.NextRefresh = stored.NextRefresh
+	m.status.NodeCount = stored.NodeCount
+	m.status.LastError = stored.LastError
+	m.status.RefreshCount = stored.RefreshCount
+	for _, item := range stored.Items {
+		if _, ok := configured[item.URL]; !ok {
+			continue
+		}
+		enabled := m.baseCfg.SubscriptionEnabled(item.URL)
+		status := item.Status
+		included := item.Included
+		if !enabled {
+			status = "disabled"
+			included = false
+		} else if status == "disabled" {
+			status = "pending"
+		}
+		m.items[item.URL] = monitor.SubscriptionInfo{
+			ID: item.ID, URL: item.URL, Name: item.Name, Status: status,
+			NodeCount: item.NodeCount, Included: included, Enabled: enabled,
+			UploadBytes: item.UploadBytes, DownloadBytes: item.DownloadBytes,
+			UsedBytes: item.UsedBytes, TotalBytes: item.TotalBytes,
+			RemainingBytes: item.RemainingBytes, ExpiresAt: item.ExpiresAt,
+			LastRefresh: item.LastRefresh, LastError: item.LastError,
+		}
+	}
+	for rawURL, definitions := range stored.NodeCache {
+		if _, ok := configured[rawURL]; !ok {
+			continue
+		}
+		// A recovered runtime catalog was committed only after sing-box started,
+		// so its per-URL nodes are newer than a possibly interrupted subscription
+		// snapshot. Paused URLs have no active catalog entries and still restore
+		// from the subscription snapshot below.
+		if m.baseCfg.RecoveredSubscriptionURL(rawURL) && m.baseCfg.SubscriptionEnabled(rawURL) {
+			continue
+		}
+		nodes := make([]config.NodeConfig, 0, len(definitions))
+		for _, definition := range definitions {
+			nodes = append(nodes, config.NodeConfig{
+				StateKey: definition.ID,
+				Name:     definition.Name, URI: definition.URI, Port: definition.Port,
+				Username: definition.Username, Password: definition.Password,
+				Source: config.NodeSourceSubscription, SubscriptionURL: rawURL,
+				Disabled: definition.Disabled,
+			})
+		}
+		m.nodeCache[rawURL] = nodes
+	}
+	m.reconcileSubscriptionStateLocked(m.baseCfg.Subscriptions)
+}
+
+func (m *Manager) persistentState() state.SubscriptionState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := state.SubscriptionState{
+		LastRefresh: m.status.LastRefresh, NextRefresh: m.status.NextRefresh,
+		NodeCount: m.status.NodeCount, LastError: m.status.LastError,
+		RefreshCount: m.status.RefreshCount,
+		Items:        make([]state.SubscriptionInfo, 0, len(m.baseCfg.Subscriptions)),
+		NodeCache:    make(map[string][]state.NodeDefinition, len(m.nodeCache)),
+	}
+	for _, rawURL := range m.baseCfg.Subscriptions {
+		item := m.items[rawURL]
+		result.Items = append(result.Items, state.SubscriptionInfo{
+			ID: item.ID, URL: rawURL, Name: item.Name, Status: item.Status,
+			NodeCount: item.NodeCount, Included: item.Included, Enabled: item.Enabled,
+			UploadBytes: item.UploadBytes, DownloadBytes: item.DownloadBytes,
+			UsedBytes: item.UsedBytes, TotalBytes: item.TotalBytes,
+			RemainingBytes: item.RemainingBytes, ExpiresAt: item.ExpiresAt,
+			LastRefresh: item.LastRefresh, LastError: item.LastError,
+		})
+		definitions := make([]state.NodeDefinition, 0, len(m.nodeCache[rawURL]))
+		for _, node := range m.nodeCache[rawURL] {
+			definitions = append(definitions, state.NodeDefinition{
+				ID:   node.StateID(),
+				Name: node.Name, URI: node.URI, Port: node.Port,
+				Username: node.Username, Password: node.Password,
+				Source: string(node.Source), SubscriptionURL: rawURL,
+				Disabled: node.Disabled,
+			})
+		}
+		result.NodeCache[rawURL] = definitions
+	}
+	return result
+}
+
+func (m *Manager) persistState(critical bool) {
+	if m.stateStore == nil {
+		return
+	}
+	value := m.persistentState()
+	if critical {
+		if err := m.stateStore.SaveSubscriptionStateNow(value); err != nil {
+			m.logger.Warnf("failed to persist subscription state: %v", err)
+		}
+		return
+	}
+	m.stateStore.QueueSubscriptionState(value)
 }
 
 func (m *Manager) subscriptionCachePath() string {
@@ -174,6 +302,15 @@ func (m *Manager) seedNodeCacheFromConfig() {
 	for rawURL, nodes := range fromConfig {
 		// Prefer the exact local startup set for future pause/resume operations.
 		m.nodeCache[rawURL] = nodes
+	}
+	for _, rawURL := range m.baseCfg.Subscriptions {
+		if !m.baseCfg.RecoveredSubscriptionURL(rawURL) || !m.baseCfg.SubscriptionEnabled(rawURL) {
+			continue
+		}
+		if _, present := fromConfig[rawURL]; !present {
+			// A committed empty set must replace a stale compatibility cache.
+			delete(m.nodeCache, rawURL)
+		}
 	}
 }
 
@@ -253,30 +390,54 @@ func (m *Manager) reconcileSubscriptionStateLocked(urls []string) {
 func (m *Manager) Start() {
 	if len(m.baseCfg.Subscriptions) == 0 {
 		m.logger.Infof("no subscriptions configured, refresh disabled")
+		m.persistState(false)
 		return
 	}
 
 	interval := m.baseCfg.SubscriptionRefresh.Interval
 	m.logger.Infof("starting subscription manager, auto-refresh=%v, interval=%s", m.baseCfg.SubscriptionRefresh.Enabled, interval)
 
-	go m.refreshLoop(interval)
+	m.loopMu.Lock()
+	if !m.stopped {
+		m.startRefreshLoopLocked(interval)
+	}
+	m.loopMu.Unlock()
+	m.persistState(false)
+}
+
+// startRefreshLoopLocked starts one timer loop. The caller must hold loopMu.
+func (m *Manager) startRefreshLoopLocked(interval time.Duration) {
+	m.loopWG.Add(1)
+	go func() {
+		defer m.loopWG.Done()
+		m.refreshLoop(interval)
+	}()
 }
 
 // Stop stops the periodic refresh.
 func (m *Manager) Stop() {
+	m.loopMu.Lock()
+	m.stopped = true
 	if m.cancel != nil {
 		m.cancel()
 	}
+	m.loopWG.Wait()
+	m.loopMu.Unlock()
+	// RefreshNow and synchronous configuration refreshes do not run inside the
+	// timer goroutine, so drain the shared refresh gate as well.
+	m.refreshMu.Lock()
+	m.refreshMu.Unlock()
 
 	// Close idle connections
 	if m.httpClient != nil {
 		m.httpClient.CloseIdleConnections()
 	}
+	m.persistState(true)
 }
 
 // UpdateConfig hot-reloads subscription URLs and refresh settings without restart.
 func (m *Manager) UpdateConfig(urls []string, enabled bool, interval time.Duration) {
-	m.updateConfig(urls, enabled, interval, true)
+	m.updateConfig(urls, enabled, interval, false)
 }
 
 func (m *Manager) updateConfig(urls []string, enabled bool, interval time.Duration, triggerRefresh bool) {
@@ -313,10 +474,16 @@ func (m *Manager) updateConfig(urls []string, enabled bool, interval time.Durati
 	if interval > 0 {
 		m.baseCfg.SubscriptionRefresh.Interval = interval
 	}
+	if enabled {
+		m.status.NextRefresh = time.Now().Add(m.baseCfg.SubscriptionRefresh.Interval)
+	} else {
+		m.status.NextRefresh = time.Time{}
+	}
 	m.reconcileSubscriptionStateLocked(urls)
 	cacheSnapshot := cloneSubscriptionNodeCache(m.nodeCache)
 	m.mu.Unlock()
 	m.saveNodeCache(cacheSnapshot)
+	m.persistState(true)
 
 	// Persist to config.yaml
 	if err := m.baseCfg.SaveSettings(); err != nil {
@@ -324,20 +491,27 @@ func (m *Manager) updateConfig(urls []string, enabled bool, interval time.Durati
 	}
 
 	// Restart the refresh loop with new settings
+	m.loopMu.Lock()
 	if m.cancel != nil {
 		m.cancel()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	m.mu.Lock()
-	m.ctx = ctx
-	m.cancel = cancel
-	m.manualRefresh = make(chan struct{}, 1)
-	m.mu.Unlock()
+	m.loopWG.Wait()
+	if !m.stopped {
+		ctx, cancel := context.WithCancel(context.Background())
+		m.mu.Lock()
+		m.ctx = ctx
+		m.cancel = cancel
+		m.manualRefresh = make(chan struct{}, 1)
+		m.mu.Unlock()
+	}
 
 	// Always start the refresh loop to handle the immediate refresh signal. An
 	// empty URL list is also refreshed so stale subscription nodes are removed.
 	m.logger.Infof("subscription config updated: %d URLs, enabled=%v, interval=%s", len(urls), enabled, m.baseCfg.SubscriptionRefresh.Interval)
-	go m.refreshLoop(m.baseCfg.SubscriptionRefresh.Interval)
+	if !m.stopped {
+		m.startRefreshLoopLocked(m.baseCfg.SubscriptionRefresh.Interval)
+	}
+	m.loopMu.Unlock()
 
 	if triggerRefresh {
 		// Always trigger an immediate fetch after an asynchronous config update,
@@ -469,6 +643,7 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 	m.status.NodeCount = countEnabledNodes(nodes)
 	m.status.LastError = ""
 	m.mu.Unlock()
+	m.persistState(true)
 	return nil
 }
 
@@ -523,37 +698,56 @@ func (m *Manager) refreshLoop(interval time.Duration) {
 	manualRefresh := m.manualRefresh
 	m.mu.RUnlock()
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	firstDelay := interval
+	if autoEnabled {
+		m.mu.RLock()
+		nextRefresh := m.status.NextRefresh
+		m.mu.RUnlock()
+		if !nextRefresh.IsZero() {
+			firstDelay = time.Until(nextRefresh)
+			if firstDelay < 0 {
+				firstDelay = 0
+			}
+		}
+	}
+	timer := time.NewTimer(firstDelay)
+	defer timer.Stop()
 
 	if autoEnabled {
-		// Update next refresh time only when auto-refresh is enabled
+		// A runtime restart may have changed this project's interval. Rebase the
+		// next refresh on the current project setting while retaining LastRefresh
+		// and the rest of this project's historical status.
 		m.mu.Lock()
 		m.status.NextRefresh = time.Now().Add(interval)
 		m.mu.Unlock()
+		m.persistState(false)
 	}
 
 	for {
 		select {
 		case <-loopCtx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			// Only do periodic refresh when auto-refresh is enabled
 			if !autoEnabled {
+				timer.Reset(interval)
 				continue
 			}
 			m.doRefresh()
 			m.mu.Lock()
 			m.status.NextRefresh = time.Now().Add(interval)
 			m.mu.Unlock()
+			m.persistState(false)
+			timer.Reset(interval)
 		case <-manualRefresh:
 			// Always honor manual/immediate refresh regardless of enabled flag
 			m.doRefresh()
 			if autoEnabled {
-				ticker.Reset(interval)
+				timer.Reset(interval)
 				m.mu.Lock()
 				m.status.NextRefresh = time.Now().Add(interval)
 				m.mu.Unlock()
+				m.persistState(false)
 			}
 		}
 	}
@@ -571,16 +765,24 @@ func (m *Manager) doRefreshSelected(refreshURLs []string) {
 	// automatic refresh still gets its own completed pass.
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
+	m.mu.RLock()
+	previousCache := cloneSubscriptionNodeCache(m.nodeCache)
+	m.mu.RUnlock()
+	committed := false
 
 	m.mu.Lock()
 	m.status.IsRefreshing = true
 	m.mu.Unlock()
 
 	defer func() {
+		if !committed {
+			m.restoreNodeCache(previousCache)
+		}
 		m.mu.Lock()
 		m.status.IsRefreshing = false
 		m.status.RefreshCount++
 		m.mu.Unlock()
+		m.persistState(true)
 	}()
 
 	m.logger.Infof("starting subscription refresh")
@@ -650,6 +852,7 @@ func (m *Manager) doRefreshSelected(refreshURLs []string) {
 		m.status.NodeCount = 0
 		m.status.LastError = ""
 		m.mu.Unlock()
+		committed = true
 		m.logger.Infof("subscription refresh completed, no active subscription nodes")
 		return
 	}
@@ -669,8 +872,21 @@ func (m *Manager) doRefreshSelected(refreshURLs []string) {
 	m.status.NodeCount = activeNodeCount
 	m.status.LastError = ""
 	m.mu.Unlock()
+	committed = true
 
 	m.logger.Infof("subscription refresh completed, %d nodes active", activeNodeCount)
+}
+
+func (m *Manager) restoreNodeCache(snapshot map[string][]config.NodeConfig) {
+	m.mu.Lock()
+	m.nodeCache = cloneSubscriptionNodeCache(snapshot)
+	nodes := m.cachedNodesForConfigLocked()
+	cacheSnapshot := cloneSubscriptionNodeCache(m.nodeCache)
+	m.mu.Unlock()
+	m.saveNodeCache(cacheSnapshot)
+	if err := m.writeNodesToFile(m.getNodesFilePath(), nodes); err != nil {
+		m.logger.Warnf("failed to restore subscription compatibility files after refresh rollback: %v", err)
+	}
 }
 
 // getNodesFilePath returns the path to nodes.txt.

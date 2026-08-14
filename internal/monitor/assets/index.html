@@ -137,6 +137,105 @@
     .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 8px var(--success); }
     
     .header-actions { display: flex; gap: 10px; align-items: center; }
+    .project-switcher {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .project-select {
+      width: 190px;
+      height: 34px;
+      padding: 0 30px 0 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg-panel);
+      color: var(--text-main);
+      font-size: 12px;
+      outline: none;
+    }
+    .project-select:focus { border-color: var(--primary); }
+    @media (max-width: 1180px) {
+      .project-select { width: 150px; }
+      .header-actions .header-secondary { display: none; }
+    }
+    @media (max-width: 980px) {
+      .status-indicator { display: none; }
+    }
+
+    .project-management {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      min-height: 100%;
+    }
+    .project-management-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .project-management-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .project-management-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr);
+      gap: 16px;
+      min-height: 0;
+      flex: 1;
+    }
+    .project-list-panel,
+    .project-detail-panel { min-width: 0; }
+    .project-table-wrap { overflow-x: auto; }
+    .project-table { width: 100%; min-width: 680px; border-collapse: collapse; }
+    .project-table th,
+    .project-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border-light);
+      text-align: left;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+    .project-table th {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .02em;
+      background: var(--bg-hover);
+    }
+    .project-table tbody tr { cursor: pointer; transition: background .15s ease; }
+    .project-table tbody tr:hover,
+    .project-table tbody tr.project-selected { background: color-mix(in srgb, var(--primary) 8%, var(--bg-panel)); }
+    .project-table tbody tr:last-child td { border-bottom: 0; }
+    .project-name { min-width: 150px; }
+    .project-name strong { color: var(--text-main); font-size: 13px; }
+    .project-port-list { display: flex; flex-direction: column; gap: 3px; color: var(--text-muted); font-size: 11px; }
+    .project-port-list code { color: var(--text-main); font-size: 11px; }
+    .project-row-actions { display: inline-flex; gap: 6px; align-items: center; }
+    .project-row-actions .btn { min-width: 0; }
+    .project-detail-body { padding: 16px; }
+    .project-detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+    .project-detail-heading strong { display: block; color: var(--text-main); font-size: 16px; }
+    .project-config-list { display: grid; gap: 0; margin: 0; }
+    .project-config-item { display: grid; grid-template-columns: minmax(100px, .8fr) minmax(0, 1.2fr); gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--border-light); }
+    .project-config-item:last-child { border-bottom: 0; }
+    .project-config-item dt { color: var(--text-muted); font-size: 12px; }
+    .project-config-item dd { min-width: 0; margin: 0; color: var(--text-main); font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; text-align: right; }
+    .project-management-empty { padding: 48px 20px; color: var(--text-muted); text-align: center; }
+    @media (max-width: 1080px) {
+      .project-management-grid { grid-template-columns: 1fr; }
+      .project-detail-panel { min-height: 0; }
+    }
+    @media (max-width: 520px) {
+      .project-management-heading { align-items: flex-start; flex-direction: column; }
+      .project-management-heading .btn { width: 100%; justify-content: center; }
+      .project-config-item { grid-template-columns: 1fr; gap: 5px; }
+      .project-config-item dd { text-align: left; }
+    }
     
     /* Theme Toggle */
     .theme-toggle {
@@ -184,6 +283,21 @@
       outline: none; width: 100%; box-sizing: border-box; transition: border-color 0.2s;
     }
     .setting-input:focus { border-color: var(--primary); }
+    .settings-page { width: min(100%, 1000px); margin: 0 auto; }
+    .settings-form-grid {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px;
+    }
+    .settings-form-grid.spaced { margin-top: 12px; }
+    .console-log-view {
+      width: 100%; height: min(46vh, 520px); min-height: 320px;
+      padding: 16px; color: var(--text-main); background: var(--bg-input);
+      border: 0; border-top: 1px solid var(--border); box-sizing: border-box;
+      font-family: var(--font-mono); font-size: 12px; line-height: 1.7;
+      resize: vertical; white-space: pre; overflow-x: auto;
+    }
+    @media (max-width: 620px) {
+      .settings-form-grid { grid-template-columns: 1fr; }
+    }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 
     /* UI Components */
@@ -336,6 +450,9 @@
     }
     .modal.modal-subscription { width: min(760px, calc(100vw - 32px)); }
     .modal.modal-node { width: min(800px, calc(100vw - 32px)); }
+    .modal.modal-project { width: min(860px, calc(100vw - 32px)); }
+    .project-delete-notice { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+    .project-delete-notice.danger { color: var(--error); }
     .subscription-url-input {
       min-height: 52px; padding: 13px 15px; font-size: 14px;
     }
@@ -362,6 +479,9 @@
     .modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
     
     .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .form-section-title { color: var(--text-main); font-size: 13px; font-weight: 600; padding-top: 4px; border-top: 1px solid var(--border-light); }
+    .form-section-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    @media (max-width: 560px) { .form-section-grid { grid-template-columns: 1fr; } }
     .checkbox-row {
       display: flex; align-items: center; gap: 10px;
       padding: 10px 14px;
@@ -388,6 +508,15 @@
     .table-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .table-tool { min-height: 34px; width: auto; min-width: 120px; padding: 6px 10px; }
     .table-search { min-width: 230px; flex: 1 1 230px; }
+    .project-schedule-table { min-width: 900px; }
+    .project-schedule-table th,
+    .project-schedule-table td { vertical-align: middle; }
+    .project-schedule-table .project-schedule-name { min-width: 140px; color: var(--text-main); font-weight: 600; }
+    .project-schedule-table .schedule-target { min-width: 300px; }
+    .project-schedule-table .schedule-duration { min-width: 110px; }
+    .project-schedule-table .schedule-number { min-width: 100px; }
+    .project-schedule-table .schedule-toggle { min-width: 130px; }
+    .project-schedule-table .schedule-action { width: 1%; white-space: nowrap; }
     .subscription-summary { display: flex; gap: 20px; flex-wrap: wrap; color: var(--text-muted); font-size: 12px; }
     .subscription-summary strong { color: var(--text-main); font-weight: 600; }
     @media (max-width: 760px) {
@@ -574,6 +703,10 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
         监控看板
       </div>
+      <div class="nav-item" onclick="switchTab('projects')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="7" height="6" rx="1"></rect><rect x="14" y="4" width="7" height="6" rx="1"></rect><rect x="3" y="14" width="7" height="6" rx="1"></rect><rect x="14" y="14" width="7" height="6" rx="1"></rect></svg>
+        项目管理
+      </div>
       <div class="nav-item" onclick="switchTab('manage')">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
         节点配置
@@ -585,10 +718,6 @@
       <div class="nav-item" onclick="switchTab('debug')">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
         诊断分析
-      </div>
-      <div class="nav-item" onclick="switchTab('logs')">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
-        控制台日志
       </div>
       <div class="nav-item" onclick="switchTab('settings')">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
@@ -615,6 +744,9 @@
           <div class="status-dot"></div>
           <span id="lastUpdate">System Online</span>
         </div>
+        <div class="project-switcher" id="projectSwitcher">
+          <select id="projectSelect" class="project-select" onchange="switchProject(this.value)" aria-label="当前项目"></select>
+        </div>
       </div>
       <div class="header-actions">
         <button class="theme-toggle" id="themeToggleBtn" onclick="toggleTheme()" title="切换主题" data-mode="auto">
@@ -625,14 +757,51 @@
         </button>
         <button class="btn btn-primary" onclick="probeAllNodes()">⚡ 批量探测</button>
         <button class="btn" id="refreshSubBtn" onclick="refreshSubscription()" style="display:none;">刷新订阅</button>
-        <button class="btn" onclick="exportNodes()">导出配置</button>
-        <button class="btn" onclick="exportNodes(true)">全部导出</button>
+        <button class="btn header-secondary" onclick="exportNodes()">导出配置</button>
+        <button class="btn header-secondary" onclick="exportNodes(true)">全部导出</button>
         <button class="btn" onclick="toggleAutoRefresh()" id="autoRefreshBtn">⏹ 关闭自动刷新</button>
         <button class="btn" onclick="refresh()">↺ 刷新</button>
       </div>
     </header>
 
     <div class="content">
+      <!-- Projects Tab -->
+      <div id="projectsTab" class="tab-content">
+        <div class="project-management">
+          <div class="project-management-heading">
+            <div class="project-management-title">项目管理</div>
+            <button class="btn btn-primary" type="button" onclick="showProjectModal()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+              新建项目
+            </button>
+          </div>
+          <div class="project-management-grid">
+            <section class="panel project-list-panel">
+              <div class="panel-header">
+                <div class="panel-title">项目列表</div>
+                <span class="badge badge-offline" id="projectTotalBadge">0 个项目</span>
+              </div>
+              <div class="project-table-wrap">
+                <table class="project-table">
+                  <thead>
+                    <tr><th>项目</th><th>状态</th><th>模式</th><th>端口</th><th>节点 / 订阅</th><th>操作</th></tr>
+                  </thead>
+                  <tbody id="projectTableBody"></tbody>
+                </table>
+              </div>
+              <div class="project-management-empty" id="projectEmptyState" style="display:none;">暂无项目</div>
+            </section>
+            <section class="panel project-detail-panel">
+              <div class="panel-header">
+                <div class="panel-title">配置概览</div>
+                <button class="btn btn-sm" id="projectDetailEditBtn" type="button" onclick="editCurrentManagedProject()">编辑</button>
+              </div>
+              <div class="project-detail-body" id="projectDetailContent"></div>
+            </section>
+          </div>
+        </div>
+      </div>
+
       <!-- Dashboard Tab -->
       <div id="dashboardTab" class="tab-content active">
         <div class="overview-grid">
@@ -733,7 +902,7 @@
       <div id="manageTab" class="tab-content">
         <div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
           <div>
-            <h2 style="font-size: 18px; margin-bottom: 4px;">配置管理</h2>
+            <h2 style="font-size: 18px; margin-bottom: 4px;">节点配置</h2>
           </div>
           <div style="display:flex; gap: 10px;">
             <button class="btn btn-primary" onclick="showAddNodeModal()">➕ 添加节点</button>
@@ -745,10 +914,23 @@
           ⚠️ 警告：当前使用订阅模式。手动修改配置将在下次订阅刷新时被覆盖。
         </div>
 
+        <div class="panel" id="projectProbeSettingsPanel" style="margin-bottom:16px;">
+          <div class="panel-header">
+            <div class="panel-title">项目探测配置</div>
+          </div>
+          <div class="table-container">
+            <table class="project-schedule-table">
+              <thead><tr><th>项目</th><th>探测目标</th><th>探测间隔</th><th>探测超时</th><th>并发数</th><th>操作</th></tr></thead>
+              <tbody id="projectProbeSettingsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
         <div class="panel">
+          <div class="panel-header"><div class="panel-title">节点定义</div></div>
           <div class="table-container">
             <table>
-              <thead><tr><th>名称</th><th>URI</th><th>端口</th><th>来源</th><th>操作</th></tr></thead>
+              <thead><tr><th>名称</th><th>URI</th><th>来源</th><th>操作</th></tr></thead>
               <tbody id="configNodesTableBody"></tbody>
             </table>
           </div>
@@ -759,35 +941,33 @@
       <div id="subscriptionsTab" class="tab-content">
         <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
           <h2 style="font-size:18px;">订阅配置</h2>
-          <button class="btn btn-primary" onclick="showSubscriptionModal()">添加订阅</button>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn" onclick="refreshManagedSubscription('')">更新全部</button>
+            <button class="btn btn-primary" onclick="showSubscriptionModal()">添加订阅</button>
+          </div>
         </div>
 
-        <div class="panel" style="margin-bottom:16px;">
+        <div class="panel" id="projectSubscriptionSettingsPanel" style="margin-bottom:16px;">
           <div class="panel-header">
-            <div class="panel-title">自动刷新</div>
+            <div class="panel-title">项目订阅更新配置</div>
+          </div>
+          <div class="table-container">
+            <table class="project-schedule-table">
+              <thead><tr><th>项目</th><th>自动更新订阅</th><th>更新间隔</th><th>操作</th></tr></thead>
+              <tbody id="projectSubscriptionSettingsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">订阅状态 · <span id="currentSubscriptionProjectName">-</span></div>
             <div class="subscription-summary">
               <span>订阅 <strong id="subscriptionTotalCount">0</strong></span>
               <span>有效节点 <strong id="subscriptionActiveNodes">0</strong></span>
               <span>下次刷新 <strong id="subscriptionNextRefresh">-</strong></span>
             </div>
           </div>
-          <div style="padding:16px; display:flex; align-items:end; gap:16px; flex-wrap:wrap;">
-            <div class="checkbox-row" style="min-height:34px;"><input type="checkbox" id="subscriptionAutoEnabled" /><label for="subscriptionAutoEnabled">开启自动刷新</label></div>
-            <div class="form-group" style="min-width:160px;">
-              <label>刷新间隔</label>
-              <select id="subscriptionAutoInterval" class="setting-input">
-                <option value="10m">10 分钟</option><option value="30m">30 分钟</option>
-                <option value="1h">1 小时</option><option value="3h">3 小时</option>
-                <option value="6h">6 小时</option><option value="12h">12 小时</option>
-                <option value="24h">24 小时</option>
-              </select>
-            </div>
-            <button class="btn btn-primary" onclick="saveSubscriptionSettings()">保存</button>
-            <button class="btn" onclick="refreshManagedSubscription('')">全部更新</button>
-          </div>
-        </div>
-
-        <div class="panel">
           <div class="table-container">
             <table>
               <thead><tr><th>状态</th><th>订阅</th><th>节点</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
@@ -812,6 +992,21 @@
           <div class="stat-panel">
             <div class="stat-title">全局请求成功率</div>
             <div class="stat-value" style="color: var(--primary);" id="debugSuccessRate">0%</div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">上传流量</div>
+            <div class="stat-value" style="color: #3b82f6; font-size: 22px;" id="debugTotalUpload">0 B</div>
+            <div class="stat-sub" style="color: var(--text-muted);">累计上行</div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">下载流量</div>
+            <div class="stat-value" style="color: #10b981; font-size: 22px;" id="debugTotalDownload">0 B</div>
+            <div class="stat-sub" style="color: var(--text-muted);">累计下行</div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">总流量</div>
+            <div class="stat-value" style="color: #8b5cf6; font-size: 22px;" id="debugTotalTraffic">0 B</div>
+            <div class="stat-sub" style="color: var(--text-muted);">上行 + 下行合计</div>
           </div>
         </div>
 
@@ -854,122 +1049,24 @@
         </div>
       </div>
 
-      <!-- Logs Tab -->
-      <div id="logsTab" class="tab-content">
-        <div class="panel">
-          <div class="panel-header">
-            <div class="panel-title">控制台日志 (Console Logs)</div>
-            <div style="display:flex; align-items:center; gap:12px;">
-              <label style="font-size:13px; color:var(--text-muted); display:flex; align-items:center; gap:6px;"><input type="checkbox" id="autoScrollLogs" checked> 自动滚动</label>
-              <button class="btn btn-sm" onclick="pollLogs()">↺ 刷新</button>
-            </div>
-          </div>
-          <div style="padding: 0;">
-            <textarea id="consoleLogs" readonly style="width:100%; height:calc(100vh - 220px); min-height:400px; background:var(--bg-input); color:var(--text-main); font-family:'JetBrains Mono',monospace; font-size:12px; line-height:1.7; border:none; border-top:1px solid var(--border); padding:16px; resize:none; box-sizing:border-box; white-space:pre; overflow-x:auto;"></textarea>
-          </div>
-        </div>
-      </div>
-
       <!-- Settings Tab -->
       <div id="settingsTab" class="tab-content">
-        <div style="max-width: 800px; margin: 0 auto;">
+        <div class="settings-page">
           <div style="font-size: 20px; font-weight: 700; margin-bottom: 24px; color: var(--text-main);">系统设置</div>
           <form onsubmit="handleSettingsSave(event)">
 
             <div class="panel" style="margin-bottom: 16px;">
-              <div class="panel-header"><div class="panel-title">基础配置</div></div>
-              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                <div class="form-group">
-                  <label>运行模式 (Mode)</label>
-                  <select id="settingMode" class="setting-input">
-                    <option value="pool">pool - 单端口负载池</option>
-                    <option value="multi-port">multi-port - 多端口模式</option>
-                    <option value="hybrid">hybrid - 混合模式</option>
-                  </select>
-                </div>
-                <div class="form-group">
-                  <label>外部 IP (External IP)</label>
-                  <input type="text" id="settingExternalIP" class="setting-input" placeholder="0.0.0.0" />
-                </div>
-                <div class="form-group" style="justify-content:flex-end;">
-                  <label>&nbsp;</label>
-                  <div class="checkbox-row"><input type="checkbox" id="settingSkipCertVerify" /><label for="settingSkipCertVerify">跳过 SSL 证书验证</label></div>
-                </div>
-              </div>
-            </div>
-
-            <div class="panel" style="margin-bottom: 16px;">
-              <div class="panel-header"><div class="panel-title">监听配置 (Listener)</div></div>
-              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                <div class="form-group"><label>监听地址</label><input type="text" id="settingListenerAddr" class="setting-input" placeholder="0.0.0.0" /></div>
-                <div class="form-group"><label>监听端口</label><input type="number" id="settingListenerPort" class="setting-input" min="1" max="65535" placeholder="7890" /></div>
-                <div class="form-group"><label>用户名 (可选)</label><input type="text" id="settingListenerUser" class="setting-input" /></div>
-                <div class="form-group"><label>密码 (可选)</label><input type="password" id="settingListenerPass" class="setting-input" /></div>
-              </div>
-            </div>
-
-            <div class="panel" style="margin-bottom: 16px;">
-              <div class="panel-header"><div class="panel-title">多端口配置 (Multi-Port)</div></div>
-              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                <div class="form-group"><label>监听地址</label><input type="text" id="settingMPAddr" class="setting-input" placeholder="0.0.0.0" /></div>
-                <div class="form-group"><label>起始端口</label><input type="number" id="settingMPBasePort" class="setting-input" min="1" max="65535" placeholder="10000" /></div>
-                <div class="form-group"><label>用户名 (可选)</label><input type="text" id="settingMPUser" class="setting-input" /></div>
-                <div class="form-group"><label>密码 (可选)</label><input type="password" id="settingMPPass" class="setting-input" /></div>
-              </div>
-            </div>
-
-            <div class="panel" style="margin-bottom: 16px;">
-              <div class="panel-header"><div class="panel-title">节点池配置 (Pool)</div></div>
-              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
-                <div class="form-group">
-                  <label>调度模式</label>
-                  <select id="settingPoolMode" class="setting-input">
-                    <option value="random">random - 随机</option>
-                    <option value="round-robin">round-robin - 轮询</option>
-                    <option value="balance">balance - 均衡</option>
-                    <option value="latency">latency - 最低延迟</option>
-                  </select>
-                </div>
-                <div class="form-group"><label>故障阈值</label><input type="number" id="settingPoolFailure" class="setting-input" min="1" max="100" placeholder="3" /></div>
-                <div class="form-group"><label>黑名单时长</label><input type="text" id="settingPoolBlacklist" class="setting-input" placeholder="24h" /></div>
-              </div>
-            </div>
-
-            <div class="panel" style="margin-bottom: 16px;">
-              <div class="panel-header"><div class="panel-title">粘性代理 (Sticky Session)</div></div>
-              <div style="padding: 16px;">
-                <div class="checkbox-grid">
-                  <div class="checkbox-row"><input type="checkbox" id="settingStickyEnabled" /><label for="settingStickyEnabled">启用粘性代理（独立端口，按客户端来源 IP 固定上游节点）</label></div>
-                </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                  <div class="form-group"><label>粘性端口</label><input type="number" id="settingStickyPort" class="setting-input" min="1" max="65535" placeholder="2324（留空则为 listener 端口 +1）" /></div>
-                </div>
-                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">仅 pool / hybrid 模式生效。未指定节点时按最低延迟选择并按来源 IP 保持绑定；也可在监控节点列表中指定粘性出口。原 listener 端口始终按 pool 策略调度。</div>
-              </div>
-            </div>
-
-            <div class="panel" style="margin-bottom: 16px;">
               <div class="panel-header"><div class="panel-title">管理面板 (Management)</div></div>
-              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
+              <div class="settings-form-grid" style="padding:16px;">
                 <div class="form-group"><label>监听地址</label><input type="text" id="settingMgmtListen" class="setting-input" placeholder="0.0.0.0:8080" /></div>
                 <div class="form-group"><label>访问密码</label><input type="password" id="settingMgmtPassword" class="setting-input" /></div>
               </div>
             </div>
 
             <div class="panel" style="margin-bottom: 16px;">
-              <div class="panel-header"><div class="panel-title">探测配置</div></div>
-              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                <div class="form-group"><label>探测目标</label><input type="text" id="settingProbeTarget" class="setting-input" placeholder="http://cp.cloudflare.com/generate_204" /></div>
-                <div class="form-group"><label>探测并发数</label><input type="number" id="settingProbeConcurrency" class="setting-input" min="1" max="1024" placeholder="32" /></div>
-                <div class="form-group"><label>自动探测间隔</label><input type="text" id="settingProbeInterval" class="setting-input" placeholder="5m" /></div>
-                <div class="form-group"><label>单节点探测总超时（秒）</label><input type="number" id="settingProbeTimeout" class="setting-input" min="25" step="5" required placeholder="110" /></div>
-              </div>
-            </div>
-
-            <div class="panel" style="margin-bottom: 16px;">
               <div class="panel-header"><div class="panel-title">日志配置</div></div>
               <div style="padding: 16px;">
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                <div class="settings-form-grid">
                   <div class="form-group">
                     <label>日志输出</label>
                     <select id="settingLogOutput" class="setting-input" onchange="toggleLogFileSettings()">
@@ -978,7 +1075,7 @@
                     </select>
                   </div>
                 </div>
-                <div id="logFileSettings" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px;">
+                <div id="logFileSettings" class="settings-form-grid spaced">
                   <div class="form-group"><label>单文件最大 MB</label><input type="number" id="settingLogMaxSize" class="setting-input" min="1" max="1024" placeholder="50" /></div>
                   <div class="form-group"><label>保留旧日志个数</label><input type="number" id="settingLogMaxBackups" class="setting-input" min="0" max="100" placeholder="3" /></div>
                   <div class="form-group"><label>保留天数</label><input type="number" id="settingLogMaxAge" class="setting-input" min="0" max="365" placeholder="7" /></div>
@@ -995,6 +1092,17 @@
               <button type="submit" class="btn btn-primary" style="padding: 10px 32px; font-size: 14px;">保存配置</button>
             </div>
           </form>
+
+          <div class="panel" style="margin-bottom:16px;">
+            <div class="panel-header">
+              <div class="panel-title">控制台日志 (Console Logs)</div>
+              <div style="display:flex; align-items:center; gap:12px;">
+                <label style="font-size:13px; color:var(--text-muted); display:flex; align-items:center; gap:6px;"><input type="checkbox" id="autoScrollLogs" checked> 自动滚动</label>
+                <button class="btn btn-sm" type="button" onclick="pollLogs()">↺ 刷新</button>
+              </div>
+            </div>
+            <textarea id="consoleLogs" class="console-log-view" readonly></textarea>
+          </div>
         </div>
       </div>
 
@@ -1039,10 +1147,6 @@
           <div class="form-group">
             <label>节点 URI</label>
             <textarea id="nodeUri" class="node-uri-input" required placeholder="vless://... 或 anytls://..."></textarea>
-          </div>
-          <div class="form-group">
-            <label>映射端口 (可选)</label>
-            <input type="number" id="nodePort" placeholder="0" />
           </div>
           <input type="hidden" id="nodeEditName" />
         </div>
@@ -1089,6 +1193,87 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="projectModalOverlay">
+    <div class="modal modal-project">
+      <div class="modal-header" id="projectModalTitle">新建项目</div>
+      <form onsubmit="saveProject(event)">
+        <div class="modal-body">
+          <div class="form-group">
+            <label>项目 ID</label>
+            <input type="text" id="projectID" required maxlength="64" pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="crawler" />
+          </div>
+          <div class="form-group">
+            <label>项目名称</label>
+            <input type="text" id="projectName" required maxlength="80" placeholder="爬虫代理" />
+          </div>
+          <div class="form-section-grid">
+            <div class="form-group"><label>运行模式</label><select id="projectMode" class="setting-input"><option value="pool">pool - 单端口负载池</option><option value="multi-port">multi-port - 多端口模式</option><option value="hybrid">hybrid - 混合模式</option></select></div>
+            <div class="form-group"><label>外部 IP</label><input type="text" id="projectExternalIP" class="setting-input" placeholder="可选" /></div>
+            <div class="checkbox-row"><input type="checkbox" id="projectSkipCertVerify" checked /><label for="projectSkipCertVerify">跳过 SSL 证书验证</label></div>
+          </div>
+          <div class="form-section-title">监听配置</div>
+          <div class="form-section-grid">
+            <div class="form-group"><label>监听地址</label><input type="text" id="projectListenerAddr" class="setting-input" placeholder="0.0.0.0" /></div>
+            <div class="form-group"><label>监听端口</label><input type="number" id="projectListenerPort" class="setting-input" min="0" max="65535" /></div>
+            <div class="form-group"><label>用户名</label><input type="text" id="projectListenerUser" class="setting-input" /></div>
+            <div class="form-group"><label>密码</label><input type="password" id="projectListenerPass" class="setting-input" /></div>
+          </div>
+          <div class="form-section-title">多端口配置</div>
+          <div class="form-section-grid">
+            <div class="form-group"><label>监听地址</label><input type="text" id="projectMPAddr" class="setting-input" placeholder="0.0.0.0" /></div>
+            <div class="form-group"><label>起始端口</label><input type="number" id="projectMPBasePort" class="setting-input" min="0" max="65535" /></div>
+            <div class="form-group"><label>用户名</label><input type="text" id="projectMPUser" class="setting-input" /></div>
+            <div class="form-group"><label>密码</label><input type="password" id="projectMPPass" class="setting-input" /></div>
+          </div>
+          <div class="form-section-title">节点池配置</div>
+          <div class="form-section-grid">
+            <div class="form-group"><label>调度模式</label><select id="projectPoolMode" class="setting-input"><option value="random">random - 随机</option><option value="balance">balance - 均衡</option><option value="latency">latency - 最低延迟</option><option value="sequential">sequential - 顺序</option></select></div>
+            <div class="form-group"><label>故障阈值</label><input type="number" id="projectPoolFailure" class="setting-input" min="1" max="100" /></div>
+            <div class="form-group"><label>拉黑时长</label><input type="text" id="projectPoolBlacklist" class="setting-input" placeholder="30m" /></div>
+            <div class="form-group"><label>重试次数</label><input type="number" id="projectPoolRetryAttempts" class="setting-input" min="1" max="100" /></div>
+            <div class="checkbox-row"><input type="checkbox" id="projectPoolRetryEnabled" checked /><label for="projectPoolRetryEnabled">启用失败重试</label></div>
+          </div>
+          <div class="form-section-title">粘性代理配置</div>
+          <div class="form-section-grid">
+            <div class="checkbox-row"><input type="checkbox" id="projectStickyEnabled" /><label for="projectStickyEnabled">启用粘性代理</label></div>
+            <div class="form-group"><label>粘性端口</label><input type="number" id="projectStickyPort" class="setting-input" min="0" max="65535" /></div>
+          </div>
+          <div class="form-section-title">选定订阅（不选则加载全部）</div>
+          <div class="checkbox-grid" id="projectSubscriptionCheckboxes">
+            <!-- Populated dynamically -->
+          </div>
+          <em style="font-size:11px;color:var(--text-muted);">勾选的订阅才会为该项目加载节点，后续新添加的订阅需手动勾选。</em>
+          <div class="form-section-grid">
+            <div class="checkbox-row"><input type="checkbox" id="projectEnabled" checked /><label for="projectEnabled">启用项目</label></div>
+            <div class="checkbox-row"><input type="checkbox" id="projectAutostart" checked /><label for="projectAutostart">服务启动时自动运行</label></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" onclick="closeProjectModal()">取消</button>
+          <button type="submit" class="btn btn-primary" id="projectSubmitBtn">创建</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="projectDeleteModalOverlay">
+    <div class="modal">
+      <div class="modal-header">删除项目</div>
+      <div class="modal-body">
+        <div>确认从项目清单移除 <strong id="deleteProjectName"></strong>？</div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="deleteProjectData" onchange="updateProjectDeleteChoice()" />
+          <label for="deleteProjectData">同时删除本地项目文件（不可恢复）</label>
+        </div>
+        <div class="project-delete-notice" id="deleteProjectNotice"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" onclick="closeProjectDeleteModal()">取消</button>
+        <button type="button" class="btn btn-danger" id="confirmProjectDeleteBtn" onclick="confirmDeleteProject()">仅移除项目</button>
+      </div>
+    </div>
+  </div>
+
 
 
   <div class="toast-container" id="toastContainer"></div>
@@ -1109,7 +1294,35 @@
   <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
 
   <script>
-    // JS Logic - Kept exact API calls from original
+    let currentProjectID = localStorage.getItem('proxy2apiProject') || '';
+    let defaultProjectID = '';
+    let projectsCache = [];
+    let editingProjectID = '';
+    let deletingProjectID = '';
+    const nativeFetch = window.fetch.bind(window);
+
+    function projectAPIPath(path) {
+      if (typeof path !== 'string' || !path.startsWith('/api/')) return path;
+      if (path === '/api/auth' || path === '/api/projects' || path.startsWith('/api/projects/')) return path;
+      if (!currentProjectID) return path;
+      return `/api/projects/${encodeURIComponent(currentProjectID)}${path.slice(4)}`;
+    }
+
+    window.fetch = function(input, init) {
+	  if (typeof input === 'string') {
+		const scopedPath = projectAPIPath(input);
+		const scopedProject = currentProjectID;
+		const isProjectRequest = scopedPath !== input;
+		return nativeFetch(scopedPath, init).then(response => {
+		  if (isProjectRequest && scopedProject !== currentProjectID) {
+			throw new DOMException('Project switched while request was pending', 'AbortError');
+		  }
+		  return response;
+		});
+	  }
+      return nativeFetch(input, init);
+    };
+
     let isAutoRefresh = true;
     let autoRefreshInterval = null;
     let allNodesCache = [];
@@ -1166,6 +1379,623 @@
       setTimeout(() => t.remove(), 3000);
     }
 
+    function currentProject() {
+      return projectsCache.find(project => project.id === currentProjectID) || null;
+    }
+
+    function isSharedCatalogMode() {
+      return !currentProjectID && projectsCache.length === 0;
+    }
+
+    function projectStatusView(status) {
+      switch (status) {
+        case 'running': return ['badge-healthy', '运行中'];
+        case 'starting': return ['badge-warning', '启动中'];
+        case 'stopping': return ['badge-warning', '停止中'];
+        case 'failed': return ['badge-error', '启动失败'];
+        default: return ['badge-offline', '已停止'];
+      }
+    }
+
+    function projectModeLabel(mode) {
+      return ({pool:'Pool', 'multi-port':'多端口', hybrid:'混合'})[mode] || mode || '-';
+    }
+
+    function projectEndpoint(address, port, suffix='') {
+      if (!port) return '-';
+      return `${address || '0.0.0.0'}:${port}${suffix}`;
+    }
+
+    function renderProjectSelector() {
+      const select = document.getElementById('projectSelect');
+      select.replaceChildren();
+      if (!projectsCache.length) {
+        select.add(new Option('全部（无项目）', ''));
+      }
+      projectsCache.forEach(project => {
+        const option = new Option(project.name, project.id);
+        select.add(option);
+      });
+      select.value = currentProjectID;
+      select.disabled = projectsCache.length === 0;
+    }
+
+    function renderProjectManagement() {
+      const tbody = document.getElementById('projectTableBody');
+      const empty = document.getElementById('projectEmptyState');
+      const detail = document.getElementById('projectDetailContent');
+      const editButton = document.getElementById('projectDetailEditBtn');
+      if (!tbody || !empty || !detail || !editButton) return;
+
+      document.getElementById('projectTotalBadge').textContent = `${projectsCache.length} 个项目`;
+      empty.style.display = projectsCache.length ? 'none' : 'block';
+      tbody.innerHTML = projectsCache.map(project => {
+        const statusView = projectStatusView(project.status);
+        const projectID = escapeAttrJs(project.id);
+        const busy = project.status === 'starting' || project.status === 'stopping';
+        const runtimeDisabled = !project.enabled || busy;
+        const runtimeAction = project.status === 'running' ? '停止' : '启动';
+        const ports = [
+          project.listener_port ? `<span>入口 <code>${escapeHtml(projectEndpoint(project.listener_address, project.listener_port))}</code></span>` : '',
+          project.multi_port_base ? `<span>多端口 <code>${escapeHtml(projectEndpoint(project.multi_port_address, project.multi_port_base, '+'))}</code></span>` : ''
+        ].filter(Boolean).join('') || '<span>-</span>';
+        return `<tr class="${project.id === currentProjectID ? 'project-selected' : ''}" onclick="selectManagedProject('${projectID}')">
+          <td><div class="project-name"><strong>${escapeHtml(project.name)}</strong></div></td>
+          <td><span class="badge ${statusView[0]}" title="${escapeHtml(project.last_error || '')}">${statusView[1]}</span></td>
+          <td>${escapeHtml(projectModeLabel(project.mode))}</td>
+          <td><div class="project-port-list">${ports}</div></td>
+          <td><code>${Number(project.node_count) || 0} / ${Number(project.subscription_count) || 0}</code></td>
+          <td><div class="project-row-actions">
+            <button class="btn btn-sm" type="button" onclick="event.stopPropagation(); showProjectModal('${projectID}')">编辑</button>
+            <button class="btn btn-sm" type="button" ${runtimeDisabled ? 'disabled' : ''} onclick="event.stopPropagation(); toggleManagedProject('${projectID}')">${runtimeAction}</button>
+            <button class="btn btn-sm btn-danger" type="button" onclick="event.stopPropagation(); deleteProject('${projectID}')">删除</button>
+          </div></td>
+        </tr>`;
+      }).join('');
+
+      const project = currentProject();
+      editButton.disabled = !project;
+      if (!project) {
+        detail.innerHTML = '<div class="project-management-empty">请选择项目</div>';
+        return;
+      }
+      const statusView = projectStatusView(project.status);
+      const settings = project.settings || {};
+      const pool = settings.pool || {};
+      const sticky = settings.sticky || {};
+      const configItems = [
+        ['运行模式', projectModeLabel(project.mode)],
+        ['代理入口', projectEndpoint(project.listener_address, project.listener_port)],
+        ['多端口起始', projectEndpoint(project.multi_port_address, project.multi_port_base, '+')],
+        ['内部 API', project.clash_api_port ? `127.0.0.1:${project.clash_api_port}` : '-'],
+        ['节点数', String(Number(project.node_count) || 0)],
+        ['订阅数', String(Number(project.subscription_count) || 0)],
+        ['拉黑解除时长', pool.blacklist_duration || '-'],
+        ['节点池策略', pool.mode || '-'],
+        ['SSL 验证', settings.skip_cert_verify ? '跳过' : '严格验证'],
+        ['粘性代理', sticky.enabled ? projectEndpoint(project.listener_address, sticky.port) : '未启用'],
+        ['启用', project.enabled ? '是' : '否'],
+        ['自动运行', project.autostart ? '是' : '否'],
+        ['启动时间', formatDateTime(project.started_at)]
+      ];
+      if (project.last_error) configItems.push(['最近错误', project.last_error]);
+      detail.innerHTML = `<div class="project-detail-heading">
+          <strong>${escapeHtml(project.name)}</strong>
+          <span class="badge ${statusView[0]}">${statusView[1]}</span>
+        </div>
+        <dl class="project-config-list">${configItems.map(item => `<div class="project-config-item"><dt>${escapeHtml(item[0])}</dt><dd>${escapeHtml(item[1])}</dd></div>`).join('')}</dl>`;
+    }
+
+    async function loadProjects() {
+      const response = await nativeFetch('/api/projects');
+      if (!response.ok) throw new Error(`加载项目失败: HTTP ${response.status}`);
+      const data = await response.json();
+      projectsCache = data.items || [];
+      defaultProjectID = data.default_project || '';
+      if (!projectsCache.some(project => project.id === currentProjectID)) {
+        currentProjectID = defaultProjectID || projectsCache[0]?.id || '';
+        if (currentProjectID) {
+          localStorage.setItem('proxy2apiProject', currentProjectID);
+        } else {
+          localStorage.removeItem('proxy2apiProject');
+        }
+      }
+      renderProjectSelector();
+      return currentProject();
+    }
+
+    async function loadProjectManagement() {
+      try {
+        await loadProjects();
+        renderProjectManagement();
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    }
+
+    async function updateProjectRuntimeSection(projectID, section, value) {
+      const project = projectsCache.find(item => item.id === projectID);
+      if (!project) throw new Error('项目不存在');
+      const settings = JSON.parse(JSON.stringify(project.settings || {}));
+      settings[section] = value;
+      const response = await nativeFetch(`/api/projects/${encodeURIComponent(projectID)}`, {
+        method: 'PATCH',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({settings})
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '保存项目配置失败');
+      const index = projectsCache.findIndex(item => item.id === projectID);
+      if (index >= 0) projectsCache[index] = data;
+      renderProjectSelector();
+      renderProjectManagement();
+      return data;
+    }
+
+    function renderProjectProbeSettings() {
+      const tbody = document.getElementById('projectProbeSettingsTableBody');
+      if (!tbody) return;
+      const panel = document.getElementById('projectProbeSettingsPanel');
+      if (panel) panel.style.display = projectsCache.length ? 'block' : 'none';
+      const projects = currentProject() ? [currentProject()] : [];
+      tbody.innerHTML = projects.map(project => {
+        const probe = projectScheduleSettings(project).probe;
+        const projectID = escapeAttrJs(project.id);
+        const inputID = escapeHtml(project.id);
+        return `<tr>
+          <td class="project-schedule-name">${escapeHtml(project.name)}</td>
+          <td><input class="setting-input schedule-target" id="probeTarget-${inputID}" type="text" value="${escapeHtml(probe.target)}" /></td>
+          <td><input class="setting-input schedule-duration" id="probeInterval-${inputID}" type="text" value="${escapeHtml(probe.interval)}" placeholder="3h" /></td>
+          <td><input class="setting-input schedule-duration" id="probeTimeout-${inputID}" type="text" value="${escapeHtml(probe.timeout)}" placeholder="110s" /></td>
+          <td><input class="setting-input schedule-number" id="probeConcurrency-${inputID}" type="number" min="1" max="1024" value="${Number(probe.concurrency) || 32}" /></td>
+          <td class="schedule-action"><button class="btn btn-sm btn-primary" type="button" onclick="saveProjectProbeSettings('${projectID}', this)">保存</button></td>
+        </tr>`;
+      }).join('');
+    }
+
+    async function saveProjectProbeSettings(projectID, button) {
+      const probe = {
+        target: document.getElementById(`probeTarget-${projectID}`).value.trim(),
+        interval: document.getElementById(`probeInterval-${projectID}`).value.trim(),
+        timeout: document.getElementById(`probeTimeout-${projectID}`).value.trim(),
+        concurrency: Number(document.getElementById(`probeConcurrency-${projectID}`).value)
+      };
+      button.disabled = true;
+      try {
+        await updateProjectRuntimeSection(projectID, 'probe', probe);
+        renderProjectProbeSettings();
+        showToast('探测配置已保存');
+      } catch (error) {
+        showToast(error.message, 'error');
+        try {
+          await loadProjects();
+          renderProjectProbeSettings();
+        } catch (reloadError) {}
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function renderProjectSubscriptionSettings() {
+      const tbody = document.getElementById('projectSubscriptionSettingsTableBody');
+      if (!tbody) return;
+      const panel = document.getElementById('projectSubscriptionSettingsPanel');
+      if (panel) panel.style.display = projectsCache.length ? 'block' : 'none';
+      const projects = currentProject() ? [currentProject()] : [];
+      tbody.innerHTML = projects.map(project => {
+        const subscription = projectScheduleSettings(project).subscription_refresh;
+        const projectID = escapeAttrJs(project.id);
+        const inputID = escapeHtml(project.id);
+        const busy = project.status === 'starting' || project.status === 'stopping';
+        return `<tr>
+          <td class="project-schedule-name">${escapeHtml(project.name)}</td>
+          <td><div class="checkbox-row schedule-toggle"><input id="subscriptionEnabled-${inputID}" type="checkbox" ${subscription.enabled ? 'checked' : ''} /><label for="subscriptionEnabled-${inputID}">自动更新</label></div></td>
+          <td><input class="setting-input schedule-duration" id="subscriptionInterval-${inputID}" type="text" value="${escapeHtml(subscription.interval)}" placeholder="24h" /></td>
+          <td class="schedule-action">
+            <div class="project-row-actions">
+              <button class="btn btn-sm btn-primary" type="button" onclick="saveProjectSubscriptionSettings('${projectID}', this)">保存</button>
+              <button class="btn btn-sm" type="button" ${project.status === 'running' && !busy ? '' : 'disabled'} onclick="refreshProjectSubscriptions('${projectID}', this)">立即更新</button>
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+
+    async function saveProjectSubscriptionSettings(projectID, button) {
+      const project = projectsCache.find(item => item.id === projectID);
+      if (!project) return;
+      const subscription = {
+        enabled: document.getElementById(`subscriptionEnabled-${projectID}`).checked,
+        interval: document.getElementById(`subscriptionInterval-${projectID}`).value.trim()
+      };
+      button.disabled = true;
+      try {
+        let updated;
+        if (project.status === 'running') {
+          const response = await nativeFetch(`/api/projects/${encodeURIComponent(projectID)}/subscriptions/settings`, {
+            method: 'PUT',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(subscription)
+          });
+          const data = await response.json();
+          if (!response.ok || data.error) throw new Error(data.error || '保存失败');
+          await loadProjects();
+          updated = projectsCache.find(item => item.id === projectID);
+        } else {
+          updated = await updateProjectRuntimeSection(projectID, 'subscription_refresh', subscription);
+        }
+        renderProjectSubscriptionSettings();
+        if (projectID === currentProjectID && updated && updated.status === 'running') await loadCurrentProjectSubscriptions();
+        showToast('订阅更新配置已保存');
+      } catch (error) {
+        showToast(error.message, 'error');
+        try {
+          await loadProjects();
+          renderProjectSubscriptionSettings();
+        } catch (reloadError) {}
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function refreshProjectSubscriptions(projectID, button) {
+      const project = projectsCache.find(item => item.id === projectID);
+      if (!project) return;
+      button.disabled = true;
+      showFullscreenLoading('更新订阅中...', `正在更新 ${project.name}`);
+      try {
+        const response = await nativeFetch(`/api/projects/${encodeURIComponent(projectID)}/subscriptions/refresh`, {method:'POST'});
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || '更新失败');
+        if (projectID === currentProjectID) applyCurrentSubscriptionPayload(data);
+        showToast('订阅更新完成');
+      } catch (error) {
+        showToast(error.message, 'error');
+      } finally {
+        button.disabled = false;
+        hideFullscreenLoading();
+      }
+    }
+
+    function resetProjectView() {
+      allNodesCache = [];
+      configNodes = [];
+      subscriptionsCache = [];
+      cachedBlacklistDuration = null;
+      stickyNodeTag = '';
+      stickyEnabled = false;
+      entryExitPortsByTag = new Map();
+      if (trafficSource) {
+        trafficSource.close();
+        trafficSource = null;
+      }
+      trafficDataUp = [];
+      trafficDataDown = [];
+      trafficTime = [];
+	  stopLogPolling();
+	  document.getElementById('configNodesTableBody').replaceChildren();
+	  document.getElementById('subscriptionWarning').style.display = 'none';
+	  document.getElementById('subscriptionsTableBody').replaceChildren();
+	  document.getElementById('subscriptionsEmptyState').style.display = 'block';
+	  document.getElementById('subscriptionTotalCount').textContent = '0';
+	  document.getElementById('subscriptionActiveNodes').textContent = '0';
+	  document.getElementById('subscriptionNextRefresh').textContent = '-';
+	  document.getElementById('currentSubscriptionProjectName').textContent = currentProject()?.name || '全部（无项目）';
+	  document.getElementById('debugNodesTableBody').replaceChildren();
+	  document.getElementById('debugTotalUpload').textContent = '0 B';
+	  document.getElementById('debugTotalDownload').textContent = '0 B';
+	  document.getElementById('debugTotalTraffic').textContent = '0 B';
+	  disconnectDebugTraffic();
+	  debugTrafficUpTotal = 0;
+	  debugTrafficDownTotal = 0;
+	  document.getElementById('consoleLogs').value = '';
+	  window._debugNodes = [];
+	  _savedCoreSnapshot = '';
+	  document.querySelector('#settingsTab form')?.reset();
+	  latencyChartInst && latencyChartInst.clear();
+	  successRateChartInst && successRateChartInst.clear();
+	  failureChartInst && failureChartInst.clear();
+	  trafficChartInst && trafficChartInst.clear();
+      updateDashboardStats({nodes: []});
+      applyNodeFilters();
+    }
+
+    async function switchProject(projectID) {
+      if (!projectID) return;
+      if (projectID === currentProjectID) {
+        renderProjectManagement();
+        return;
+      }
+      currentProjectID = projectID;
+      localStorage.setItem('proxy2apiProject', currentProjectID);
+      resetProjectView();
+      renderProjectSelector();
+      renderProjectManagement();
+      const project = currentProject();
+      const activeTab = document.querySelector('.tab-content.active');
+      if (activeTab && activeTab.id === 'manageTab') loadConfigNodes();
+      if (activeTab && activeTab.id === 'subscriptionsTab') loadSubscriptionsPage();
+      if (activeTab && activeTab.id === 'settingsTab') {
+        loadSettingsPage();
+        startLogPolling();
+      }
+      if (project && project.status === 'running') {
+        await refresh();
+        connectTrafficSSE();
+		if (activeTab && activeTab.id === 'debugTab') loadDebugData();
+      }
+    }
+
+    function selectManagedProject(projectID) {
+      return switchProject(projectID);
+    }
+
+    function projectScheduleSettings(project) {
+      const settings = project && project.settings ? project.settings : {};
+      const probe = settings.probe || {};
+      const subscription = settings.subscription_refresh || {};
+      return {
+        probe: {
+          target: probe.target || 'http://cp.cloudflare.com/generate_204',
+          interval: probe.interval || '5m0s',
+          timeout: probe.timeout || '1m50s',
+          concurrency: Number(probe.concurrency) || 32
+        },
+        subscription_refresh: {
+          enabled: project ? subscription.enabled !== false : true,
+          interval: subscription.interval || '1h0m0s'
+        }
+      };
+    }
+
+    function projectSettingsPayload() {
+      const editingProject = projectsCache.find(item => item.id === editingProjectID) || null;
+      const schedules = projectScheduleSettings(editingProject);
+      // Collect selected subscriptions from checkbox grid
+      const checkboxes = document.querySelectorAll('#projectSubscriptionCheckboxes input[type="checkbox"]');
+      const selectedSubscriptions = [];
+      checkboxes.forEach(cb => { if (cb.checked) selectedSubscriptions.push(cb.value); });
+      return {
+        mode: document.getElementById('projectMode').value,
+        external_ip: document.getElementById('projectExternalIP').value.trim(),
+        skip_cert_verify: document.getElementById('projectSkipCertVerify').checked,
+        listener: {
+          address: document.getElementById('projectListenerAddr').value.trim(),
+          port: Number(document.getElementById('projectListenerPort').value) || 0,
+          username: document.getElementById('projectListenerUser').value,
+          password: document.getElementById('projectListenerPass').value
+        },
+        multi_port: {
+          address: document.getElementById('projectMPAddr').value.trim(),
+          base_port: Number(document.getElementById('projectMPBasePort').value) || 0,
+          username: document.getElementById('projectMPUser').value,
+          password: document.getElementById('projectMPPass').value
+        },
+        pool: {
+          mode: document.getElementById('projectPoolMode').value,
+          failure_threshold: Number(document.getElementById('projectPoolFailure').value) || 3,
+          blacklist_duration: document.getElementById('projectPoolBlacklist').value.trim() || '24h',
+          retry_enabled: document.getElementById('projectPoolRetryEnabled').checked,
+          retry_attempts: Number(document.getElementById('projectPoolRetryAttempts').value) || 3
+        },
+        sticky: {
+          enabled: document.getElementById('projectStickyEnabled').checked,
+          port: Number(document.getElementById('projectStickyPort').value) || 0
+        },
+        probe: schedules.probe,
+        subscription_refresh: schedules.subscription_refresh,
+        selected_subscriptions: selectedSubscriptions
+      };
+    }
+
+    function fillProjectSettings(settings) {
+      const s = settings || {};
+      const listener = s.listener || {};
+      const multi = s.multi_port || {};
+      const pool = s.pool || {};
+      const sticky = s.sticky || {};
+      document.getElementById('projectMode').value = s.mode || 'pool';
+      document.getElementById('projectExternalIP').value = s.external_ip || '';
+      document.getElementById('projectSkipCertVerify').checked = s.skip_cert_verify !== false;
+      document.getElementById('projectListenerAddr').value = listener.address || '0.0.0.0';
+      document.getElementById('projectListenerPort').value = listener.port || '';
+      document.getElementById('projectListenerUser').value = listener.username || '';
+      document.getElementById('projectListenerPass').value = listener.password || '';
+      document.getElementById('projectMPAddr').value = multi.address || '0.0.0.0';
+      document.getElementById('projectMPBasePort').value = multi.base_port || '';
+      document.getElementById('projectMPUser').value = multi.username || '';
+      document.getElementById('projectMPPass').value = multi.password || '';
+      document.getElementById('projectPoolMode').value = pool.mode || 'sequential';
+      document.getElementById('projectPoolFailure').value = pool.failure_threshold || 3;
+      document.getElementById('projectPoolBlacklist').value = pool.blacklist_duration || '24h';
+      document.getElementById('projectPoolRetryEnabled').checked = pool.retry_enabled !== false;
+      document.getElementById('projectPoolRetryAttempts').value = pool.retry_attempts || 3;
+      document.getElementById('projectStickyEnabled').checked = !!sticky.enabled;
+      document.getElementById('projectStickyPort').value = sticky.port || '';
+    }
+
+    async function showProjectModal(projectID='') {
+      const project = projectsCache.find(item => item.id === projectID) || null;
+      editingProjectID = project ? project.id : '';
+      document.getElementById('projectModalTitle').textContent = project ? '编辑项目' : '新建项目';
+      document.getElementById('projectSubmitBtn').textContent = project ? '保存' : '创建';
+      const idInput = document.getElementById('projectID');
+      idInput.value = project ? project.id : '';
+      idInput.readOnly = Boolean(project);
+      document.getElementById('projectName').value = project ? project.name : '';
+      fillProjectSettings(project ? project.settings : null);
+      document.getElementById('projectEnabled').checked = project ? project.enabled : true;
+      document.getElementById('projectAutostart').checked = project ? project.autostart : true;
+      await populateSubscriptionCheckboxes(project ? project.settings : null);
+      document.getElementById('projectModalOverlay').classList.add('show');
+      setTimeout(() => document.getElementById(project ? 'projectName' : 'projectID').focus(), 0);
+    }
+
+    async function populateSubscriptionCheckboxes(settings) {
+      const grid = document.getElementById('projectSubscriptionCheckboxes');
+      if (!grid) return;
+      let subscriptions = [];
+      // Gather all subscription URLs from the source catalog.
+      try {
+        const res = await nativeFetch('/api/subscriptions');
+        const data = await res.json();
+        subscriptions = (data.items || []).map(item => ({
+          url: item.url,
+          name: item.name || item.url
+        }));
+      } catch(e) {
+        // Fall back to current project's subscription list
+        const project = currentProject();
+        if (project && project.settings && project.settings.selected_subscriptions) {
+          subscriptions = project.settings.selected_subscriptions.map(url => ({url, name: url}));
+        }
+      }
+      const selected = (settings && settings.selected_subscriptions) || [];
+      const selectedMap = {};
+      selected.forEach(url => { selectedMap[url] = true; });
+      grid.innerHTML = subscriptions.map((subscription, i) => {
+        const {url, name} = subscription;
+        const checked = selected.length === 0 || selectedMap[url] ? 'checked' : '';
+        const id = `subcheck-${i}`;
+        return `<div class="checkbox-row" title="${escapeHtml(url)}">
+          <input type="checkbox" id="${id}" value="${escapeHtml(url)}" ${checked} />
+          <label for="${id}">${escapeHtml(name)}</label>
+        </div>`;
+      }).join('');
+    }
+
+    function editCurrentManagedProject() {
+      const project = currentProject();
+      if (project) showProjectModal(project.id);
+    }
+
+    function closeProjectModal() {
+      editingProjectID = '';
+      document.getElementById('projectModalOverlay').classList.remove('show');
+    }
+
+    async function saveProject(event) {
+      event.preventDefault();
+      const createPayload = {
+        id: document.getElementById('projectID').value.trim(),
+        name: document.getElementById('projectName').value.trim(),
+        enabled: document.getElementById('projectEnabled').checked,
+        autostart: document.getElementById('projectAutostart').checked,
+        settings: projectSettingsPayload()
+      };
+      const updatePayload = {
+        name: document.getElementById('projectName').value.trim(),
+        enabled: document.getElementById('projectEnabled').checked,
+        autostart: document.getElementById('projectAutostart').checked,
+        settings: projectSettingsPayload()
+      };
+      const projectID = editingProjectID || createPayload.id;
+      const isEditing = Boolean(editingProjectID);
+      try {
+        const url = isEditing ? `/api/projects/${encodeURIComponent(projectID)}` : '/api/projects';
+        const response = await nativeFetch(url, {
+          method: isEditing ? 'PATCH' : 'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(isEditing ? updatePayload : createPayload)
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || (isEditing ? '更新项目失败' : '创建项目失败'));
+        currentProjectID = projectID;
+        localStorage.setItem('proxy2apiProject', currentProjectID);
+        closeProjectModal();
+        await loadProjects();
+        resetProjectView();
+        if (data.status === 'running') await refresh();
+        renderProjectManagement();
+        showToast(isEditing ? '项目已更新' : '项目已创建');
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    }
+
+    async function toggleManagedProject(projectID) {
+      const project = projectsCache.find(item => item.id === projectID);
+      if (!project) return;
+      const action = project.status === 'running' ? 'stop' : 'start';
+      try {
+        const response = await nativeFetch(`/api/projects/${encodeURIComponent(project.id)}/${action}`, {method:'POST'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `${action} failed`);
+        await loadProjects();
+        if (project.id === currentProjectID) {
+          resetProjectView();
+          if (action === 'start') await refresh();
+        }
+        renderProjectManagement();
+        showToast(action === 'start' ? '项目已启动' : '项目已停止');
+      } catch (error) {
+        showToast(error.message, 'error');
+        await loadProjects();
+        renderProjectManagement();
+      }
+    }
+
+    function deleteProject(projectID) {
+      const project = projectsCache.find(item => item.id === projectID);
+      if (!project) return;
+      deletingProjectID = project.id;
+      document.getElementById('deleteProjectName').textContent = project.name;
+      const deleteDataInput = document.getElementById('deleteProjectData');
+      deleteDataInput.checked = false;
+      deleteDataInput.disabled = false;
+      updateProjectDeleteChoice();
+      document.getElementById('projectDeleteModalOverlay').classList.add('show');
+    }
+
+    function closeProjectDeleteModal() {
+      deletingProjectID = '';
+      document.getElementById('projectDeleteModalOverlay').classList.remove('show');
+    }
+
+    function updateProjectDeleteChoice() {
+      const deleteData = document.getElementById('deleteProjectData').checked;
+      const notice = document.getElementById('deleteProjectNotice');
+      const button = document.getElementById('confirmProjectDeleteBtn');
+      notice.textContent = deleteData
+        ? '将永久删除项目配置、缓存、状态数据库和端口映射，无法恢复；节点和订阅不受影响。'
+        : '本地项目目录会保留，可用于检查或恢复；节点和订阅不受影响。再次创建同 ID 项目前需先处理原目录。';
+      notice.classList.toggle('danger', deleteData);
+      button.textContent = deleteData ? '删除项目及本地文件' : '仅移除项目';
+    }
+
+    async function confirmDeleteProject() {
+      const project = projectsCache.find(item => item.id === deletingProjectID);
+      if (!project) {
+        closeProjectDeleteModal();
+        return;
+      }
+      const deleteData = document.getElementById('deleteProjectData').checked;
+      const deletingCurrent = project.id === currentProjectID;
+      const button = document.getElementById('confirmProjectDeleteBtn');
+      button.disabled = true;
+      try {
+        const response = await nativeFetch(`/api/projects/${encodeURIComponent(project.id)}?delete_data=${deleteData}`, {method:'DELETE'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '删除项目失败');
+        closeProjectDeleteModal();
+        await loadProjects();
+        if (deletingCurrent) {
+          resetProjectView();
+          if (currentProject() && currentProject().status === 'running') await refresh();
+        }
+        renderProjectManagement();
+        if (data.warning) {
+          showToast(data.warning, 'error');
+        } else {
+          showToast(data.data_deleted ? '项目及本地文件已删除' : '项目已移除，本地文件已保留');
+        }
+      } catch (error) {
+        showToast(error.message, 'error');
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     async function copyStatusError(event, message) {
       event.preventDefault();
       event.stopPropagation();
@@ -1200,7 +2030,7 @@
 
     async function checkAuth() {
       try {
-        const res = await fetch('/api/nodes');
+		const res = await nativeFetch('/api/projects');
         if (res.status === 401) { document.getElementById('loginOverlay').classList.add('show'); return false; }
         return true;
       } catch (e) { return false; }
@@ -1212,7 +2042,7 @@
       const err = document.getElementById('loginError');
       try {
         const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password:pwd})});
-        if (res.ok) { document.getElementById('loginOverlay').classList.remove('show'); refresh(); }
+		if (res.ok) { document.getElementById('loginOverlay').classList.remove('show'); await initializeProjects(); }
         else { err.textContent = 'Auth Failed'; err.style.display = 'block'; }
       } catch (ex) { err.textContent = ex.message; err.style.display = 'block'; }
     }
@@ -1222,21 +2052,29 @@
       document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
       document.getElementById(`${name}Tab`).classList.add('active');
       document.querySelector(`.nav-item[onclick="switchTab('${name}')"]`).classList.add('active');
+      // Hide project selector on project management, debug, and settings pages
+      const switcher = document.getElementById('projectSwitcher');
+      if (switcher) {
+        switcher.style.display = (name === 'projects' || name === 'debug' || name === 'settings') ? 'none' : '';
+      }
       if (name === 'dashboard') {
         setTimeout(updateDashboardCharts, 100);
       }
+      if (name === 'projects') loadProjectManagement();
       if (name === 'manage') loadConfigNodes();
       if (name === 'subscriptions') loadSubscriptionsPage();
       if (name === 'debug') {
         loadDebugData();
         setTimeout(updateDebugCharts, 100);
+      } else {
+        disconnectDebugTraffic();
       }
-      if (name === 'logs') {
+      if (name === 'settings') {
+        loadSettingsPage();
         startLogPolling();
       } else {
         stopLogPolling();
       }
-      if (name === 'settings') loadSettingsPage();
     }
 
     function toggleAutoRefresh() {
@@ -1310,6 +2148,7 @@
       try {
         const res = await fetch('/api/nodes');
         if (res.status === 401) { document.getElementById('loginOverlay').classList.add('show'); stopAutoRefresh(); return; }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         allNodesCache = data.nodes || [];
         stickyNodeTag = data.sticky_node || '';
@@ -1545,8 +2384,8 @@
     }
 
     function connectTrafficSSE() {
-      if (trafficSource) return;
-      trafficSource = new EventSource('/api/traffic');
+      if (!currentProjectID || trafficSource) return;
+      trafficSource = new EventSource(projectAPIPath('/api/traffic'));
       trafficSource.onmessage = function(e) {
         try {
           const d = JSON.parse(e.data);
@@ -1571,7 +2410,8 @@
       trafficSource.onerror = function() {
         trafficSource.close();
         trafficSource = null;
-        setTimeout(connectTrafficSSE, 5000);
+        const project = currentProject();
+        if (project && project.status === 'running') setTimeout(connectTrafficSSE, 5000);
       };
     }
 
@@ -1716,6 +2556,9 @@
           </td>
         </tr>`;
       }).join('');
+      if (isSharedCatalogMode()) {
+        tbody.querySelectorAll('button[onclick^="setStickyNode"], button[onclick^="releaseNode"], button[onclick^="blacklistNode"]').forEach(button => button.remove());
+      }
       if (hint) {
         if (nodes.length > visible.length) {
           const more = Math.min(300, nodes.length - visible.length);
@@ -1893,17 +2736,6 @@
     }
 
     // Subscriptions
-    function selectDurationValue(select, duration) {
-      const normalized = String(duration || '1h');
-      for (const option of select.options) {
-        if (normalized === option.value || normalized.startsWith(option.value)) {
-          select.value = option.value;
-          return;
-        }
-      }
-      select.value = '1h';
-    }
-
     function formatDateTime(value) {
       if (!value || value === '0001-01-01T00:00:00Z') return '-';
       const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
@@ -1921,18 +2753,44 @@
       }
     }
 
+    function applyCurrentSubscriptionPayload(data) {
+      subscriptionsCache = data.items || [];
+      document.getElementById('subscriptionTotalCount').textContent = subscriptionsCache.length;
+      document.getElementById('subscriptionActiveNodes').textContent = data.node_count || 0;
+      document.getElementById('subscriptionNextRefresh').textContent = data.enabled ? formatDateTime(data.next_refresh) : '-';
+      renderSubscriptions();
+    }
+
+    function clearCurrentProjectSubscriptions() {
+      subscriptionsCache = [];
+      document.getElementById('subscriptionTotalCount').textContent = '0';
+      document.getElementById('subscriptionActiveNodes').textContent = '0';
+      document.getElementById('subscriptionNextRefresh').textContent = '-';
+      renderSubscriptions();
+    }
+
+    async function loadCurrentProjectSubscriptions() {
+      const response = await fetch('/api/subscriptions');
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '加载失败');
+      applyCurrentSubscriptionPayload(data);
+    }
+
     async function loadSubscriptionsPage() {
       try {
-        const response = await fetch('/api/subscriptions');
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || '加载失败');
-        subscriptionsCache = data.items || [];
-        document.getElementById('subscriptionAutoEnabled').checked = !!data.enabled;
-        selectDurationValue(document.getElementById('subscriptionAutoInterval'), data.interval);
-        document.getElementById('subscriptionTotalCount').textContent = subscriptionsCache.length;
-        document.getElementById('subscriptionActiveNodes').textContent = data.node_count || 0;
-        document.getElementById('subscriptionNextRefresh').textContent = data.enabled ? formatDateTime(data.next_refresh) : '-';
-        renderSubscriptions();
+        await loadProjects();
+        renderProjectSubscriptionSettings();
+        const project = currentProject();
+        document.getElementById('currentSubscriptionProjectName').textContent = project ? project.name : '全部（无项目）';
+        if (!project && isSharedCatalogMode()) {
+          await loadCurrentProjectSubscriptions();
+          return;
+        }
+        if (!project || project.status !== 'running') {
+          clearCurrentProjectSubscriptions();
+          return;
+        }
+        await loadCurrentProjectSubscriptions();
       } catch (error) {
         showToast(error.message, 'error');
       }
@@ -2052,25 +2910,6 @@
       }
     }
 
-    async function saveSubscriptionSettings() {
-      const payload = {
-        enabled: document.getElementById('subscriptionAutoEnabled').checked,
-        interval: document.getElementById('subscriptionAutoInterval').value
-      };
-      showFullscreenLoading('保存自动刷新配置...', '正在应用订阅设置');
-      try {
-        const response = await fetch('/api/subscriptions/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-        const data = await response.json();
-        if (!response.ok || data.error) throw new Error(data.error || '保存失败');
-        if (data.refresh_error) showToast(data.refresh_error, 'error'); else showToast('自动刷新配置已保存');
-        await loadSubscriptionsPage();
-      } catch (error) {
-        showToast(error.message, 'error');
-      } finally {
-        hideFullscreenLoading();
-      }
-    }
-
     async function fetchSubscriptionStatus() {
       try {
         const res = await fetch('/api/subscription/status');
@@ -2098,15 +2937,17 @@
     // Manage Nodes
     async function loadConfigNodes() {
       try {
+        await loadProjects();
+        renderProjectProbeSettings();
         const res = await fetch('/api/nodes/config');
         const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '加载节点失败');
         configNodes = data.nodes || [];
         const tbody = document.getElementById('configNodesTableBody');
         tbody.innerHTML = configNodes.map((n, i) => `
           <tr>
             <td><strong class="cell-trunc" style="display:inline-block;vertical-align:bottom" title="${escapeHtml(n.name)}">${escapeHtml(n.name)}</strong></td>
             <td class="tt-mono cell-trunc cell-trunc-uri" title="${escapeHtml(n.uri)}">${escapeHtml(n.uri)}</td>
-            <td class="tt-mono">${n.port || '-'}</td>
             <td><span class="badge ${n.source==='subscription'?'badge-warning':'badge-healthy'}">${n.source||'manual'}</span></td>
             <td>
               <button class="btn btn-sm" onclick="showEditNodeModal('${escapeAttrJs(n.name)}')">编辑</button>
@@ -2131,7 +2972,6 @@
       document.getElementById('nodeModeSwitch').style.display='flex';
       document.getElementById('nodeName').value='';
       document.getElementById('nodeUri').value='';
-      document.getElementById('nodePort').value='';
       document.getElementById('nodeImportFile').value='';
       document.getElementById('nodeImportContent').value='';
       setNodeModalMode('single');
@@ -2141,12 +2981,12 @@
       const n = configNodes.find(x=>x.name===name); if(!n) return;
       isEditMode=true; document.getElementById('nodeModalTitle').textContent='编辑节点';
       document.getElementById('nodeModeSwitch').style.display='none'; setNodeModalMode('single');
-      document.getElementById('nodeName').value=n.name; document.getElementById('nodeUri').value=n.uri; document.getElementById('nodePort').value=n.port||''; document.getElementById('nodeEditName').value=n.name;
+      document.getElementById('nodeName').value=n.name; document.getElementById('nodeUri').value=n.uri; document.getElementById('nodeEditName').value=n.name;
       document.getElementById('nodeModalOverlay').classList.add('show');
     }
     async function handleNodeSubmit(e) {
       e.preventDefault();
-      const p = { name: document.getElementById('nodeName').value, uri: document.getElementById('nodeUri').value, port: parseInt(document.getElementById('nodePort').value)||0 };
+      const p = { name: document.getElementById('nodeName').value, uri: document.getElementById('nodeUri').value };
       try {
         const editName = document.getElementById('nodeEditName').value;
         const url = isEditMode ? '/api/nodes/config/'+encodeURIComponent(editName) : '/api/nodes/config';
@@ -2162,7 +3002,7 @@
 		} else {
 		  showToast(d.error || '节点保存失败', 'error');
 		}
-      } catch(e){}
+      } catch(e){ showToast(e.message || '加载节点失败', 'error'); }
     }
     async function deleteNode(name) {
       if(!confirm('Delete '+name+'?')) return;
@@ -2184,6 +3024,52 @@
       try { const r = await fetch('/api/reload', {method:'POST'}); if(r.ok) {showToast('重载成功'); refresh();} } catch(e){}
     }
 
+    // Debug traffic accumulator — runs alongside the dashboard SSE stream and
+    // accumulates a running total for the "diagnostic" tab. Reset on project switch.
+    let debugTrafficUpTotal = 0;
+    let debugTrafficDownTotal = 0;
+    let debugTrafficSource = null;
+    let debugTrafficLastTs = null;
+
+    function connectDebugTraffic() {
+      if (!currentProjectID || debugTrafficSource) return;
+      debugTrafficSource = new EventSource(projectAPIPath('/api/traffic'));
+      debugTrafficSource.onmessage = function(e) {
+        try {
+          const d = JSON.parse(e.data);
+          const up = d.up || 0;
+          const down = d.down || 0;
+          const now = Date.now();
+          if (debugTrafficLastTs !== null) {
+            const elapsed = (now - debugTrafficLastTs) / 1000; // seconds
+            if (elapsed > 0 && elapsed < 10) {
+              debugTrafficUpTotal += up * elapsed;
+              debugTrafficDownTotal += down * elapsed;
+            }
+          }
+          debugTrafficLastTs = now;
+          document.getElementById('debugTotalUpload').textContent = formatBytes(debugTrafficUpTotal);
+          document.getElementById('debugTotalDownload').textContent = formatBytes(debugTrafficDownTotal);
+          document.getElementById('debugTotalTraffic').textContent = formatBytes(debugTrafficUpTotal + debugTrafficDownTotal);
+        } catch(err){}
+      };
+      debugTrafficSource.onerror = function() {
+        debugTrafficSource.close();
+        debugTrafficSource = null;
+        debugTrafficLastTs = null;
+        const project = currentProject();
+        if (project && project.status === 'running') setTimeout(connectDebugTraffic, 5000);
+      };
+    }
+
+    function disconnectDebugTraffic() {
+      if (debugTrafficSource) {
+        debugTrafficSource.close();
+        debugTrafficSource = null;
+      }
+      debugTrafficLastTs = null;
+    }
+
     // Debug
     async function loadDebugData() {
       try {
@@ -2195,6 +3081,7 @@
         window._debugNodes = d.nodes || [];
         renderDebugNodes();
         updateDebugCharts(d.success_rate || 0);
+        connectDebugTraffic();
 
       } catch(e){}
     }
@@ -2339,114 +3226,31 @@
     }
 
     // Settings
-    function parseDurationSeconds(value, fallback = 110) {
-      if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value);
-      const text = String(value || '').trim();
-      if (!text) return fallback;
-      if (/^\d+(?:\.\d+)?$/.test(text)) return Math.round(Number(text));
-
-      const pattern = /(\d+(?:\.\d+)?)(ms|us|µs|ns|h|m|s)/g;
-      let total = 0;
-      let consumed = '';
-      let match;
-      while ((match = pattern.exec(text)) !== null) {
-        consumed += match[0];
-        const amount = Number(match[1]);
-        const unit = match[2];
-        if (unit === 'h') total += amount * 3600;
-        else if (unit === 'm') total += amount * 60;
-        else if (unit === 's') total += amount;
-        else if (unit === 'ms') total += amount / 1000;
-        else if (unit === 'us' || unit === 'µs') total += amount / 1000000;
-        else if (unit === 'ns') total += amount / 1000000000;
-      }
-      return consumed === text && Number.isFinite(total) ? Math.round(total) : fallback;
-    }
-
-    function readProbeTimeoutSeconds() {
-      const input = document.getElementById('settingProbeTimeout');
-      const seconds = Number(input.value);
-      if (!Number.isInteger(seconds) || seconds < 25 || seconds % 5 !== 0) {
-        showToast('单节点探测总超时必须是至少 25 秒且为 5 的倍数', 'error');
-        input.focus();
-        return null;
-      }
-      return seconds;
-    }
-
     async function loadSettingsPage() {
       try {
-        const r = await fetch('/api/settings'); const d = await r.json();
-        // General
-        document.getElementById('settingMode').value = d.mode || 'pool';
-        document.getElementById('settingExternalIP').value = d.external_ip||'';
-        document.getElementById('settingProbeTarget').value = d.probe_target||'';
-        document.getElementById('settingSkipCertVerify').checked = d.skip_cert_verify||false;
-        // Listener
-        const ls = d.listener || {};
-        document.getElementById('settingListenerAddr').value = ls.address || '';
-        document.getElementById('settingListenerPort').value = ls.port || '';
-        document.getElementById('settingListenerUser').value = ls.username || '';
-        document.getElementById('settingListenerPass').value = ls.password || '';
-        // Multi-port
-        const mp = d.multi_port || {};
-        document.getElementById('settingMPAddr').value = mp.address || '';
-        document.getElementById('settingMPBasePort').value = mp.base_port || '';
-        document.getElementById('settingMPUser').value = mp.username || '';
-        document.getElementById('settingMPPass').value = mp.password || '';
-        // Pool
-        const pl = d.pool || {};
-        document.getElementById('settingPoolMode').value = pl.mode || 'random';
-        document.getElementById('settingPoolFailure').value = pl.failure_threshold || 3;
-        document.getElementById('settingPoolBlacklist').value = pl.blacklist_duration || '24h';
-        cachedBlacklistDuration = pl.blacklist_duration || '24h';
-        // Sticky
-        const st = d.sticky || {};
-        document.getElementById('settingStickyEnabled').checked = !!st.enabled;
-        document.getElementById('settingStickyPort').value = st.port || '';
-        // Management
-        const mgmt = d.management || {};
-        document.getElementById('settingMgmtListen').value = mgmt.listen || '';
-        document.getElementById('settingMgmtPassword').value = mgmt.password || '';
-        document.getElementById('settingProbeConcurrency').value = mgmt.probe_concurrency || 32;
-        document.getElementById('settingProbeInterval').value = mgmt.probe_interval || '5m0s';
-        document.getElementById('settingProbeTimeout').value = parseDurationSeconds(mgmt.probe_timeout);
-        // Log
-        const logCfg = d.log || {};
+        const response = await nativeFetch('/api/system/settings');
+        if (!response.ok) throw new Error(`加载系统设置失败: HTTP ${response.status}`);
+        const system = await response.json();
+        const management = system.management || {};
+        const logCfg = system.log || {};
+        document.getElementById('settingMgmtListen').value = management.listen || '';
+        document.getElementById('settingMgmtPassword').value = management.password || '';
         document.getElementById('settingLogOutput').value = logCfg.output || 'stdout';
         document.getElementById('settingLogMaxSize').value = logCfg.max_size || 50;
         document.getElementById('settingLogMaxBackups').value = logCfg.max_backups || 3;
         document.getElementById('settingLogMaxAge').value = logCfg.max_age || 7;
-        document.getElementById('settingLogCompress').checked = logCfg.compress || false;
+        document.getElementById('settingLogCompress').checked = !!logCfg.compress;
         toggleLogFileSettings();
-        // Take core snapshot after all fields are populated
         _savedCoreSnapshot = _buildCoreSnapshot();
-      } catch(e){ console.error('Failed to load settings:', e); }
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
     }
+
     function _buildCoreSnapshot() {
       return JSON.stringify({
-        mode: document.getElementById('settingMode').value,
-        external_ip: document.getElementById('settingExternalIP').value,
-        probe_target: document.getElementById('settingProbeTarget').value,
-        skip_cert_verify: document.getElementById('settingSkipCertVerify').checked,
-        listener_addr: document.getElementById('settingListenerAddr').value,
-        listener_port: document.getElementById('settingListenerPort').value,
-        listener_user: document.getElementById('settingListenerUser').value,
-        listener_pass: document.getElementById('settingListenerPass').value,
-        mp_addr: document.getElementById('settingMPAddr').value,
-        mp_base_port: document.getElementById('settingMPBasePort').value,
-        mp_user: document.getElementById('settingMPUser').value,
-        mp_pass: document.getElementById('settingMPPass').value,
-        pool_mode: document.getElementById('settingPoolMode').value,
-        pool_failure: document.getElementById('settingPoolFailure').value,
-        pool_blacklist: document.getElementById('settingPoolBlacklist').value,
-        sticky_enabled: document.getElementById('settingStickyEnabled').checked,
-        sticky_port: document.getElementById('settingStickyPort').value,
         mgmt_listen: document.getElementById('settingMgmtListen').value,
         mgmt_password: document.getElementById('settingMgmtPassword').value,
-        mgmt_probe_concurrency: document.getElementById('settingProbeConcurrency').value,
-        mgmt_probe_interval: document.getElementById('settingProbeInterval').value,
-        mgmt_probe_timeout: document.getElementById('settingProbeTimeout').value,
         log_output: document.getElementById('settingLogOutput').value,
         log_max_size: document.getElementById('settingLogMaxSize').value,
         log_max_backups: document.getElementById('settingLogMaxBackups').value,
@@ -2463,84 +3267,35 @@
       e.preventDefault();
       const saveBtn = e.target.querySelector('button[type="submit"]');
       const originalText = saveBtn.textContent;
-      const probeTimeoutSeconds = readProbeTimeoutSeconds();
-      if (probeTimeoutSeconds === null) return;
-
-      // Build current snapshots for change detection
       const currentCoreSnapshot = _buildCoreSnapshot();
       const coreChanged = currentCoreSnapshot !== _savedCoreSnapshot;
-
       if (!coreChanged) {
         showToast('配置未变更'); return;
       }
-
-      // Save core settings if changed
-      if (coreChanged) {
-        saveBtn.disabled = true; saveBtn.textContent = '保存中...'; saveBtn.style.opacity = '0.6';
-        const p = {
-          external_ip: document.getElementById('settingExternalIP').value,
-          probe_target: document.getElementById('settingProbeTarget').value,
-          skip_cert_verify: document.getElementById('settingSkipCertVerify').checked,
-          mode: document.getElementById('settingMode').value,
-          listener: {
-            address: document.getElementById('settingListenerAddr').value,
-            port: parseInt(document.getElementById('settingListenerPort').value) || 0,
-            username: document.getElementById('settingListenerUser').value,
-            password: document.getElementById('settingListenerPass').value,
-          },
-          multi_port: {
-            address: document.getElementById('settingMPAddr').value,
-            base_port: parseInt(document.getElementById('settingMPBasePort').value) || 0,
-            username: document.getElementById('settingMPUser').value,
-            password: document.getElementById('settingMPPass').value,
-          },
-          pool: {
-            mode: document.getElementById('settingPoolMode').value,
-            failure_threshold: parseInt(document.getElementById('settingPoolFailure').value) || 3,
-            blacklist_duration: document.getElementById('settingPoolBlacklist').value || '24h',
-          },
-          sticky: {
-            enabled: document.getElementById('settingStickyEnabled').checked,
-            port: parseInt(document.getElementById('settingStickyPort').value) || 0,
-          },
-          management: {
-            listen: document.getElementById('settingMgmtListen').value,
-            password: document.getElementById('settingMgmtPassword').value,
-            probe_concurrency: parseInt(document.getElementById('settingProbeConcurrency').value) || 32,
-            probe_interval: document.getElementById('settingProbeInterval').value || '5m',
-            probe_timeout: `${probeTimeoutSeconds}s`,
-          },
-          log: {
-            output: document.getElementById('settingLogOutput').value,
-            max_size: parseInt(document.getElementById('settingLogMaxSize').value) || 50,
-            max_backups: parseInt(document.getElementById('settingLogMaxBackups').value) || 3,
-            max_age: parseInt(document.getElementById('settingLogMaxAge').value) || 7,
-            compress: document.getElementById('settingLogCompress').checked,
-          }
-        };
-        try {
-          const r = await fetch('/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)});
-          if(!r.ok) { showToast('保存失败', 'error'); saveBtn.disabled = false; saveBtn.textContent = originalText; saveBtn.style.opacity = '1'; return; }
-          cachedBlacklistDuration = p.pool.blacklist_duration || '24h';
-        } catch(e){ showToast('保存失败', 'error'); saveBtn.disabled = false; saveBtn.textContent = originalText; saveBtn.style.opacity = '1'; return; }
-        _savedCoreSnapshot = currentCoreSnapshot;
-      }
-
-      showFullscreenLoading('重载核心中...', '正在应用新配置');
-      let reloadSucceeded = false;
-      try {
-        const rr = await fetch('/api/reload', {method:'POST'});
-        hideFullscreenLoading();
-        if (rr.ok) {
-          reloadSucceeded = true;
-          showToast('已保存并重载成功');
-        } else {
-          showToast('已保存，重载失败', 'error');
+      saveBtn.disabled = true; saveBtn.textContent = '保存中...'; saveBtn.style.opacity = '0.6';
+      const payload = {
+        management: {
+          listen: document.getElementById('settingMgmtListen').value.trim(),
+          password: document.getElementById('settingMgmtPassword').value,
+        },
+        log: {
+          output: document.getElementById('settingLogOutput').value,
+          max_size: parseInt(document.getElementById('settingLogMaxSize').value) || 50,
+          max_backups: parseInt(document.getElementById('settingLogMaxBackups').value) || 3,
+          max_age: parseInt(document.getElementById('settingLogMaxAge').value) || 7,
+          compress: document.getElementById('settingLogCompress').checked,
         }
-      } catch(e) { hideFullscreenLoading(); showToast('已保存，重载失败', 'error'); }
+      };
+      try {
+        const response = await nativeFetch('/api/system/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '保存失败');
+        _savedCoreSnapshot = currentCoreSnapshot;
+        showToast(data.need_restart ? '已保存，重启服务后生效' : '系统设置已保存');
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
       saveBtn.disabled = false; saveBtn.textContent = originalText; saveBtn.style.opacity = '1';
-      refresh();
-      if (reloadSucceeded) trackReloadProbe();
     }
 
     let logPollInterval = null;
@@ -2644,8 +3399,24 @@
       syncToggleButton(mode);
     })();
 
+    async function initializeProjects() {
+      try {
+        const project = await loadProjects();
+        resetProjectView();
+        if (!project && isSharedCatalogMode()) {
+          await refresh();
+        } else if (project && project.status === 'running') {
+          await refresh();
+          connectTrafficSSE();
+        }
+        startAutoRefresh();
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    }
+
     // Init App
-    checkAuth().then(ok => { if(ok) { refresh(); startAutoRefresh(); } });
+    checkAuth().then(ok => { if(ok) initializeProjects(); });
 
   </script>
 </body>

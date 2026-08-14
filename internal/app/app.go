@@ -3,65 +3,50 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"Proxy2API/internal/boxmgr"
 	"Proxy2API/internal/config"
 	"Proxy2API/internal/monitor"
-	"Proxy2API/internal/subscription"
+	"Proxy2API/internal/project"
 )
 
 // Run builds the runtime components from config and blocks until shutdown.
 func Run(ctx context.Context, cfg *config.Config) error {
-	// Build monitor config
-	proxyUsername := cfg.Listener.Username
-	proxyPassword := cfg.Listener.Password
-	if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
-		proxyUsername = cfg.MultiPort.Username
-		proxyPassword = cfg.MultiPort.Password
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
 	}
+	workspace, err := config.LoadWorkspace(cfg.FilePath(), cfg)
+	if err != nil {
+		return err
+	}
+	return RunWorkspace(ctx, workspace)
+}
+
+// RunWorkspace starts the process-wide control plane and all configured project
+// runtimes, then blocks until shutdown.
+func RunWorkspace(ctx context.Context, workspace *config.Workspace) error {
+	registry, err := project.NewRegistry(ctx, workspace)
+	if err != nil {
+		return fmt.Errorf("initialize project registry: %w", err)
+	}
+	defer registry.Close()
 
 	monitorCfg := monitor.Config{
-		Enabled:          cfg.ManagementEnabled(),
-		Listen:           cfg.Management.Listen,
-		ProbeTarget:      cfg.Management.ProbeTarget,
-		ProbeInterval:    cfg.ProbeIntervalOrDefault(),
-		ProbeTimeout:     cfg.ProbeTimeoutOrDefault(),
-		Password:         cfg.Management.Password,
-		ProxyUsername:    proxyUsername,
-		ProxyPassword:    proxyPassword,
-		ExternalIP:       cfg.ExternalIP,
-		ProbeConcurrency: cfg.ProbeConcurrencyOrDefault(),
-		StickyNode:       cfg.Sticky.FixedNode,
+		Enabled:  workspace.ManagementEnabled(),
+		Listen:   workspace.Management.Listen,
+		Password: workspace.Management.Password,
 	}
-
-	// Create and start BoxManager
-	boxMgr := boxmgr.New(cfg, monitorCfg)
-	if err := boxMgr.Start(ctx); err != nil {
-		return fmt.Errorf("start box manager: %w", err)
+	server := monitor.NewServer(monitorCfg, nil, log.Default())
+	if server != nil {
+		server.SetProjectController(registry)
+		server.Start(ctx)
+		defer server.Shutdown(context.Background())
 	}
-	defer boxMgr.Close()
-
-	// Wire up config to monitor server for settings API
-	if server := boxMgr.MonitorServer(); server != nil {
-		server.SetConfig(cfg)
-	}
-
-	// Always create SubscriptionManager so WebUI can hot-reload subscription config
-	subMgr := subscription.New(cfg, boxMgr)
-	defer subMgr.Stop()
-
-	// Start the manager whenever subscriptions exist. The loop honors the auto
-	// refresh flag while remaining available for manual updates from the WebUI.
-	subMgr.Start()
-
-	// Wire up subscription manager to monitor server for API endpoints
-	if server := boxMgr.MonitorServer(); server != nil {
-		server.SetSubscriptionRefresher(subMgr)
-	}
+	registry.StartAutostartProjects()
 
 	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
@@ -80,14 +65,9 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	defer shutdownCancel()
 
 	// Graceful shutdown sequence
-	fmt.Println("Stopping subscription manager...")
-	if subMgr != nil {
-		subMgr.Stop()
-	}
-
-	fmt.Println("Stopping box manager...")
-	if err := boxMgr.Close(); err != nil {
-		fmt.Printf("Error closing box manager: %v\n", err)
+	fmt.Println("Stopping project runtimes...")
+	if err := registry.Close(); err != nil {
+		fmt.Printf("Error closing project runtimes: %v\n", err)
 	}
 
 	// Wait for connections to drain
