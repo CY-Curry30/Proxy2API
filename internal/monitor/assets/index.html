@@ -414,6 +414,8 @@
       line-height: 1;
     }
     .cell-trunc-uri { max-width: 360px; }
+    .config-node-source { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .config-node-source-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
     
     .badge {
       padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500;
@@ -482,6 +484,19 @@
     .form-section-title { color: var(--text-main); font-size: 13px; font-weight: 600; padding-top: 4px; border-top: 1px solid var(--border-light); }
     .form-section-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     @media (max-width: 560px) { .form-section-grid { grid-template-columns: 1fr; } }
+    .port-availability {
+      display: none; padding: 10px 0; border-top: 1px solid var(--border-light); border-bottom: 1px solid var(--border-light);
+    }
+    .port-availability.show { display: block; }
+    .port-availability-title { color: var(--text-muted); font-size: 11px; font-weight: 600; margin-bottom: 7px; }
+    .port-usage-list { display: grid; gap: 5px; }
+    .port-usage-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 11px; line-height: 1.5; }
+    .port-usage-name { flex: 0 0 auto; color: var(--text-main); font-weight: 600; }
+    .port-usage-ranges { min-width: 0; color: var(--text-muted); font-family: var(--font-mono); overflow-wrap: anywhere; }
+    .port-field-hint { min-height: 16px; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+    .port-field-hint.available { color: var(--success); }
+    .port-field-hint.conflict { color: var(--error); }
+    .setting-input.port-conflict { border-color: var(--error); box-shadow: 0 0 0 1px var(--error); }
     .checkbox-row {
       display: flex; align-items: center; gap: 10px;
       padding: 10px 14px;
@@ -1207,21 +1222,25 @@
             <input type="text" id="projectName" required maxlength="80" placeholder="爬虫代理" />
           </div>
           <div class="form-section-grid">
-            <div class="form-group"><label>运行模式</label><select id="projectMode" class="setting-input"><option value="pool">pool - 单端口负载池</option><option value="multi-port">multi-port - 多端口模式</option><option value="hybrid">hybrid - 混合模式</option></select></div>
+            <div class="form-group"><label>运行模式</label><select id="projectMode" class="setting-input" onchange="updateProjectPortHints()"><option value="pool">pool - 单端口负载池</option><option value="multi-port">multi-port - 多端口模式</option><option value="hybrid">hybrid - 混合模式</option></select></div>
             <div class="form-group"><label>外部 IP</label><input type="text" id="projectExternalIP" class="setting-input" placeholder="可选" /></div>
             <div class="checkbox-row"><input type="checkbox" id="projectSkipCertVerify" checked /><label for="projectSkipCertVerify">跳过 SSL 证书验证</label></div>
+          </div>
+          <div class="port-availability" id="projectPortAvailability">
+            <div class="port-availability-title">其他项目及系统已占用端口</div>
+            <div class="port-usage-list" id="projectPortUsageList"></div>
           </div>
           <div class="form-section-title">监听配置</div>
           <div class="form-section-grid">
             <div class="form-group"><label>监听地址</label><input type="text" id="projectListenerAddr" class="setting-input" placeholder="0.0.0.0" /></div>
-            <div class="form-group"><label>监听端口</label><input type="number" id="projectListenerPort" class="setting-input" min="0" max="65535" /></div>
+            <div class="form-group"><label>监听端口</label><input type="number" id="projectListenerPort" class="setting-input" min="0" max="65535" oninput="updateProjectPortHints()" /><div class="port-field-hint" id="projectListenerPortHint" aria-live="polite"></div></div>
             <div class="form-group"><label>用户名</label><input type="text" id="projectListenerUser" class="setting-input" /></div>
             <div class="form-group"><label>密码</label><input type="password" id="projectListenerPass" class="setting-input" /></div>
           </div>
           <div class="form-section-title">多端口配置</div>
           <div class="form-section-grid">
             <div class="form-group"><label>监听地址</label><input type="text" id="projectMPAddr" class="setting-input" placeholder="0.0.0.0" /></div>
-            <div class="form-group"><label>起始端口</label><input type="number" id="projectMPBasePort" class="setting-input" min="0" max="65535" /></div>
+            <div class="form-group"><label>起始端口</label><input type="number" id="projectMPBasePort" class="setting-input" min="0" max="65535" oninput="updateProjectPortHints()" /><div class="port-field-hint" id="projectMPBasePortHint" aria-live="polite"></div></div>
             <div class="form-group"><label>用户名</label><input type="text" id="projectMPUser" class="setting-input" /></div>
             <div class="form-group"><label>密码</label><input type="password" id="projectMPPass" class="setting-input" /></div>
           </div>
@@ -1235,8 +1254,8 @@
           </div>
           <div class="form-section-title">粘性代理配置</div>
           <div class="form-section-grid">
-            <div class="checkbox-row"><input type="checkbox" id="projectStickyEnabled" /><label for="projectStickyEnabled">启用粘性代理</label></div>
-            <div class="form-group"><label>粘性端口</label><input type="number" id="projectStickyPort" class="setting-input" min="0" max="65535" /></div>
+            <div class="checkbox-row"><input type="checkbox" id="projectStickyEnabled" onchange="handleProjectStickyChange()" /><label for="projectStickyEnabled">启用粘性代理</label></div>
+            <div class="form-group"><label>粘性端口</label><input type="number" id="projectStickyPort" class="setting-input" min="0" max="65535" oninput="updateProjectPortHints()" /><div class="port-field-hint" id="projectStickyPortHint" aria-live="polite"></div></div>
           </div>
           <div class="form-section-title">选定订阅（不选则加载全部）</div>
           <div class="checkbox-grid" id="projectSubscriptionCheckboxes">
@@ -1297,6 +1316,7 @@
     let currentProjectID = localStorage.getItem('proxy2apiProject') || '';
     let defaultProjectID = '';
     let projectsCache = [];
+    let projectPortHintsCache = {occupied: [], recommended: {}};
     let editingProjectID = '';
     let deletingProjectID = '';
     const nativeFetch = window.fetch.bind(window);
@@ -1406,6 +1426,137 @@
       return `${address || '0.0.0.0'}:${port}${suffix}`;
     }
 
+    function projectPortFieldSpecs() {
+      const mode = document.getElementById('projectMode')?.value || 'pool';
+      const stickyEnabled = document.getElementById('projectStickyEnabled')?.checked || false;
+      return [
+        {id:'projectListenerPort', hintID:'projectListenerPortHint', key:'listener_port', label:'监听端口', active:mode === 'pool' || mode === 'hybrid'},
+        {id:'projectMPBasePort', hintID:'projectMPBasePortHint', key:'multi_port_base', label:'起始端口', active:mode === 'multi-port' || mode === 'hybrid'},
+        {id:'projectStickyPort', hintID:'projectStickyPortHint', key:'sticky_port', label:'粘性端口', active:stickyEnabled && (mode === 'pool' || mode === 'hybrid')}
+      ];
+    }
+
+    function projectPortOwner(port) {
+      if (!port) return null;
+      for (const usage of projectPortHintsCache.occupied || []) {
+        for (const range of usage.ranges || []) {
+          if (port >= Number(range.start) && port <= Number(range.end)) return usage;
+        }
+      }
+      return null;
+    }
+
+    function formatProjectPortRange(range) {
+      const start = Number(range.start) || 0;
+      const end = Number(range.end) || start;
+      return start === end ? String(start) : `${start}-${end}`;
+    }
+
+    function renderProjectPortAvailability() {
+      const panel = document.getElementById('projectPortAvailability');
+      const list = document.getElementById('projectPortUsageList');
+      if (!panel || !list) return;
+      const show = !editingProjectID;
+      panel.classList.toggle('show', show);
+      if (!show) {
+        list.replaceChildren();
+        return;
+      }
+      const occupied = projectPortHintsCache.occupied || [];
+      if (!occupied.length) {
+        list.innerHTML = '<div class="port-usage-row"><span class="port-usage-ranges">暂无已登记端口</span></div>';
+        return;
+      }
+      list.innerHTML = occupied.map(usage => {
+        const allRanges = (usage.ranges || []).map(formatProjectPortRange);
+        const visibleRanges = allRanges.slice(0, 12);
+        const remaining = allRanges.length - visibleRanges.length;
+        const text = visibleRanges.join(' · ') + (remaining > 0 ? ` · 另 ${remaining} 段` : '');
+        return `<div class="port-usage-row"><span class="port-usage-name">${escapeHtml(usage.project_name || usage.project_id)}</span><span class="port-usage-ranges" title="${escapeHtml(allRanges.join(', '))}">${escapeHtml(text)}</span></div>`;
+      }).join('');
+    }
+
+    function updateProjectPortHints() {
+      const specs = projectPortFieldSpecs();
+      const activeSpecs = specs.filter(spec => spec.active);
+      for (const spec of specs) {
+        const input = document.getElementById(spec.id);
+        const hint = document.getElementById(spec.hintID);
+        if (!input || !hint) continue;
+        input.classList.remove('port-conflict');
+        hint.className = 'port-field-hint';
+        if (editingProjectID) {
+          hint.textContent = '';
+          continue;
+        }
+
+        const recommended = Number(projectPortHintsCache.recommended?.[spec.key]) || 0;
+        const port = Number(input.value) || 0;
+        if (!spec.active) {
+          hint.textContent = recommended ? `当前模式不使用；切换模式时推荐 ${recommended}` : '当前模式不使用';
+          continue;
+        }
+        if (!port) {
+          hint.textContent = recommended ? `推荐使用 ${recommended}` : '由系统自动分配';
+          continue;
+        }
+        if (port < 1 || port > 65535) {
+          hint.textContent = '端口必须在 1-65535 之间';
+          hint.classList.add('conflict');
+          input.classList.add('port-conflict');
+          continue;
+        }
+        const duplicate = activeSpecs.find(other => other.id !== spec.id && Number(document.getElementById(other.id)?.value) === port);
+        if (duplicate) {
+          hint.textContent = `与本项目的${duplicate.label}重复${recommended ? `；推荐 ${recommended}` : ''}`;
+          hint.classList.add('conflict');
+          input.classList.add('port-conflict');
+          continue;
+        }
+        const owner = projectPortOwner(port);
+        if (owner) {
+          hint.textContent = `${port} 已被“${owner.project_name || owner.project_id}”占用${recommended ? `；推荐 ${recommended}` : ''}`;
+          hint.classList.add('conflict');
+          input.classList.add('port-conflict');
+          continue;
+        }
+        hint.textContent = `${port} 未被其他项目占用${recommended && port !== recommended ? `；推荐 ${recommended}` : ''}`;
+        hint.classList.add('available');
+      }
+    }
+
+    function applyProjectPortRecommendations(project) {
+      renderProjectPortAvailability();
+      if (!project) {
+        const recommended = projectPortHintsCache.recommended || {};
+        const listener = document.getElementById('projectListenerPort');
+        const multiPort = document.getElementById('projectMPBasePort');
+        const sticky = document.getElementById('projectStickyPort');
+        if (!listener.value && recommended.listener_port) listener.value = recommended.listener_port;
+        if (!multiPort.value && recommended.multi_port_base) multiPort.value = recommended.multi_port_base;
+        sticky.placeholder = recommended.sticky_port ? `推荐 ${recommended.sticky_port}` : '';
+      }
+      updateProjectPortHints();
+    }
+
+    function handleProjectStickyChange() {
+      const sticky = document.getElementById('projectStickyPort');
+      const recommended = Number(projectPortHintsCache.recommended?.sticky_port) || 0;
+      if (!editingProjectID && document.getElementById('projectStickyEnabled').checked && !sticky.value && recommended) {
+        sticky.value = recommended;
+      }
+      updateProjectPortHints();
+    }
+
+    async function refreshProjectPortHints() {
+      try {
+        const response = await nativeFetch('/api/projects');
+        if (!response.ok) return;
+        const data = await response.json();
+        projectPortHintsCache = data.port_hints || {occupied: [], recommended: {}};
+      } catch (error) {}
+    }
+
     function renderProjectSelector() {
       const select = document.getElementById('projectSelect');
       select.replaceChildren();
@@ -1491,6 +1642,7 @@
       if (!response.ok) throw new Error(`加载项目失败: HTTP ${response.status}`);
       const data = await response.json();
       projectsCache = data.items || [];
+      projectPortHintsCache = data.port_hints || {occupied: [], recommended: {}};
       defaultProjectID = data.default_project || '';
       if (!projectsCache.some(project => project.id === currentProjectID)) {
         currentProjectID = defaultProjectID || projectsCache[0]?.id || '';
@@ -1817,6 +1969,7 @@
     async function showProjectModal(projectID='') {
       const project = projectsCache.find(item => item.id === projectID) || null;
       editingProjectID = project ? project.id : '';
+      if (!project) await refreshProjectPortHints();
       document.getElementById('projectModalTitle').textContent = project ? '编辑项目' : '新建项目';
       document.getElementById('projectSubmitBtn').textContent = project ? '保存' : '创建';
       const idInput = document.getElementById('projectID');
@@ -1826,6 +1979,7 @@
       fillProjectSettings(project ? project.settings : null);
       document.getElementById('projectEnabled').checked = project ? project.enabled : true;
       document.getElementById('projectAutostart').checked = project ? project.autostart : true;
+      applyProjectPortRecommendations(project);
       await populateSubscriptionCheckboxes(project ? project.settings : null);
       document.getElementById('projectModalOverlay').classList.add('show');
       setTimeout(() => document.getElementById(project ? 'projectName' : 'projectID').focus(), 0);
@@ -1876,6 +2030,11 @@
 
     async function saveProject(event) {
       event.preventDefault();
+      updateProjectPortHints();
+      if (!editingProjectID && document.querySelector('#projectModalOverlay .setting-input.port-conflict')) {
+        showToast('请先更换被占用或重复的端口', 'error');
+        return;
+      }
       const createPayload = {
         id: document.getElementById('projectID').value.trim(),
         name: document.getElementById('projectName').value.trim(),
@@ -1909,6 +2068,11 @@
         renderProjectManagement();
         showToast(isEditing ? '项目已更新' : '项目已创建');
       } catch (error) {
+        if (!isEditing) {
+          await refreshProjectPortHints();
+          renderProjectPortAvailability();
+          updateProjectPortHints();
+        }
         showToast(error.message, 'error');
       }
     }
@@ -2948,7 +3112,7 @@
           <tr>
             <td><strong class="cell-trunc" style="display:inline-block;vertical-align:bottom" title="${escapeHtml(n.name)}">${escapeHtml(n.name)}</strong></td>
             <td class="tt-mono cell-trunc cell-trunc-uri" title="${escapeHtml(n.uri)}">${escapeHtml(n.uri)}</td>
-            <td><span class="badge ${n.source==='subscription'?'badge-warning':'badge-healthy'}">${n.source||'manual'}</span></td>
+            <td>${renderConfigNodeSource(n)}</td>
             <td>
               <button class="btn btn-sm" onclick="showEditNodeModal('${escapeAttrJs(n.name)}')">编辑</button>
               <button class="btn btn-sm btn-danger" onclick="deleteNode('${escapeAttrJs(n.name)}')">删除</button>
@@ -2957,6 +3121,18 @@
         `).join('');
         document.getElementById('subscriptionWarning').style.display = configNodes.some(n=>n.source==='subscription') ? 'block' : 'none';
       } catch(e){}
+    }
+
+    function renderConfigNodeSource(node) {
+      if (node.source === 'subscription') {
+        const name = node.subscription_name || '未知订阅';
+        return `<div class="config-node-source" title="订阅：${escapeHtml(name)}">
+          <span class="badge badge-warning">订阅</span>
+          <span class="config-node-source-name">${escapeHtml(name)}</span>
+        </div>`;
+      }
+      if (node.source === 'nodes_file') return '<span class="badge badge-offline">节点文件</span>';
+      return '<span class="badge badge-healthy">手动</span>';
     }
 
     function setNodeModalMode(mode) {

@@ -329,6 +329,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"default_project": s.projects.DefaultProjectID(),
 			"items":           s.projects.ListProjects(),
+			"port_hints":      s.projects.ProjectPortHints(),
 		})
 	case http.MethodPost:
 		var request ProjectCreateRequest
@@ -2281,6 +2282,46 @@ func (p nodePayload) toConfig() config.NodeConfig {
 	}
 }
 
+// configNodeView adds display-only ownership metadata without exposing the
+// subscription URL or persisting it with the node definition.
+type configNodeView struct {
+	config.NodeConfig
+	SubscriptionName string `json:"subscription_name,omitempty"`
+}
+
+func (s *Server) configNodeViews(nodes []config.NodeConfig) []configNodeView {
+	subscriptionNames := make(map[string]string)
+	if s.subRefresher != nil {
+		for _, subscription := range s.subRefresher.Subscriptions() {
+			rawURL := strings.TrimSpace(subscription.URL)
+			if rawURL != "" {
+				subscriptionNames[rawURL] = strings.TrimSpace(subscription.Name)
+			}
+		}
+	}
+
+	views := make([]configNodeView, 0, len(nodes))
+	for _, node := range nodes {
+		view := configNodeView{NodeConfig: node}
+		if node.Source == config.NodeSourceSubscription {
+			view.SubscriptionName = subscriptionNames[strings.TrimSpace(node.SubscriptionURL)]
+			if view.SubscriptionName == "" {
+				view.SubscriptionName = subscriptionNameFromURL(node.SubscriptionURL)
+			}
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+func subscriptionNameFromURL(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return "未知订阅"
+}
+
 // handleConfigNodes handles GET (list) and POST (create) for config nodes.
 func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureNodeManager(w) {
@@ -2294,7 +2335,7 @@ func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 			s.respondNodeError(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"nodes": nodes})
+		writeJSON(w, map[string]any{"nodes": s.configNodeViews(nodes)})
 	case http.MethodPost:
 		if !s.ensureSharedSourceOwner(w) {
 			return

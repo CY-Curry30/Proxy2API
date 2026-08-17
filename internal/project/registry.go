@@ -353,6 +353,75 @@ func (r *Registry) ListProjects() []monitor.ProjectSummary {
 	return result
 }
 
+func (r *Registry) ProjectPortHints() monitor.ProjectPortHints {
+	owners, recommended := r.ports.CreationHints()
+
+	r.mu.RLock()
+	names := make(map[string]string, len(r.workspace.Projects))
+	for id, spec := range r.workspace.Projects {
+		name := strings.TrimSpace(spec.Name)
+		if name == "" {
+			name = id
+		}
+		names[id] = name
+	}
+	r.mu.RUnlock()
+
+	portsByProject := make(map[string][]uint16)
+	for port, owner := range owners {
+		portsByProject[owner.Project] = append(portsByProject[owner.Project], port)
+	}
+	ids := make([]string, 0, len(portsByProject))
+	for id := range portsByProject {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if ids[i] == "__control__" {
+			return true
+		}
+		if ids[j] == "__control__" {
+			return false
+		}
+		if names[ids[i]] == names[ids[j]] {
+			return ids[i] < ids[j]
+		}
+		return names[ids[i]] < names[ids[j]]
+	})
+
+	occupied := make([]monitor.ProjectPortUsage, 0, len(ids))
+	for _, id := range ids {
+		ports := portsByProject[id]
+		sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+		ranges := make([]monitor.ProjectPortRange, 0, len(ports))
+		for _, port := range ports {
+			last := len(ranges) - 1
+			if last >= 0 && uint32(ranges[last].End)+1 == uint32(port) {
+				ranges[last].End = port
+				continue
+			}
+			ranges = append(ranges, monitor.ProjectPortRange{Start: port, End: port})
+		}
+		name := names[id]
+		if id == "__control__" {
+			name = "系统管理"
+		} else if name == "" {
+			name = id
+		}
+		occupied = append(occupied, monitor.ProjectPortUsage{
+			ProjectID: id, ProjectName: name, Ranges: ranges,
+		})
+	}
+
+	return monitor.ProjectPortHints{
+		Occupied: occupied,
+		Recommended: monitor.ProjectPortRecommendations{
+			ListenerPort:  recommended.ListenerPort,
+			MultiPortBase: recommended.MultiPortBase,
+			StickyPort:    recommended.StickyPort,
+		},
+	}
+}
+
 func projectSummary(id string, spec config.ProjectSpec, runtime *Runtime) monitor.ProjectSummary {
 	summary := monitor.ProjectSummary{
 		ID:           id,

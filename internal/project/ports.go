@@ -15,6 +15,12 @@ type portOwner struct {
 	Purpose string
 }
 
+type portRecommendations struct {
+	ListenerPort  uint16
+	MultiPortBase uint16
+	StickyPort    uint16
+}
+
 // PortRegistry is the process-wide authority for listener ownership. It is
 // intentionally conservative and treats a TCP port as host-wide, regardless
 // of bind address, so projects can never steal a listener from each other.
@@ -85,8 +91,21 @@ func declaredPorts(cfg *config.Config) (map[uint16]string, error) {
 		}
 	}
 	if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
+		basePortAssigned := false
 		for _, node := range cfg.Nodes {
 			if err := add(node.Port, "node "+node.Name); err != nil {
+				return nil, err
+			}
+			if node.Port != 0 && node.Port == cfg.MultiPort.BasePort {
+				basePortAssigned = true
+			}
+		}
+		// A new project may not have nodes yet, but its first node will start at
+		// BasePort. Reserve that future listener now so another project cannot be
+		// created with the same starting port. Once a node owns BasePort, its
+		// listener already represents the reservation.
+		if !basePortAssigned {
+			if err := add(cfg.MultiPort.BasePort, "multi-port base"); err != nil {
 				return nil, err
 			}
 		}
@@ -126,14 +145,63 @@ func (r *PortRegistry) NextAvailable(start uint16) (uint16, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	port := r.nextAvailableLocked(start, nil)
+	if port == 0 {
+		return 0, fmt.Errorf("no available port at or above %d", start)
+	}
+	return port, nil
+}
+
+// CreationHints returns one consistent ownership snapshot and three distinct
+// ports that are currently available for a new project.
+func (r *PortRegistry) CreationHints() (map[uint16]portOwner, portRecommendations) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	owners := make(map[uint16]portOwner, len(r.owners))
+	for port, owner := range r.owners {
+		if owner.Project != sharedCatalogID {
+			owners[port] = owner
+		}
+	}
+
+	selected := make(map[uint16]struct{}, 3)
+	listenerPort := r.nextAvailableLocked(2323, selected)
+	if listenerPort != 0 {
+		selected[listenerPort] = struct{}{}
+	}
+	multiPortBase := r.nextAvailableLocked(24000, selected)
+	if multiPortBase != 0 {
+		selected[multiPortBase] = struct{}{}
+	}
+	stickyStart := uint16(2324)
+	if listenerPort > 0 && listenerPort < 65535 {
+		stickyStart = listenerPort + 1
+	}
+	stickyPort := r.nextAvailableLocked(stickyStart, selected)
+
+	return owners, portRecommendations{
+		ListenerPort:  listenerPort,
+		MultiPortBase: multiPortBase,
+		StickyPort:    stickyPort,
+	}
+}
+
+func (r *PortRegistry) nextAvailableLocked(start uint16, excluded map[uint16]struct{}) uint16 {
+	if start == 0 {
+		start = 1
+	}
 	for candidate := uint32(start); candidate <= 65535; candidate++ {
 		port := uint16(candidate)
 		if _, reserved := r.owners[port]; reserved {
 			continue
 		}
+		if _, reserved := excluded[port]; reserved {
+			continue
+		}
 		if config.IsPortAvailable("0.0.0.0", port) {
-			return port, nil
+			return port
 		}
 	}
-	return 0, fmt.Errorf("no available port at or above %d", start)
+	return 0
 }

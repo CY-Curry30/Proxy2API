@@ -81,6 +81,28 @@ type ProjectSubscriptionSettings struct {
 	Interval string `json:"interval"`
 }
 
+type ProjectPortRange struct {
+	Start uint16 `json:"start"`
+	End   uint16 `json:"end"`
+}
+
+type ProjectPortUsage struct {
+	ProjectID   string             `json:"project_id"`
+	ProjectName string             `json:"project_name"`
+	Ranges      []ProjectPortRange `json:"ranges"`
+}
+
+type ProjectPortRecommendations struct {
+	ListenerPort  uint16 `json:"listener_port"`
+	MultiPortBase uint16 `json:"multi_port_base"`
+	StickyPort    uint16 `json:"sticky_port"`
+}
+
+type ProjectPortHints struct {
+	Occupied    []ProjectPortUsage         `json:"occupied"`
+	Recommended ProjectPortRecommendations `json:"recommended"`
+}
+
 type ProjectCreateRequest struct {
 	ID            string                  `json:"id"`
 	Name          string                  `json:"name"`
@@ -132,6 +154,7 @@ type ProjectBinding struct {
 type ProjectController interface {
 	DefaultProjectID() string
 	ListProjects() []ProjectSummary
+	ProjectPortHints() ProjectPortHints
 	Project(id string) (ProjectBinding, error)
 	SharedCatalog() (ProjectBinding, error)
 	CreateProject(ctx context.Context, request ProjectCreateRequest) (ProjectSummary, error)
