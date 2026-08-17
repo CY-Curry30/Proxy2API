@@ -1618,7 +1618,7 @@
         ['运行模式', projectModeLabel(project.mode)],
         ['代理入口', projectEndpoint(project.listener_address, project.listener_port)],
         ['多端口起始', projectEndpoint(project.multi_port_address, project.multi_port_base, '+')],
-        ['内部 API', project.clash_api_port ? `127.0.0.1:${project.clash_api_port}` : '-'],
+        ['内部 API', project.clash_api_port ? `0.0.0.0:${project.clash_api_port}` : '-'],
         ['节点数', String(Number(project.node_count) || 0)],
         ['订阅数', String(Number(project.subscription_count) || 0)],
         ['拉黑解除时长', pool.blacklist_duration || '-'],

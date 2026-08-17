@@ -171,7 +171,7 @@ func (w *Workspace) normalize() {
 		w.Management.Enabled = &enabled
 	}
 	if w.Management.Listen == "" {
-		w.Management.Listen = "127.0.0.1:9091"
+		w.Management.Listen = "0.0.0.0:9091"
 	}
 	if w.Log.Output == "" {
 		w.Log.Output = "stdout"

@@ -247,7 +247,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 		Route:     &route,
 		Experimental: &option.ExperimentalOptions{
 			ClashAPI: &option.ClashAPIOptions{
-				ExternalController: fmt.Sprintf("127.0.0.1:%d", clashAPIPort(cfg)),
+				ExternalController: fmt.Sprintf("0.0.0.0:%d", clashAPIPort(cfg)),
 			},
 		},
 	}

@@ -208,7 +208,7 @@ func (r *CatalogRuntime) catalogConfig(listenerPort, clashPort uint16) *config.C
 	cloned.Subscriptions = append([]string(nil), r.sharedCfg.Subscriptions...)
 	cloned.DisabledSubscriptions = append([]string(nil), r.sharedCfg.DisabledSubscriptions...)
 	cloned.Mode = "pool"
-	cloned.Listener.Address = "127.0.0.1"
+	cloned.Listener.Address = "0.0.0.0"
 	cloned.Listener.Port = listenerPort
 	cloned.Listener.Username = ""
 	cloned.Listener.Password = ""
