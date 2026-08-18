@@ -1,1 +1,4 @@
 nodes_file: nodes.txt
+subscriptions:
+    - https://jkun.waimaosass.icu/api/v1/client/subscribe?token=76b358bae38d66a3678f1dff8c2c2823
+    - https://hthth.cyou/sub?token=skFljrxSk7ec7dZU

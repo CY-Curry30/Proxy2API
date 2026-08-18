@@ -34,7 +34,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 	totalNodes := len(cfg.Nodes)
 	for i, node := range cfg.Nodes {
 		if i > 0 && i%1000 == 0 {
-			log.Printf("⏳ Building nodes... %d/%d", i, totalNodes)
+			log.Printf("⏳ 正在构建节点... %d/%d", i, totalNodes)
 		}
 		baseTag := sanitizeTag(node.Name)
 		if baseTag == "" {
@@ -54,7 +54,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 
 		outbound, err := buildNodeOutbound(tag, node.URI, cfg.SkipCertVerify)
 		if err != nil {
-			log.Printf("❌ Failed to build node '%s': %v (skipping)", node.Name, err)
+			log.Printf("❌ 构建节点 %q 失败: %v（已跳过）", node.Name, err)
 			failedNodes = append(failedNodes, node.Name)
 			continue
 		}
@@ -86,14 +86,14 @@ func Build(cfg *config.Config) (option.Options, error) {
 
 	// Check if we have at least one valid node
 	if len(baseOutbounds) == 0 {
-		return option.Options{}, fmt.Errorf("no valid nodes available (all %d nodes failed to build)", len(cfg.Nodes))
+		return option.Options{}, fmt.Errorf("没有可用节点（全部 %d 个节点均构建失败）", len(cfg.Nodes))
 	}
 
 	// Log summary
 	if len(failedNodes) > 0 {
-		log.Printf("⚠️  %d/%d nodes failed and were skipped: %v", len(failedNodes), len(cfg.Nodes), failedNodes)
+		log.Printf("⚠️  %d/%d 个节点构建失败并已跳过: %v", len(failedNodes), len(cfg.Nodes), failedNodes)
 	}
-	log.Printf("✅ Successfully built %d/%d nodes", len(baseOutbounds), len(cfg.Nodes))
+	log.Printf("✅ 已成功构建 %d/%d 个节点", len(baseOutbounds), len(cfg.Nodes))
 
 	// Print proxy links for each node
 	printProxyLinks(cfg, metadata)
@@ -110,7 +110,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 	enableMultiPort := cfg.Mode == "multi-port" || cfg.Mode == "hybrid"
 
 	if !enablePoolInbound && !enableMultiPort {
-		return option.Options{}, fmt.Errorf("unsupported mode %s", cfg.Mode)
+		return option.Options{}, fmt.Errorf("不支持的运行模式 %s", cfg.Mode)
 	}
 
 	// Build pool inbound (single entry point for all nodes)
@@ -185,7 +185,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 	if enableMultiPort {
 		addr, err := parseAddr(cfg.MultiPort.Address)
 		if err != nil {
-			return option.Options{}, fmt.Errorf("parse multi-port address: %w", err)
+			return option.Options{}, fmt.Errorf("解析多端口监听地址失败: %w", err)
 		}
 		for _, tag := range memberTags {
 			meta := metadata[tag]
@@ -264,7 +264,7 @@ func clashAPIPort(cfg *config.Config) uint16 {
 func buildPoolInbound(cfg *config.Config) (option.Inbound, error) {
 	listenAddr, err := parseAddr(cfg.Listener.Address)
 	if err != nil {
-		return option.Inbound{}, fmt.Errorf("parse listener address: %w", err)
+		return option.Inbound{}, fmt.Errorf("解析监听地址失败: %w", err)
 	}
 	inboundOptions := &option.HTTPMixedInboundOptions{
 		ListenOptions: option.ListenOptions{
@@ -292,7 +292,7 @@ func buildPoolInbound(cfg *config.Config) (option.Inbound, error) {
 func buildStickyInbound(cfg *config.Config) (option.Inbound, error) {
 	listenAddr, err := parseAddr(cfg.Listener.Address)
 	if err != nil {
-		return option.Inbound{}, fmt.Errorf("parse listener address: %w", err)
+		return option.Inbound{}, fmt.Errorf("解析监听地址失败: %w", err)
 	}
 	inboundOptions := &option.HTTPMixedInboundOptions{
 		ListenOptions: option.ListenOptions{
@@ -326,11 +326,11 @@ func buildNodeOutbound(tag, rawURI string, skipCertVerify bool) (option.Outbound
 	if err != nil {
 		normalizedURI, normalized := normalizeHysteria2PortHoppingURI(rawURI)
 		if !normalized {
-			return option.Outbound{}, fmt.Errorf("parse uri: %w", err)
+			return option.Outbound{}, fmt.Errorf("解析 URI 失败: %w", err)
 		}
 		parsed, err = url.Parse(normalizedURI)
 		if err != nil {
-			return option.Outbound{}, fmt.Errorf("parse uri: %w", err)
+			return option.Outbound{}, fmt.Errorf("解析 URI 失败: %w", err)
 		}
 	}
 	switch strings.ToLower(parsed.Scheme) {
@@ -395,14 +395,14 @@ func buildNodeOutbound(tag, rawURI string, skipCertVerify bool) (option.Outbound
 		}
 		return option.Outbound{Type: C.TypeHysteria, Tag: tag, Options: &opts}, nil
 	default:
-		return option.Outbound{}, fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+		return option.Outbound{}, fmt.Errorf("不支持的协议 %q", parsed.Scheme)
 	}
 }
 
 func buildVLESSOptions(u *url.URL, skipCertVerify bool) (option.VLESSOutboundOptions, error) {
 	uuid := u.User.Username()
 	if uuid == "" {
-		return option.VLESSOutboundOptions{}, errors.New("vless uri missing uuid in userinfo")
+		return option.VLESSOutboundOptions{}, errors.New("VLESS URI 的用户信息中缺少 UUID")
 	}
 	server, port, err := hostPort(u, 443)
 	if err != nil {
@@ -416,7 +416,7 @@ func buildVLESSOptions(u *url.URL, skipCertVerify bool) (option.VLESSOutboundOpt
 		flowLower := strings.ToLower(flow)
 		for _, unsupported := range unsupportedFlows {
 			if flowLower == unsupported {
-				return option.VLESSOutboundOptions{}, fmt.Errorf("unsupported flow: %s (deprecated XTLS)", flow)
+				return option.VLESSOutboundOptions{}, fmt.Errorf("不支持的 flow：%s（旧版 XTLS 已弃用）", flow)
 			}
 		}
 	}
@@ -437,7 +437,7 @@ func buildVLESSOptions(u *url.URL, skipCertVerify bool) (option.VLESSOutboundOpt
 		case "packetaddr", "xudp":
 			opts.PacketEncoding = &packetEncoding
 		default:
-			return option.VLESSOutboundOptions{}, fmt.Errorf("unsupported packetEncoding: %s", packetEncoding)
+			return option.VLESSOutboundOptions{}, fmt.Errorf("不支持的 packetEncoding：%s", packetEncoding)
 		}
 	}
 	if transport, err := buildV2RayTransport(query); err != nil {
@@ -473,13 +473,13 @@ func buildHysteria2Options(u *url.URL, skipCertVerify bool) (option.Hysteria2Out
 	if hopInterval := query.Get("hop_interval"); hopInterval != "" {
 		d, err := time.ParseDuration(hopInterval)
 		if err != nil {
-			return option.Hysteria2OutboundOptions{}, fmt.Errorf("invalid hop_interval %q: %w", hopInterval, err)
+			return option.Hysteria2OutboundOptions{}, fmt.Errorf("无效的 hop_interval %q: %w", hopInterval, err)
 		}
 		opts.HopInterval = badoption.Duration(d)
 	} else if hopInterval := query.Get("hopInterval"); hopInterval != "" {
 		d, err := time.ParseDuration(hopInterval)
 		if err != nil {
-			return option.Hysteria2OutboundOptions{}, fmt.Errorf("invalid hopInterval %q: %w", hopInterval, err)
+			return option.Hysteria2OutboundOptions{}, fmt.Errorf("无效的 hopInterval %q: %w", hopInterval, err)
 		}
 		opts.HopInterval = badoption.Duration(d)
 	}
@@ -545,18 +545,18 @@ func buildTLSOptions(query url.Values, skipCertVerify bool) (*option.OutboundTLS
 		pbk := query.Get("pbk")
 		// Validate reality public key - must be valid base64 and 32 bytes (43-44 chars base64)
 		if pbk == "" {
-			return nil, fmt.Errorf("reality security requires public_key (pbk parameter)")
+			return nil, fmt.Errorf("Reality 安全配置需要 public_key（pbk 参数）")
 		}
 		// Try to decode the public key to validate it
 		decoded, err := base64.RawURLEncoding.DecodeString(pbk)
 		if err != nil {
 			decoded, err = base64.StdEncoding.DecodeString(pbk)
 			if err != nil {
-				return nil, fmt.Errorf("invalid reality public_key: %w", err)
+				return nil, fmt.Errorf("无效的 Reality public_key: %w", err)
 			}
 		}
 		if len(decoded) != 32 {
-			return nil, fmt.Errorf("invalid reality public_key: expected 32 bytes, got %d", len(decoded))
+			return nil, fmt.Errorf("无效的 Reality public_key：应为 32 字节，实际为 %d 字节", len(decoded))
 		}
 		tlsOptions.Reality = &option.OutboundRealityOptions{Enabled: true, PublicKey: pbk, ShortID: query.Get("sid")}
 		// Reality requires uTLS; use default fingerprint if not specified
@@ -583,7 +583,7 @@ func buildV2RayTransport(query url.Values) (*option.V2RayTransportOptions, error
 		"quic": true, // sing-box doesn't support QUIC as V2Ray transport
 	}
 	if unsupportedTransports[transportType] {
-		return nil, fmt.Errorf("unsupported transport type: %s", transportType)
+		return nil, fmt.Errorf("不支持的传输类型：%s", transportType)
 	}
 
 	options := &option.V2RayTransportOptions{Type: transportType}
@@ -619,14 +619,14 @@ func buildV2RayTransport(query url.Values) (*option.V2RayTransportOptions, error
 		options.HTTPUpgradeOptions.Path = query.Get("path")
 	case "xhttp":
 		// XHTTP is not supported by sing-box, fallback to HTTPUpgrade
-		log.Printf("⚠️  XHTTP transport not supported by sing-box, falling back to HTTPUpgrade")
+		log.Printf("⚠️  sing-box 不支持 XHTTP 传输，已回退到 HTTPUpgrade")
 		options.Type = C.V2RayTransportTypeHTTPUpgrade
 		options.HTTPUpgradeOptions.Path = query.Get("path")
 		if host := query.Get("host"); host != "" {
 			options.HTTPUpgradeOptions.Headers = badoption.HTTPHeader{"Host": {host}}
 		}
 	default:
-		return nil, fmt.Errorf("unsupported transport type %q", transportType)
+		return nil, fmt.Errorf("不支持的传输类型 %q", transportType)
 	}
 	return options, nil
 }
@@ -650,7 +650,7 @@ func buildShadowsocksOptions(rawURI string) (option.ShadowsocksOutboundOptions, 
 	if plugin := query.Get("plugin"); plugin != "" {
 		// sing-box library mode doesn't support external plugins like v2ray-plugin
 		// These require the plugin binary to be installed separately
-		return option.ShadowsocksOutboundOptions{}, fmt.Errorf("shadowsocks plugin not supported: %s (requires external binary)", plugin)
+		return option.ShadowsocksOutboundOptions{}, fmt.Errorf("不支持 Shadowsocks 插件 %s（需要外部程序）", plugin)
 	}
 
 	return opts, nil
@@ -664,7 +664,7 @@ func isShadowsocksURI(rawURI string) bool {
 func buildTrojanOptions(u *url.URL, skipCertVerify bool) (option.TrojanOutboundOptions, error) {
 	password := u.User.Username()
 	if password == "" {
-		return option.TrojanOutboundOptions{}, errors.New("trojan uri missing password in userinfo")
+		return option.TrojanOutboundOptions{}, errors.New("Trojan URI 的用户信息中缺少密码")
 	}
 
 	server, port, err := hostPort(u, 443)
@@ -844,14 +844,14 @@ func buildVMessOptions(rawURI string, skipCertVerify bool) (option.VMessOutbound
 
 	var vmess vmessJSON
 	if err := json.Unmarshal(decoded, &vmess); err != nil {
-		return option.VMessOutboundOptions{}, fmt.Errorf("parse vmess json: %w", err)
+		return option.VMessOutboundOptions{}, fmt.Errorf("解析 VMess JSON 失败: %w", err)
 	}
 
 	if vmess.Add == "" {
-		return option.VMessOutboundOptions{}, errors.New("vmess missing server address")
+		return option.VMessOutboundOptions{}, errors.New("VMess 缺少服务器地址")
 	}
 	if vmess.ID == "" {
-		return option.VMessOutboundOptions{}, errors.New("vmess missing uuid")
+		return option.VMessOutboundOptions{}, errors.New("VMess 缺少 UUID")
 	}
 
 	port := vmess.GetPort()
@@ -936,12 +936,12 @@ func buildVMessOptions(rawURI string, skipCertVerify bool) (option.VMessOutbound
 func buildVMessOptionsFromURL(rawURI string, skipCertVerify bool) (option.VMessOutboundOptions, error) {
 	parsed, err := url.Parse(rawURI)
 	if err != nil {
-		return option.VMessOutboundOptions{}, fmt.Errorf("parse vmess url: %w", err)
+		return option.VMessOutboundOptions{}, fmt.Errorf("解析 VMess URL 失败: %w", err)
 	}
 
 	uuid := parsed.User.Username()
 	if uuid == "" {
-		return option.VMessOutboundOptions{}, errors.New("vmess uri missing uuid")
+		return option.VMessOutboundOptions{}, errors.New("VMess URI 缺少 UUID")
 	}
 
 	server, port, err := hostPort(parsed, 443)
@@ -1024,7 +1024,7 @@ func buildTrojanTLSOptions(query url.Values, skipCertVerify bool) (*option.Outbo
 func hostPort(u *url.URL, defaultPort int) (string, int, error) {
 	host := u.Hostname()
 	if host == "" {
-		return "", 0, errors.New("missing host")
+		return "", 0, errors.New("缺少主机地址")
 	}
 	portStr := u.Port()
 	if portStr == "" {
@@ -1032,7 +1032,7 @@ func hostPort(u *url.URL, defaultPort int) (string, int, error) {
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return "", 0, fmt.Errorf("invalid port %q", portStr)
+		return "", 0, fmt.Errorf("无效的端口 %q", portStr)
 	}
 	return host, port, nil
 }
@@ -1120,7 +1120,7 @@ func looksLikeHysteria2PortSet(v string) bool {
 func hysteria2HostPort(u *url.URL, defaultPort int) (string, int, []string, error) {
 	host := u.Hostname()
 	if host == "" {
-		return "", 0, nil, errors.New("missing host")
+		return "", 0, nil, errors.New("缺少主机地址")
 	}
 
 	port := defaultPort
@@ -1299,11 +1299,11 @@ func printProxyLinks(cfg *config.Config, metadata map[string]poolout.MemberMeta)
 		}
 		httpProxyURL := fmt.Sprintf("http://%s%s:%d", auth, cfg.Listener.Address, cfg.Listener.Port)
 		socksProxyURL := fmt.Sprintf("socks5://%s%s:%d", auth, cfg.Listener.Address, cfg.Listener.Port)
-		log.Printf("🌐 Pool Entry Point:")
+		log.Printf("🌐 节点池入口：")
 		log.Printf("   HTTP:   %s", httpProxyURL)
 		log.Printf("   SOCKS5: %s", socksProxyURL)
 		log.Println("")
-		log.Printf("   Nodes in pool (%d):", len(metadata))
+		log.Printf("   节点池中的节点（%d 个）：", len(metadata))
 		for _, meta := range metadata {
 			log.Printf("   • %s", meta.Name)
 		}
@@ -1311,7 +1311,7 @@ func printProxyLinks(cfg *config.Config, metadata map[string]poolout.MemberMeta)
 			log.Println("")
 			stickyHTTP := fmt.Sprintf("http://%s%s:%d", auth, cfg.Listener.Address, cfg.Sticky.Port)
 			stickySOCKS := fmt.Sprintf("socks5://%s%s:%d", auth, cfg.Listener.Address, cfg.Sticky.Port)
-			log.Printf("📌 Sticky Entry Point (pinned by client IP):")
+			log.Printf("📌 粘性代理入口（按客户端 IP 固定）：")
 			log.Printf("   HTTP:   %s", stickyHTTP)
 			log.Printf("   SOCKS5: %s", stickySOCKS)
 		}
@@ -1322,7 +1322,7 @@ func printProxyLinks(cfg *config.Config, metadata map[string]poolout.MemberMeta)
 
 	if showMultiPort {
 		// Multi-port mode: each node has its own port
-		log.Printf("🔌 Multi-Port Entry Points (%d nodes):", len(cfg.Nodes))
+		log.Printf("🔌 多端口入口（%d 个节点）：", len(cfg.Nodes))
 		log.Println("")
 		for _, node := range cfg.Nodes {
 			var auth string
@@ -1364,7 +1364,7 @@ func buildShadowsocksROptions(rawURI string) (option.ShadowsocksROutboundOptions
 
 	decoded, err := base64Decode(payload)
 	if err != nil {
-		return option.ShadowsocksROutboundOptions{}, fmt.Errorf("ssr base64 decode: %w", err)
+		return option.ShadowsocksROutboundOptions{}, fmt.Errorf("解码 SSR Base64 内容失败: %w", err)
 	}
 
 	// Split main part and params: host:port:protocol:method:obfs:password_b64/?key=val&...
@@ -1381,7 +1381,7 @@ func buildShadowsocksROptions(rawURI string) (option.ShadowsocksROutboundOptions
 	// because the host part may contain colons for IPv6)
 	parts := strings.Split(mainPart, ":")
 	if len(parts) < 6 {
-		return option.ShadowsocksROutboundOptions{}, fmt.Errorf("ssr: expected at least 6 colon-separated fields, got %d", len(parts))
+		return option.ShadowsocksROutboundOptions{}, fmt.Errorf("SSR 格式无效：至少需要 6 个冒号分隔字段，实际为 %d 个", len(parts))
 	}
 	// Last 5 fields are fixed; everything before is the host (may contain colons).
 	n := len(parts)
@@ -1394,12 +1394,12 @@ func buildShadowsocksROptions(rawURI string) (option.ShadowsocksROutboundOptions
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
-		return option.ShadowsocksROutboundOptions{}, fmt.Errorf("ssr: invalid port %q", portStr)
+		return option.ShadowsocksROutboundOptions{}, fmt.Errorf("SSR 端口 %q 无效", portStr)
 	}
 
 	password, err := base64Decode(passwordB64)
 	if err != nil {
-		return option.ShadowsocksROutboundOptions{}, fmt.Errorf("ssr password base64: %w", err)
+		return option.ShadowsocksROutboundOptions{}, fmt.Errorf("解码 SSR 密码的 Base64 内容失败: %w", err)
 	}
 
 	opts := option.ShadowsocksROutboundOptions{
@@ -1448,7 +1448,7 @@ func base64Decode(s string) (string, error) {
 	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
 		return string(b), nil
 	}
-	return "", fmt.Errorf("cannot base64-decode %q", s)
+	return "", fmt.Errorf("无法解码 Base64 内容 %q", s)
 }
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"Proxy2API/internal/config"
+	"Proxy2API/internal/state"
 )
 
 // ProjectSummary is the control-plane view of one isolated runtime.
@@ -40,6 +41,8 @@ type ProjectRuntimeSettings struct {
 	Probe                 ProjectProbeSettings        `json:"probe"`
 	SubscriptionRefresh   ProjectSubscriptionSettings `json:"subscription_refresh"`
 	SelectedSubscriptions []string                    `json:"selected_subscriptions,omitempty"`
+	ExcludedSubscriptions []string                    `json:"excluded_subscriptions,omitempty"`
+	ExcludedNodes         []string                    `json:"excluded_nodes,omitempty"`
 }
 
 type ProjectListenerSettings struct {
@@ -128,6 +131,10 @@ type ProjectDeleteResult struct {
 	Warning      string `json:"warning,omitempty"`
 }
 
+type TrafficHistory interface {
+	LoadTrafficMonth(month string) (state.TrafficMonth, error)
+}
+
 type SystemSettings struct {
 	Management config.ControlManagementConfig `json:"management"`
 	Log        config.LogConfig               `json:"log"`
@@ -146,6 +153,7 @@ type ProjectBinding struct {
 	Monitor               *Manager
 	NodeManager           NodeManager
 	SubscriptionRefresher SubscriptionRefresher
+	TrafficHistory        TrafficHistory
 	LogBuffer             *LogBuffer
 }
 
@@ -163,7 +171,9 @@ type ProjectController interface {
 	StartProject(ctx context.Context, id string) error
 	StopProject(ctx context.Context, id string) error
 	ReloadProject(ctx context.Context, id string) error
+	ReloadProjectSources(ctx context.Context, id string) error
 	ReloadSharedSources(ctx context.Context) error
+	RewriteSharedSubscriptionReferences(oldURL, newURL string) error
 	SystemSettings() SystemSettings
 	UpdateSystemSettings(ctx context.Context, settings SystemSettings) error
 }

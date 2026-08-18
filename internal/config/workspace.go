@@ -58,7 +58,7 @@ type Workspace struct {
 // to a project directory.
 func ValidateProjectID(id string) error {
 	if !projectIDPattern.MatchString(id) {
-		return errors.New("project id must be 1-64 characters of lowercase letters, digits, '-' or '_'")
+		return errors.New("项目 ID 必须由 1-64 个小写字母、数字、'-' 或 '_' 组成")
 	}
 	return nil
 }
@@ -68,11 +68,11 @@ func ValidateProjectID(id string) error {
 // returned and the current config file is left untouched.
 func LoadWorkspace(configPath string, legacy *Config) (*Workspace, error) {
 	if legacy == nil {
-		return nil, errors.New("workspace requires the shared source config")
+		return nil, errors.New("工作区缺少共享源配置")
 	}
 	absConfig, err := filepath.Abs(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve shared config path: %w", err)
+		return nil, fmt.Errorf("解析共享配置路径失败: %w", err)
 	}
 	rootDir := filepath.Dir(absConfig)
 	manifestPath := filepath.Join(rootDir, WorkspaceFileName)
@@ -106,7 +106,7 @@ func LoadWorkspace(configPath string, legacy *Config) (*Workspace, error) {
 			w.normalize()
 			return w, nil
 		}
-		return nil, fmt.Errorf("read workspace config: %w", err)
+		return nil, fmt.Errorf("读取工作区配置失败: %w", err)
 	}
 	loaded := &Workspace{
 		Management: ControlManagementConfig{
@@ -118,7 +118,7 @@ func LoadWorkspace(configPath string, legacy *Config) (*Workspace, error) {
 		ProjectsDir: "projects",
 	}
 	if err := yaml.Unmarshal(data, loaded); err != nil {
-		return nil, fmt.Errorf("decode workspace config: %w", err)
+		return nil, fmt.Errorf("解析工作区配置失败: %w", err)
 	}
 	loaded.filePath = manifestPath
 	loaded.rootDir = rootDir
@@ -228,26 +228,26 @@ func (w *Workspace) normalize() {
 
 func (w *Workspace) Validate() error {
 	if w == nil {
-		return errors.New("workspace is nil")
+		return errors.New("工作区不能为空")
 	}
 	if _, err := w.NewProjectConfigPath("validation"); err != nil {
 		return err
 	}
 	if len(w.Projects) == 0 {
 		if w.DefaultProject != "" {
-			return errors.New("default project must be empty when the project catalog is empty")
+			return errors.New("项目目录为空时默认项目必须为空")
 		}
 		return nil
 	}
 	if err := ValidateProjectID(w.DefaultProject); err != nil {
-		return fmt.Errorf("invalid default project: %w", err)
+		return fmt.Errorf("默认项目无效: %w", err)
 	}
 	if _, ok := w.Projects[w.DefaultProject]; !ok {
-		return fmt.Errorf("default project %q is not in the project catalog", w.DefaultProject)
+		return fmt.Errorf("默认项目 %q 不在项目目录中", w.DefaultProject)
 	}
 	for id := range w.Projects {
 		if err := ValidateProjectID(id); err != nil {
-			return fmt.Errorf("invalid project %q: %w", id, err)
+			return fmt.Errorf("项目 %q 无效: %w", id, err)
 		}
 		if _, err := w.ProjectConfigPath(id); err != nil {
 			return err
@@ -278,7 +278,7 @@ func (w *Workspace) ProjectConfigPath(id string) (string, error) {
 	}
 	spec, ok := w.Projects[id]
 	if !ok {
-		return "", fmt.Errorf("project %q not found", id)
+		return "", fmt.Errorf("项目 %q 不存在", id)
 	}
 	path := strings.TrimSpace(spec.Config)
 	if path == "" {
@@ -289,11 +289,11 @@ func (w *Workspace) ProjectConfigPath(id string) (string, error) {
 	}
 	absPath, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
-		return "", fmt.Errorf("resolve config for project %q: %w", id, err)
+		return "", fmt.Errorf("解析项目 %q 的配置路径失败: %w", id, err)
 	}
 	rel, err := filepath.Rel(w.rootDir, absPath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("project %q config must stay inside workspace %q", id, w.rootDir)
+		return "", fmt.Errorf("项目 %q 的配置必须位于工作区 %q 内", id, w.rootDir)
 	}
 	return absPath, nil
 }
@@ -309,15 +309,15 @@ func (w *Workspace) NewProjectConfigPath(id string) (string, error) {
 		projectsDir = "projects"
 	}
 	if filepath.IsAbs(projectsDir) {
-		return "", errors.New("projects_dir must be relative to the workspace")
+		return "", errors.New("projects_dir 必须是相对于工作区的路径")
 	}
 	absPath, err := filepath.Abs(filepath.Join(w.rootDir, projectsDir, id, "project.yaml"))
 	if err != nil {
-		return "", fmt.Errorf("resolve projects_dir: %w", err)
+		return "", fmt.Errorf("解析 projects_dir 失败: %w", err)
 	}
 	rel, err := filepath.Rel(w.rootDir, absPath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("projects_dir must stay inside workspace %q", w.rootDir)
+		return "", fmt.Errorf("projects_dir 必须位于工作区 %q 内", w.rootDir)
 	}
 	return absPath, nil
 }
@@ -352,10 +352,10 @@ func (w *Workspace) Save() error {
 	}
 	data, err := yaml.Marshal(&saved)
 	if err != nil {
-		return fmt.Errorf("encode workspace config: %w", err)
+		return fmt.Errorf("编码工作区配置失败: %w", err)
 	}
 	if err := writeFileWithLock(w.filePath, data, 0o644); err != nil {
-		return fmt.Errorf("write workspace config: %w", err)
+		return fmt.Errorf("写入工作区配置失败: %w", err)
 	}
 	w.persisted = true
 	return nil
@@ -364,18 +364,18 @@ func (w *Workspace) Save() error {
 // WriteProjectConfig creates a new project's initial YAML file.
 func WriteProjectConfig(path string, cfg *Config) error {
 	if cfg == nil {
-		return errors.New("project config is nil")
+		return errors.New("项目配置不能为空")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create project directory: %w", err)
+		return fmt.Errorf("创建项目目录失败: %w", err)
 	}
 	cfg.SetFilePath(path)
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("encode project config: %w", err)
+		return fmt.Errorf("编码项目配置失败: %w", err)
 	}
 	if err := writeFileWithLock(path, data, 0o644); err != nil {
-		return fmt.Errorf("write project config: %w", err)
+		return fmt.Errorf("写入项目配置失败: %w", err)
 	}
 	if cfg.NodesFile != "" {
 		nodesPath := cfg.NodesFile
@@ -384,10 +384,10 @@ func WriteProjectConfig(path string, cfg *Config) error {
 		}
 		if _, err := os.Stat(nodesPath); os.IsNotExist(err) {
 			if err := writeFileWithLock(nodesPath, nil, 0o644); err != nil {
-				return fmt.Errorf("create project nodes file: %w", err)
+				return fmt.Errorf("创建项目节点文件失败: %w", err)
 			}
 		} else if err != nil {
-			return fmt.Errorf("inspect project nodes file: %w", err)
+			return fmt.Errorf("检查项目节点文件失败: %w", err)
 		}
 	}
 	return nil
@@ -416,7 +416,7 @@ func NewSharedConfig(path string, source *Config) *Config {
 func WriteSharedConfig(path string, source *Config) error {
 	shared := NewSharedConfig(path, source)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create shared config directory: %w", err)
+		return fmt.Errorf("创建共享配置目录失败: %w", err)
 	}
 	if err := shared.SaveSettings(); err != nil {
 		return err
@@ -428,7 +428,7 @@ func WriteSharedConfig(path string, source *Config) error {
 // config, leaving nodes and subscriptions in the standalone shared catalog.
 func WriteRuntimeProjectConfig(path string, source *Config) error {
 	if source == nil {
-		return errors.New("runtime project config is nil")
+		return errors.New("运行时项目配置不能为空")
 	}
 	runtime := *source
 	runtime.Nodes = nil

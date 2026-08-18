@@ -54,6 +54,8 @@ type Config struct {
 	Subscriptions         []string                  `yaml:"subscriptions"`                    // 订阅链接列表
 	DisabledSubscriptions []string                  `yaml:"disabled_subscriptions,omitempty"` // 已暂停但保留缓存的订阅
 	SelectedSubscriptions []string                  `yaml:"selected_subscriptions,omitempty"` // 项目选定的订阅子集，空表示全部选中
+	ExcludedSubscriptions []string                  `yaml:"excluded_subscriptions,omitempty"` // 项目排除的共享订阅
+	ExcludedNodes         []string                  `yaml:"excluded_nodes,omitempty"`         // 项目排除的共享节点稳定 ID
 	ExternalIP            string                    `yaml:"external_ip"`                      // 外部 IP 地址，用于导出时替换 0.0.0.0
 	LogLevel              string                    `yaml:"log_level"`
 	SkipCertVerify        bool                      `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
@@ -313,18 +315,25 @@ func (c *Config) ActiveSubscriptions() []string {
 // SelectedSubscriptions is empty, all configured subscriptions are included
 // (backward compatible). Otherwise, only the selected subset is returned.
 func (c *Config) EffectiveSubscriptions() []string {
-	if len(c.SelectedSubscriptions) == 0 {
-		return c.Subscriptions
-	}
 	selected := make(map[string]struct{}, len(c.SelectedSubscriptions))
 	for _, rawURL := range c.SelectedSubscriptions {
 		selected[strings.TrimSpace(rawURL)] = struct{}{}
 	}
-	effective := make([]string, 0, len(c.SelectedSubscriptions))
+	excluded := make(map[string]struct{}, len(c.ExcludedSubscriptions))
+	for _, rawURL := range c.ExcludedSubscriptions {
+		excluded[strings.TrimSpace(rawURL)] = struct{}{}
+	}
+	effective := make([]string, 0, len(c.Subscriptions))
 	for _, rawURL := range c.Subscriptions {
-		if _, ok := selected[rawURL]; ok {
-			effective = append(effective, rawURL)
+		if len(c.SelectedSubscriptions) > 0 {
+			if _, ok := selected[rawURL]; !ok {
+				continue
+			}
 		}
+		if _, excluded := excluded[rawURL]; excluded {
+			continue
+		}
+		effective = append(effective, rawURL)
 	}
 	return effective
 }
@@ -337,13 +346,38 @@ func (c *Config) EffectiveSubscriptionEnabled(rawURL string) bool {
 	}
 	if len(c.SelectedSubscriptions) > 0 {
 		for _, selectedURL := range c.SelectedSubscriptions {
-			if selectedURL == rawURL {
-				return true
+			if selectedURL != rawURL {
+				continue
 			}
+			for _, excludedURL := range c.ExcludedSubscriptions {
+				if excludedURL == rawURL {
+					return false
+				}
+			}
+			return true
 		}
 		return false
 	}
+	for _, excludedURL := range c.ExcludedSubscriptions {
+		if excludedURL == rawURL {
+			return false
+		}
+	}
 	return true
+}
+
+// NodeExcluded reports whether a shared node is hidden from this project.
+func (c *Config) NodeExcluded(node NodeConfig) bool {
+	if node.NodeKey() == "" {
+		return false
+	}
+	id := node.StateID()
+	for _, excluded := range c.ExcludedNodes {
+		if excluded == id {
+			return true
+		}
+	}
+	return false
 }
 
 // SetSubscriptionEnabled updates the persisted pause list without removing the
@@ -404,6 +438,21 @@ func LoadReadOnly(path string) (*Config, error) {
 	return load(path, false)
 }
 
+// LoadSettingsReadOnly reads and normalizes project YAML settings without
+// restoring persisted ports or opening the runtime recovery database. It is
+// safe to use while a running project owns the state database lock.
+func LoadSettingsReadOnly(path string) (*Config, error) {
+	cfg, err := decodeConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	cfg.skipRuntimeRecovery = true
+	if err := cfg.normalize(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // LoadShared reads the standalone shared node/subscription catalog. Runtime
 // settings in this file are intentionally not used by project runtimes.
 func LoadShared(path string) (*Config, error) {
@@ -458,11 +507,11 @@ func load(path string, restorePersistedPorts bool) (*Config, error) {
 func decodeConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, fmt.Errorf("读取配置失败: %w", err)
 	}
 	cfg := &Config{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("decode config: %w", err)
+		return nil, fmt.Errorf("解析配置失败: %w", err)
 	}
 	// Keep the historical bool representation while allowing omitted project
 	// settings to use the product default of skipping certificate validation.
@@ -470,7 +519,7 @@ func decodeConfig(path string) (*Config, error) {
 		SkipCertVerify *bool `yaml:"skip_cert_verify"`
 	}
 	if err := yaml.Unmarshal(data, &presence); err != nil {
-		return nil, fmt.Errorf("decode config defaults: %w", err)
+		return nil, fmt.Errorf("解析配置默认值失败: %w", err)
 	}
 	if presence.SkipCertVerify == nil {
 		cfg.SkipCertVerify = true
@@ -501,11 +550,11 @@ func LoadProjectReadOnly(path, sharedPath string) (*Config, error) {
 func loadProject(path, sharedPath string, persistPorts bool) (*Config, error) {
 	projectAbs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve project config: %w", err)
+		return nil, fmt.Errorf("解析项目配置路径失败: %w", err)
 	}
 	sharedAbs, err := filepath.Abs(sharedPath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve shared config: %w", err)
+		return nil, fmt.Errorf("解析共享配置路径失败: %w", err)
 	}
 	if filepath.Clean(projectAbs) == filepath.Clean(sharedAbs) {
 		if persistPorts {
@@ -516,22 +565,22 @@ func loadProject(path, sharedPath string, persistPorts bool) (*Config, error) {
 
 	shared, err := LoadShared(sharedAbs)
 	if err != nil {
-		return nil, fmt.Errorf("load shared node sources: %w", err)
+		return nil, fmt.Errorf("加载共享节点源失败: %w", err)
 	}
 	return loadProjectWithShared(path, shared, persistPorts)
 }
 
 func loadProjectWithShared(path string, shared *Config, persistPorts bool) (*Config, error) {
 	if shared == nil {
-		return nil, errors.New("shared source config is nil")
+		return nil, errors.New("共享源配置不能为空")
 	}
 	projectAbs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve project config: %w", err)
+		return nil, fmt.Errorf("解析项目配置路径失败: %w", err)
 	}
 	sharedAbs, err := filepath.Abs(shared.FilePath())
 	if err != nil {
-		return nil, fmt.Errorf("resolve shared config: %w", err)
+		return nil, fmt.Errorf("解析共享配置路径失败: %w", err)
 	}
 	if filepath.Clean(projectAbs) == filepath.Clean(sharedAbs) {
 		if persistPorts {
@@ -546,12 +595,10 @@ func loadProjectWithShared(path string, shared *Config, persistPorts bool) (*Con
 	project.sourcesShared = true
 	project.Subscriptions = append([]string(nil), shared.Subscriptions...)
 	project.DisabledSubscriptions = append([]string(nil), shared.DisabledSubscriptions...)
-	// Apply per-project subscription selection filter. When selected_subscriptions
-	// is empty, the project uses all shared subscriptions (backward compatible).
-	if len(project.SelectedSubscriptions) > 0 {
-		effective := project.EffectiveSubscriptions()
-		project.Subscriptions = effective
-	}
+	// Apply per-project subscription selection and exclusion filters. When both
+	// lists are empty, the project uses all shared subscriptions for backward
+	// compatibility.
+	project.Subscriptions = project.EffectiveSubscriptions()
 	project.Nodes = make([]NodeConfig, 0, len(shared.Nodes))
 	for _, node := range shared.Nodes {
 		if node.Source == NodeSourceSubscription {
@@ -601,7 +648,16 @@ func loadProjectWithShared(path string, shared *Config, persistPorts bool) (*Con
 		node.Password = ""
 		project.Nodes = append(project.Nodes, node)
 	}
-	project.Nodes, _ = dedupeNodesByKey(project.Nodes)
+	project.Nodes = dedupeNodesPreferSubscription(project.Nodes)
+	if len(project.ExcludedNodes) > 0 {
+		filtered := project.Nodes[:0]
+		for _, node := range project.Nodes {
+			if !project.NodeExcluded(node) {
+				filtered = append(filtered, node)
+			}
+		}
+		project.Nodes = filtered
+	}
 	if persistPorts {
 		if err := project.applyPersistedPorts(); err != nil {
 			return nil, err
@@ -668,7 +724,7 @@ func (c *Config) normalize() error {
 	switch c.Mode {
 	case "pool", "multi-port", "hybrid":
 	default:
-		return fmt.Errorf("unsupported mode %q (use 'pool', 'multi-port', or 'hybrid')", c.Mode)
+		return fmt.Errorf("不支持的运行模式 %q（可用值：pool、multi-port 或 hybrid）", c.Mode)
 	}
 	if c.Listener.Address == "" {
 		c.Listener.Address = "0.0.0.0"
@@ -733,7 +789,7 @@ func (c *Config) normalize() error {
 	if c.NodesFile != "" && len(c.Subscriptions) == 0 {
 		fileNodes, err := loadNodesFromFile(c.NodesFile)
 		if err != nil {
-			return fmt.Errorf("load nodes from file %q: %w", c.NodesFile, err)
+			return fmt.Errorf("从节点文件 %q 加载节点失败: %w", c.NodesFile, err)
 		}
 		for idx := range fileNodes {
 			fileNodes[idx].Source = NodeSourceFile
@@ -758,7 +814,7 @@ func (c *Config) normalize() error {
 		var subNodes []NodeConfig
 		if perSubscriptionCacheErr == nil && len(perSubscriptionCache) > 0 {
 			subNodes = c.mergeSubscriptionNodeCache(nil, perSubscriptionCache)
-			log.Printf("✅ Restored %d subscription nodes from local per-subscription cache", len(subNodes))
+			log.Printf("✅ 已从本地分订阅缓存恢复 %d 个订阅节点", len(subNodes))
 		} else if cacheErr == nil {
 			// Legacy aggregate cache has no ownership metadata. It is safe to use as
 			// the active startup set, except when every subscription is paused.
@@ -767,9 +823,9 @@ func (c *Config) normalize() error {
 			for idx := range subNodes {
 				subNodes[idx].Disabled = allSubscriptionsPaused
 			}
-			log.Printf("✅ Restored %d subscription nodes from local aggregate cache", len(subNodes))
+			log.Printf("✅ 已从本地汇总缓存恢复 %d 个订阅节点", len(subNodes))
 		} else {
-			log.Printf("⚠️ No local subscription node cache is available; use manual refresh after startup")
+			log.Printf("⚠️ 没有可用的本地订阅节点缓存，请在启动后手动更新")
 		}
 
 		for idx := range subNodes {
@@ -781,12 +837,17 @@ func (c *Config) normalize() error {
 			}
 			c.Nodes = append(c.Nodes, node)
 		}
+		// A node may have been imported manually before its subscription was
+		// configured. When the same stable endpoint is present in the subscription
+		// cache, keep the subscription-owned definition instead of the stale inline
+		// copy so the UI and runtime report the real source.
+		c.Nodes = dedupeNodesPreferSubscription(c.Nodes)
 	}
 
 	if c.filePath != "" && !c.skipRuntimeRecovery {
 		storedNodes, _, _, hasCatalog, catalogURLs, err := state.LoadRecoverySnapshot(c.filePath)
 		if err != nil {
-			return fmt.Errorf("load runtime recovery state: %w", err)
+			return fmt.Errorf("加载运行恢复状态失败: %w", err)
 		}
 		configuredSubscriptions := make(map[string]bool, len(c.Subscriptions))
 		for _, rawURL := range c.Subscriptions {
@@ -867,7 +928,7 @@ func (c *Config) normalize() error {
 		c.Nodes[idx].URI = strings.TrimSpace(c.Nodes[idx].URI)
 
 		if c.Nodes[idx].URI == "" {
-			return fmt.Errorf("node %d is missing uri", idx)
+			return fmt.Errorf("节点 %d 缺少 URI", idx)
 		}
 
 		// Auto-extract name from URI if not provided
@@ -921,10 +982,10 @@ func (c *Config) normalize() error {
 				for usedPorts[newPort] || !IsPortAvailable(c.MultiPort.Address, newPort) {
 					newPort++
 					if newPort > 65535 {
-						return fmt.Errorf("no available port for node %q after conflict with pool port %d", c.Nodes[idx].Name, poolPort)
+						return fmt.Errorf("节点 %q 与节点池端口 %d 冲突后没有可用端口", c.Nodes[idx].Name, poolPort)
 					}
 				}
-				log.Printf("⚠️  Node %q port %d conflicts with pool port, reassigned to %d", c.Nodes[idx].Name, poolPort, newPort)
+				log.Printf("⚠️  节点 %q 的端口 %d 与节点池端口冲突，已重新分配到 %d", c.Nodes[idx].Name, poolPort, newPort)
 				usedPorts[newPort] = true
 				c.Nodes[idx].Port = newPort
 			}
@@ -1006,21 +1067,21 @@ func bridgeLegacyPortKeys(nodes []NodeConfig, saved map[string]uint16) {
 // have no per-node ports.
 func (c *Config) SaveNodePortMap() error {
 	if c == nil {
-		return errors.New("config is nil")
+		return errors.New("配置不能为空")
 	}
 	if c.Mode != "multi-port" && c.Mode != "hybrid" {
 		return nil
 	}
 	path := c.portMapPath()
 	if path == "" {
-		return errors.New("config file path is unknown")
+		return errors.New("配置文件路径未知")
 	}
 	data, err := json.MarshalIndent(c.BuildPortMap(), "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode port map: %w", err)
+		return fmt.Errorf("编码端口映射失败: %w", err)
 	}
 	if err := writeFileWithLock(path, data, 0o644); err != nil {
-		return fmt.Errorf("write port map %q: %w", path, err)
+		return fmt.Errorf("写入端口映射 %q 失败: %w", path, err)
 	}
 	return nil
 }
@@ -1059,13 +1120,13 @@ func (c *Config) applyPersistedPorts() error {
 		c.Nodes[i].Port = 0
 	}
 	if err := c.NormalizeWithPortMap(saved); err != nil {
-		return fmt.Errorf("restore persisted ports: %w", err)
+		return fmt.Errorf("恢复已保存端口失败: %w", err)
 	}
 	// Persisting is best-effort by design: the proxy runs correctly without the
 	// sidecar; only a subsequent restart would re-derive ports. A write failure
 	// is logged rather than fatal.
 	if err := c.SaveNodePortMap(); err != nil {
-		log.Printf("⚠️  Failed to persist node ports: %v", err)
+		log.Printf("⚠️  保存节点端口失败: %v", err)
 	}
 	return nil
 }
@@ -1082,7 +1143,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 	switch c.Mode {
 	case "pool", "multi-port", "hybrid":
 	default:
-		return fmt.Errorf("unsupported mode %q (use 'pool', 'multi-port', or 'hybrid')", c.Mode)
+		return fmt.Errorf("不支持的运行模式 %q（可用值：pool、multi-port 或 hybrid）", c.Mode)
 	}
 	if c.Listener.Address == "" {
 		c.Listener.Address = "0.0.0.0"
@@ -1149,7 +1210,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 		c.Nodes[idx].Name = strings.TrimSpace(c.Nodes[idx].Name)
 		c.Nodes[idx].URI = strings.TrimSpace(c.Nodes[idx].URI)
 		if c.Nodes[idx].URI == "" {
-			return fmt.Errorf("node %d is missing uri", idx)
+			return fmt.Errorf("节点 %d 缺少 URI", idx)
 		}
 
 		// Auto-extract name from URI if not provided
@@ -1191,7 +1252,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 			for usedPorts[uint16(portCursor)] || !IsPortAvailable(c.MultiPort.Address, uint16(portCursor)) {
 				portCursor++
 				if portCursor > 65535 {
-					return fmt.Errorf("no available ports found starting from %d", c.MultiPort.BasePort)
+					return fmt.Errorf("从 %d 开始没有可用端口", c.MultiPort.BasePort)
 				}
 			}
 			c.Nodes[idx].Port = uint16(portCursor)
@@ -1212,7 +1273,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 		}
 	}
 	if c.Mode == "multi-port" || c.Mode == "hybrid" {
-		log.Printf("✅ Port normalization complete: preserved=%d, new=%d, duplicate_identity_conflicts=%d, total_nodes=%d",
+		log.Printf("✅ 端口规范化完成：保留=%d，新分配=%d，重复标识冲突=%d，节点总数=%d",
 			preservedPorts, newPorts, duplicatePortHits, len(c.Nodes))
 	}
 
@@ -1246,22 +1307,22 @@ func (c *Config) normalizeSticky() error {
 		return nil
 	}
 	if c.Mode != "pool" && c.Mode != "hybrid" {
-		log.Printf("⚠️  sticky.enabled is set but mode is %q; sticky only applies to pool/hybrid mode, disabling", c.Mode)
+		log.Printf("⚠️  已设置 sticky.enabled，但当前模式为 %q；粘性代理仅适用于 pool/hybrid 模式，已自动关闭", c.Mode)
 		c.Sticky.Enabled = false
 		return nil
 	}
 	if c.Sticky.Port == 0 {
 		if c.Listener.Port >= 65535 {
-			return fmt.Errorf("cannot auto-assign sticky.port (listener.port is %d); set sticky.port explicitly", c.Listener.Port)
+			return fmt.Errorf("无法自动分配 sticky.port（监听端口为 %d），请显式设置 sticky.port", c.Listener.Port)
 		}
 		c.Sticky.Port = c.Listener.Port + 1
 	}
 	if c.Sticky.Port == c.Listener.Port {
-		return fmt.Errorf("sticky.port %d conflicts with listener.port", c.Sticky.Port)
+		return fmt.Errorf("sticky.port %d 与监听端口冲突", c.Sticky.Port)
 	}
 	for idx := range c.Nodes {
 		if c.Nodes[idx].Port == c.Sticky.Port {
-			return fmt.Errorf("sticky.port %d conflicts with node %q port", c.Sticky.Port, c.Nodes[idx].Name)
+			return fmt.Errorf("sticky.port %d 与节点 %q 的端口冲突", c.Sticky.Port, c.Nodes[idx].Name)
 		}
 	}
 	return nil
@@ -1503,7 +1564,7 @@ func minDuration(a, b time.Duration) time.Duration {
 func RedactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "<invalid-url>"
+		return "<无效地址>"
 	}
 	u.User = nil
 	if u.Path != "" && u.Path != "/" {
@@ -1559,6 +1620,38 @@ func dedupeNodesByKey(nodes []NodeConfig) ([]NodeConfig, int) {
 		out = append(out, node)
 	}
 	return out, deduped
+}
+
+// dedupeNodesPreferSubscription removes duplicate stable endpoints while
+// allowing a fetched subscription definition to take ownership of a matching
+// inline/file definition. This prevents previously imported subscription nodes
+// from being rendered as manual after a subscription is added.
+func dedupeNodesPreferSubscription(nodes []NodeConfig) []NodeConfig {
+	if len(nodes) < 2 {
+		return nodes
+	}
+
+	seen := make(map[string]int, len(nodes))
+	out := make([]NodeConfig, 0, len(nodes))
+	for _, node := range nodes {
+		node.URI = strings.TrimSpace(node.URI)
+		if node.URI == "" {
+			continue
+		}
+		key := node.NodeKey()
+		if key == "" {
+			key = node.URI
+		}
+		if previous, ok := seen[key]; ok {
+			if node.Source == NodeSourceSubscription && out[previous].Source != NodeSourceSubscription {
+				out[previous] = node
+			}
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, node)
+	}
+	return out
 }
 
 // FetchSubscriptionNodes fetches subscription URLs concurrently, parses all
@@ -1633,7 +1726,7 @@ func FetchSubscriptionNodes(ctx context.Context, urls []string, opts Subscriptio
 			stats.Failed++
 			stats.LastError = res.err
 			if opts.Loggerf != nil {
-				opts.Loggerf("⚠️ Failed to load subscription %s: %v (skipping)", RedactURL(res.url), res.err)
+				opts.Loggerf("⚠️ 加载订阅 %s 失败: %v（已跳过）", RedactURL(res.url), res.err)
 			}
 			continue
 		}
@@ -1656,7 +1749,7 @@ func FetchSubscriptionNodes(ctx context.Context, urls []string, opts Subscriptio
 			stats.Failed += missing
 			stats.LastError = err
 			if opts.Loggerf != nil {
-				opts.Loggerf("⚠️ Subscription fetch context ended before %d subscription URLs were processed: %v", missing, err)
+				opts.Loggerf("⚠️ 订阅获取上下文已结束，仍有 %d 个订阅地址未处理: %v", missing, err)
 			}
 		}
 	}
@@ -1681,20 +1774,20 @@ func fetchSubscriptionWithClient(ctx context.Context, client *http.Client, subUR
 	}
 	parsed, err := url.Parse(subURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse subscription url: %w", err)
+		return nil, fmt.Errorf("解析订阅 URL 失败: %w", err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported subscription scheme %q", parsed.Scheme)
+		return nil, fmt.Errorf("不支持的订阅协议 %q", parsed.Scheme)
 	}
 	if parsed.Host == "" {
-		return nil, errors.New("subscription URL is missing host")
+		return nil, errors.New("订阅 URL 缺少主机地址")
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, "GET", subURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 
 	ApplySubscriptionRequestHeaders(req)
@@ -1706,16 +1799,16 @@ func fetchSubscriptionWithClient(ctx context.Context, client *http.Client, subUR
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("subscription returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("订阅返回状态码 %d", resp.StatusCode)
 	}
 
 	limitedReader := io.LimitReader(resp.Body, maxSubscriptionBodySize+1)
 	body, err := io.ReadAll(limitedReader)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 	if len(body) > maxSubscriptionBodySize {
-		return nil, fmt.Errorf("subscription response exceeds %d bytes", maxSubscriptionBodySize)
+		return nil, fmt.Errorf("订阅响应超过 %d 字节", maxSubscriptionBodySize)
 	}
 
 	content := string(body)
@@ -1738,7 +1831,7 @@ func redactSubscriptionError(op, rawURL string, err error) error {
 
 // parseSubscriptionContent tries to parse subscription content in various formats (optimized)
 func parseSubscriptionContent(content string) ([]NodeConfig, error) {
-	content = strings.TrimSpace(content)
+	content = strings.TrimSpace(strings.TrimPrefix(content, "\uFEFF"))
 	var (
 		nodes []NodeConfig
 		err   error
@@ -1758,22 +1851,12 @@ func parseSubscriptionContent(content string) ([]NodeConfig, error) {
 		return filterSubscriptionInfoNodes(nodes), nil
 	}
 
-	// Check if it's base64 encoded (common for v2ray subscriptions)
+	// Check if it's base64 encoded (common for v2ray subscriptions). Providers
+	// use both standard and URL-safe alphabets, with or without padding.
 	if isBase64(content) {
-		decoded, err := base64.StdEncoding.DecodeString(content)
-		if err != nil {
-			// Try URL-safe base64
-			decoded, err = base64.RawStdEncoding.DecodeString(content)
-			if err != nil {
-				// Not base64, try as plain text
-				nodes, err = parseNodesFromContent(content)
-				if err != nil {
-					return nil, err
-				}
-				return filterSubscriptionInfoNodes(nodes), nil
-			}
+		if decoded, decodeErr := decodeSubscriptionBase64(content); decodeErr == nil {
+			content = string(decoded)
 		}
-		content = string(decoded)
 	}
 
 	// Parse as plain text (one URI per line)
@@ -1804,7 +1887,7 @@ func filterSubscriptionInfoNodes(nodes []NodeConfig) []NodeConfig {
 	}
 
 	if removed := len(nodes) - len(filtered); removed > 0 {
-		log.Printf("[subscription] filtered %d traffic/account information nodes", removed)
+		log.Printf("[订阅] 已过滤 %d 个流量或账号信息节点", removed)
 	}
 	return filtered
 }
@@ -1959,32 +2042,65 @@ func parseNodesFromContent(content string) ([]NodeConfig, error) {
 
 // isBase64 checks if a string looks like base64 encoded content (optimized version)
 func isBase64(s string) bool {
-	// Remove whitespace
-	s = strings.TrimSpace(s)
+	// Remove whitespace introduced by line-wrapped subscription responses.
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(s))
 	if len(s) == 0 {
 		return false
 	}
-
-	// Remove newlines for checking
-	s = strings.ReplaceAll(s, "\n", "")
-	s = strings.ReplaceAll(s, "\r", "")
 
 	// Quick check: if it contains proxy URI schemes, it's not base64
 	if strings.Contains(s, "://") {
 		return false
 	}
 
-	// Check character set - base64 only contains A-Za-z0-9+/=
+	// Check character set - accept standard and URL-safe base64 alphabets.
 	// This is much faster than trying to decode
+	padding := false
 	for _, c := range s {
+		if c == '=' {
+			padding = true
+			continue
+		}
+		if padding {
+			return false
+		}
 		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-			(c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') {
+			(c >= '0' && c <= '9') || c == '+' || c == '/' || c == '-' || c == '_') {
 			return false
 		}
 	}
 
-	// Length must be multiple of 4 (with padding)
-	return len(s)%4 == 0
+	// A four-byte quantum cannot have exactly one trailing byte.
+	return len(s)%4 != 1
+}
+
+func decodeSubscriptionBase64(value string) ([]byte, error) {
+	compact := strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	encodings := []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	}
+	var lastErr error
+	for _, encoding := range encodings {
+		decoded, err := encoding.DecodeString(compact)
+		if err == nil {
+			return decoded, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 // IsProxyURI checks if a string is a valid proxy URI
@@ -2011,11 +2127,11 @@ func (fi *flexInt) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 	var strVal string
 	if err := unmarshal(&strVal); err != nil {
-		return fmt.Errorf("cannot unmarshal port: expected int or string")
+		return fmt.Errorf("无法解析端口：应为整数或字符串")
 	}
 	parsed, err := strconv.Atoi(strVal)
 	if err != nil {
-		return fmt.Errorf("cannot parse port %q as int: %w", strVal, err)
+		return fmt.Errorf("无法将端口 %q 解析为整数: %w", strVal, err)
 	}
 	*fi = flexInt(parsed)
 	return nil
@@ -2093,7 +2209,7 @@ type clashRealityOptions struct {
 func parseClashYAML(content string) ([]NodeConfig, error) {
 	var clash clashConfig
 	if err := yaml.Unmarshal([]byte(content), &clash); err != nil {
-		return nil, fmt.Errorf("parse clash yaml: %w", err)
+		return nil, fmt.Errorf("解析 Clash YAML 失败: %w", err)
 	}
 
 	var nodes []NodeConfig
@@ -2102,13 +2218,13 @@ func parseClashYAML(content string) ([]NodeConfig, error) {
 		var proxy clashProxy
 		if err := raw.Decode(&proxy); err != nil {
 			skipped++
-			log.Printf("[subscription] WARN: skip proxy #%d (decode error): %v", i, err)
+			log.Printf("[订阅] 警告：跳过代理 #%d（解码失败）: %v", i, err)
 			continue
 		}
 		uri := convertClashProxyToURI(proxy)
 		if uri == "" {
 			skipped++
-			log.Printf("[subscription] WARN: skip proxy %q (unsupported type %q)", proxy.Name, proxy.Type)
+			log.Printf("[订阅] 警告：跳过代理 %q（不支持的类型 %q）", proxy.Name, proxy.Type)
 			continue
 		}
 		nodes = append(nodes, NodeConfig{
@@ -2117,7 +2233,7 @@ func parseClashYAML(content string) ([]NodeConfig, error) {
 		})
 	}
 	if skipped > 0 {
-		log.Printf("[subscription] parsed %d nodes, skipped %d malformed/unsupported entries", len(nodes), skipped)
+		log.Printf("[订阅] 已解析 %d 个节点，跳过 %d 个格式错误或不支持的条目", len(nodes), skipped)
 	}
 
 	return nodes, nil
@@ -2595,21 +2711,21 @@ func writeNodesToFile(path string, nodes []NodeConfig) error {
 // Config.yaml structure (subscriptions, nodes_file) is preserved.
 func (c *Config) SaveNodes() error {
 	if c == nil {
-		return errors.New("config is nil")
+		return errors.New("配置不能为空")
 	}
 	if c.sourcesOnly {
 		return c.saveSharedNodes()
 	}
 	if c.sourcesShared {
-		return errors.New("node sources are shared and must be edited through the global catalog")
+		return errors.New("节点源由共享目录管理，请通过全局目录编辑")
 	}
 	if c.filePath == "" {
-		return errors.New("config file path is unknown")
+		return errors.New("配置文件路径未知")
 	}
 
 	// Check if config file is writable before attempting save
 	if err := checkFileWritable(c.filePath); err != nil {
-		return fmt.Errorf("config file not writable: %w (check file permissions and Docker volume mounts)", err)
+		return fmt.Errorf("配置文件不可写: %w（请检查文件权限和 Docker 卷挂载）", err)
 	}
 
 	// Separate nodes by source
@@ -2644,12 +2760,12 @@ func (c *Config) SaveNodes() error {
 		}
 		// Check writability before writing
 		if err := checkFileWritable(nodesFilePath); err != nil {
-			return fmt.Errorf("nodes file not writable: %w (check file permissions and Docker volume mounts)", err)
+			return fmt.Errorf("节点文件不可写: %w（请检查文件权限和 Docker 卷挂载）", err)
 		}
 		if err := writeNodesToFile(nodesFilePath, fileNodes); err != nil {
-			return fmt.Errorf("write nodes file %q: %w", nodesFilePath, err)
+			return fmt.Errorf("写入节点文件 %q 失败: %w", nodesFilePath, err)
 		}
-		log.Printf("✅ Saved %d nodes to %s", len(fileNodes), nodesFilePath)
+		log.Printf("✅ 已保存 %d 个节点到 %s", len(fileNodes), nodesFilePath)
 	}
 
 	// Update config.yaml nodes array (including clearing it when all inline nodes are deleted)
@@ -2657,24 +2773,24 @@ func (c *Config) SaveNodes() error {
 		// Read original config to preserve structure
 		data, err := os.ReadFile(c.filePath)
 		if err != nil {
-			return fmt.Errorf("read config: %w", err)
+			return fmt.Errorf("读取配置失败: %w", err)
 		}
 		var saveCfg Config
 		if err := yaml.Unmarshal(data, &saveCfg); err != nil {
-			return fmt.Errorf("decode config: %w", err)
+			return fmt.Errorf("解析配置失败: %w", err)
 		}
 		// Update only the inline nodes
 		saveCfg.Nodes = inlineNodes
 
 		newData, err := yaml.Marshal(&saveCfg)
 		if err != nil {
-			return fmt.Errorf("encode config: %w", err)
+			return fmt.Errorf("编码配置失败: %w", err)
 		}
 		// Use file locking for safe concurrent writes
 		if err := writeFileWithLock(c.filePath, newData, 0o644); err != nil {
-			return fmt.Errorf("write config: %w", err)
+			return fmt.Errorf("写入配置失败: %w", err)
 		}
-		log.Printf("✅ Saved %d inline nodes to %s", len(inlineNodes), c.filePath)
+		log.Printf("✅ 已保存 %d 个内联节点到 %s", len(inlineNodes), c.filePath)
 	}
 
 	return nil
@@ -2689,10 +2805,10 @@ func (c *Config) Save() error {
 // SaveSettings persists runtime settings without touching nodes.txt.
 func (c *Config) SaveSettings() error {
 	if c == nil {
-		return errors.New("config is nil")
+		return errors.New("配置不能为空")
 	}
 	if c.filePath == "" {
-		return errors.New("config file path is unknown")
+		return errors.New("配置文件路径未知")
 	}
 	if c.sourcesOnly {
 		return c.saveSharedSettings()
@@ -2700,11 +2816,11 @@ func (c *Config) SaveSettings() error {
 
 	data, err := os.ReadFile(c.filePath)
 	if err != nil {
-		return fmt.Errorf("read config: %w", err)
+		return fmt.Errorf("读取配置失败: %w", err)
 	}
 	var saveCfg Config
 	if err := yaml.Unmarshal(data, &saveCfg); err != nil {
-		return fmt.Errorf("decode config: %w", err)
+		return fmt.Errorf("解析配置失败: %w", err)
 	}
 
 	saveCfg.ExternalIP = c.ExternalIP
@@ -2716,6 +2832,8 @@ func (c *Config) SaveSettings() error {
 		saveCfg.DisabledSubscriptions = c.DisabledSubscriptions
 	}
 	saveCfg.SelectedSubscriptions = c.SelectedSubscriptions
+	saveCfg.ExcludedSubscriptions = c.ExcludedSubscriptions
+	saveCfg.ExcludedNodes = c.ExcludedNodes
 	saveCfg.SubscriptionRefresh = c.SubscriptionRefresh
 	saveCfg.Mode = c.Mode
 	saveCfg.Listener = c.Listener
@@ -2732,12 +2850,12 @@ func (c *Config) SaveSettings() error {
 
 	newData, err := yaml.Marshal(&saveCfg)
 	if err != nil {
-		return fmt.Errorf("encode config: %w", err)
+		return fmt.Errorf("编码配置失败: %w", err)
 	}
 
 	// Use file locking for safe concurrent writes
 	if err := writeFileWithLock(c.filePath, newData, 0o644); err != nil {
-		return fmt.Errorf("write config: %w", err)
+		return fmt.Errorf("写入配置失败: %w", err)
 	}
 	return nil
 }
@@ -2751,35 +2869,35 @@ type sharedSourcesDocument struct {
 
 func (c *Config) loadSharedDocument() (sharedSourcesDocument, error) {
 	if c == nil || c.filePath == "" {
-		return sharedSourcesDocument{}, errors.New("shared config file path is unknown")
+		return sharedSourcesDocument{}, errors.New("共享配置文件路径未知")
 	}
 	data, err := os.ReadFile(c.filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return sharedSourcesDocument{}, nil
 		}
-		return sharedSourcesDocument{}, fmt.Errorf("read shared config: %w", err)
+		return sharedSourcesDocument{}, fmt.Errorf("读取共享配置失败: %w", err)
 	}
 	var doc sharedSourcesDocument
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return sharedSourcesDocument{}, fmt.Errorf("decode shared config: %w", err)
+		return sharedSourcesDocument{}, fmt.Errorf("解析共享配置失败: %w", err)
 	}
 	return doc, nil
 }
 
 func (c *Config) saveSharedDocument(doc sharedSourcesDocument) error {
 	if c == nil || c.filePath == "" {
-		return errors.New("shared config file path is unknown")
+		return errors.New("共享配置文件路径未知")
 	}
 	if doc.NodesFile == "" && c.NodesFile != "" {
 		doc.NodesFile = relativeOrAbsolute(filepath.Dir(c.filePath), c.NodesFile)
 	}
 	data, err := yaml.Marshal(&doc)
 	if err != nil {
-		return fmt.Errorf("encode shared config: %w", err)
+		return fmt.Errorf("编码共享配置失败: %w", err)
 	}
 	if err := writeFileWithLock(c.filePath, data, 0o644); err != nil {
-		return fmt.Errorf("write shared config: %w", err)
+		return fmt.Errorf("写入共享配置失败: %w", err)
 	}
 	return nil
 }
@@ -2829,7 +2947,7 @@ func (c *Config) saveSharedNodes() error {
 			nodesPath = filepath.Join(filepath.Dir(c.filePath), "nodes.txt")
 		}
 		if err := writeNodesToFile(nodesPath, fileNodes); err != nil {
-			return fmt.Errorf("write shared nodes file: %w", err)
+			return fmt.Errorf("写入共享节点文件失败: %w", err)
 		}
 		doc.NodesFile = relativeOrAbsolute(filepath.Dir(c.filePath), nodesPath)
 	}
@@ -2853,7 +2971,7 @@ func checkFileWritable(path string) error {
 	// Ensure parent directory exists
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create directory %q: %w", dir, err)
+		return fmt.Errorf("创建目录 %q 失败: %w", dir, err)
 	}
 
 	// Check if file exists
@@ -2861,26 +2979,26 @@ func checkFileWritable(path string) error {
 	if err == nil {
 		// File exists, check if writable
 		if info.Mode().Perm()&0o200 == 0 {
-			return fmt.Errorf("file %q is read-only (mode: %s)", path, info.Mode())
+			return fmt.Errorf("文件 %q 为只读（权限：%s）", path, info.Mode())
 		}
 		// Try to open for writing
 		f, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err != nil {
-			return fmt.Errorf("cannot open for writing: %w", err)
+			return fmt.Errorf("无法打开文件进行写入: %w", err)
 		}
 		f.Close()
 		return nil
 	}
 
 	if !os.IsNotExist(err) {
-		return fmt.Errorf("stat file: %w", err)
+		return fmt.Errorf("检查文件状态失败: %w", err)
 	}
 
 	// File doesn't exist, check if directory is writable
 	testFile := filepath.Join(dir, ".write_test")
 	f, err := os.Create(testFile)
 	if err != nil {
-		return fmt.Errorf("directory %q is not writable: %w", dir, err)
+		return fmt.Errorf("目录 %q 不可写: %w", dir, err)
 	}
 	f.Close()
 	os.Remove(testFile)
@@ -2891,24 +3009,24 @@ func checkFileWritable(path string) error {
 func writeFileWithLock(path string, data []byte, perm os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
-		return fmt.Errorf("open file: %w", err)
+		return fmt.Errorf("打开文件失败: %w", err)
 	}
 	defer f.Close()
 
 	// Acquire exclusive lock
 	if err := lockFile(f); err != nil {
-		return fmt.Errorf("lock file: %w", err)
+		return fmt.Errorf("锁定文件失败: %w", err)
 	}
 	defer unlockFile(f)
 
 	// Write data
 	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("write file: %w", err)
+		return fmt.Errorf("写入文件失败: %w", err)
 	}
 
 	// Ensure data is written to disk
 	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync file: %w", err)
+		return fmt.Errorf("同步文件失败: %w", err)
 	}
 
 	return nil

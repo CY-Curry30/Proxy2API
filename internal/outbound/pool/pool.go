@@ -114,11 +114,11 @@ type poolOutbound struct {
 
 func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger, tag string, options Options) (adapter.Outbound, error) {
 	if len(options.Members) == 0 {
-		return nil, E.New("pool requires at least one member")
+		return nil, E.New("节点池至少需要一个成员")
 	}
 	manager := service.FromContext[adapter.OutboundManager](ctx)
 	if manager == nil {
-		return nil, E.New("missing outbound manager in context")
+		return nil, E.New("上下文中缺少出站管理器")
 	}
 	monitorMgr := monitor.FromContext(ctx)
 	sharedStates := sharedStateStoreFromContext(ctx)
@@ -148,7 +148,7 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 	// Register nodes immediately if monitor is available
 	if monitorMgr != nil {
 		if memberCount > 1 {
-			logger.Info("registering ", memberCount, " nodes to monitor")
+			logger.Info("正在向监控器注册 ", memberCount, " 个节点")
 		}
 		registeredCount := 0
 		for _, memberTag := range normalized.Members {
@@ -185,14 +185,14 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 				}
 				state.restore(entry)
 			} else {
-				logger.Warn("failed to register node: ", memberTag)
+				logger.Warn("注册节点失败: ", memberTag)
 			}
 		}
 		if memberCount > 1 {
-			logger.Info("registered ", registeredCount, " nodes to monitor")
+			logger.Info("已向监控器注册 ", registeredCount, " 个节点")
 		}
 	} else {
-		logger.Warn("monitor manager is nil, skipping node registration")
+		logger.Warn("监控管理器为空，已跳过节点注册")
 	}
 
 	return p, nil
@@ -252,7 +252,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 	for _, tag := range p.options.Members {
 		detour, loaded := p.manager.Outbound(tag)
 		if !loaded {
-			return E.New("pool member not found: ", tag)
+			return E.New("节点池成员不存在: ", tag)
 		}
 
 		// Acquire shared state (creates if not exists, reuses if already created)
@@ -299,7 +299,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 		members = append(members, member)
 	}
 	p.members = members
-	p.logger.Info("pool initialized with ", len(members), " members")
+	p.logger.Info("节点池初始化完成，共 ", len(members), " 个成员")
 
 	return nil
 }
@@ -317,7 +317,7 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 		member, err := p.pickMemberFiltered(network, tried, stickyKey)
 		if err != nil {
 			if lastErr != nil {
-				return nil, fmt.Errorf("%w (after %d attempt(s); last: %v)", err, attempt-1, lastErr)
+				return nil, fmt.Errorf("%w（已尝试 %d 次；上次错误：%v）", err, attempt-1, lastErr)
 			}
 			return nil, err
 		}
@@ -331,7 +331,7 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 				tried[member.tag] = true
 			}
 			if attempt < maxAttempts {
-				p.logger.Warn("dial via ", member.tag, " failed (attempt ", attempt, "/", maxAttempts, "), retrying: ", dialErr)
+				p.logger.Warn("通过 ", member.tag, " 拨号失败（第 ", attempt, "/", maxAttempts, " 次），正在重试: ", dialErr)
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -340,15 +340,15 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 			break
 		}
 		if attempt > 1 {
-			p.logger.Info("dial succeeded via ", member.tag, " after ", attempt, " attempts")
+			p.logger.Info("通过 ", member.tag, " 拨号成功，共尝试 ", attempt, " 次")
 		}
 		p.recordSuccess(member)
 		return p.wrapConn(conn, member), nil
 	}
 	if lastErr == nil {
-		lastErr = E.New("no healthy proxy available")
+		lastErr = E.New("没有可用的健康代理")
 	}
-	return nil, fmt.Errorf("dial failed after %d attempts: %w", maxAttempts, lastErr)
+	return nil, fmt.Errorf("拨号在尝试 %d 次后仍失败: %w", maxAttempts, lastErr)
 }
 
 func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -364,7 +364,7 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 		member, err := p.pickMemberFiltered(N.NetworkUDP, tried, stickyKey)
 		if err != nil {
 			if lastErr != nil {
-				return nil, fmt.Errorf("%w (after %d attempt(s); last: %v)", err, attempt-1, lastErr)
+				return nil, fmt.Errorf("%w（已尝试 %d 次；上次错误：%v）", err, attempt-1, lastErr)
 			}
 			return nil, err
 		}
@@ -378,7 +378,7 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 				tried[member.tag] = true
 			}
 			if attempt < maxAttempts {
-				p.logger.Warn("listen-packet via ", member.tag, " failed (attempt ", attempt, "/", maxAttempts, "), retrying: ", listenErr)
+				p.logger.Warn("通过 ", member.tag, " 监听数据包失败（第 ", attempt, "/", maxAttempts, " 次），正在重试: ", listenErr)
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -387,15 +387,15 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 			break
 		}
 		if attempt > 1 {
-			p.logger.Info("listen-packet succeeded via ", member.tag, " after ", attempt, " attempts")
+			p.logger.Info("通过 ", member.tag, " 监听数据包成功，共尝试 ", attempt, " 次")
 		}
 		p.recordSuccess(member)
 		return p.wrapPacketConn(conn, member), nil
 	}
 	if lastErr == nil {
-		lastErr = E.New("no healthy proxy available")
+		lastErr = E.New("没有可用的健康代理")
 	}
-	return nil, fmt.Errorf("listen-packet failed after %d attempts: %w", maxAttempts, lastErr)
+	return nil, fmt.Errorf("监听数据包在尝试 %d 次后仍失败: %w", maxAttempts, lastErr)
 }
 
 // maxAttempts returns the configured retry budget (>=1).
@@ -438,13 +438,13 @@ func (p *poolOutbound) pickMemberFiltered(network string, tried map[string]bool,
 				}
 			}
 			p.putCandidateBuffer(candidates)
-			return nil, E.New("selected sticky proxy node is unavailable: ", selectedTag)
+			return nil, E.New("选定的粘性代理节点不可用: ", selectedTag)
 		}
 	}
 
 	if len(candidates) == 0 {
 		p.putCandidateBuffer(candidates)
-		return nil, E.New("no healthy proxy available")
+		return nil, E.New("没有可用的健康代理")
 	}
 
 	// Filter out members already tried in this request.
@@ -484,7 +484,7 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 
 	if len(candidates) == 0 {
 		p.putCandidateBuffer(candidates)
-		return nil, E.New("no healthy proxy available")
+		return nil, E.New("没有可用的健康代理")
 	}
 
 	member := p.selectMember(candidates, "")
@@ -501,7 +501,7 @@ func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf
 			// Log blacklisted nodes for debugging
 			remaining := member.shared.blacklistRemaining(now)
 			if remaining > 0 {
-				p.logger.Debug("skipping blacklisted node: ", member.tag, ", remaining: ", remaining.Round(time.Second))
+				p.logger.Debug("跳过已拉黑节点：", member.tag, "，剩余时间：", remaining.Round(time.Second))
 			}
 			continue
 		}
@@ -638,7 +638,7 @@ func (p *poolOutbound) selectByMode(candidates []*memberState) *memberState {
 
 func (p *poolOutbound) recordFailure(member *memberState, cause error) {
 	if member.shared == nil {
-		p.logger.Warn("proxy ", member.tag, " failure (no shared state): ", cause)
+		p.logger.Warn("代理 ", member.tag, " 失败（无共享状态）: ", cause)
 		return
 	}
 	failures, blacklisted, until, transient := member.shared.recordFailure(cause, p.options.FailureThreshold, p.options.BlacklistDuration)
@@ -646,15 +646,15 @@ func (p *poolOutbound) recordFailure(member *memberState, cause error) {
 	case transient:
 		// Transient (e.g. 429 rate-limit): short cooldown, not counted toward the
 		// 24h blacklist. The node is retried automatically once the cooldown ends.
-		p.logger.Warn("proxy ", member.tag, " transient failure, cooling down until ", until.Format("15:04:05"), ": ", cause)
-		log.Printf("[pool] %s transient failure, cooldown until %s: %v", member.tag, until.Format("15:04:05"), cause)
+		p.logger.Warn("代理 ", member.tag, " 暂时失败，冷却至 ", until.Format("15:04:05"), ": ", cause)
+		log.Printf("[节点池] %s 暂时失败，冷却至 %s: %v", member.tag, until.Format("15:04:05"), cause)
 	case blacklisted:
-		p.logger.Warn("proxy ", member.tag, " blacklisted for ", p.options.BlacklistDuration, ": ", cause)
-		log.Printf("⚠️  [pool] %s BLACKLISTED for %s (until %s): %v", member.tag, p.options.BlacklistDuration, until.Format("15:04:05"), cause)
-		log.Printf("    To release immediately, use WebUI or: POST /api/nodes/%s/release", member.tag)
+		p.logger.Warn("代理 ", member.tag, " 已拉黑 ", p.options.BlacklistDuration, ": ", cause)
+		log.Printf("⚠️  [节点池] %s 已拉黑 %s（至 %s）: %v", member.tag, p.options.BlacklistDuration, until.Format("15:04:05"), cause)
+		log.Printf("    如需立即解除，请使用网页管理界面或请求：POST /api/nodes/%s/release", member.tag)
 	default:
-		p.logger.Warn("proxy ", member.tag, " failure ", failures, "/", p.options.FailureThreshold, ": ", cause)
-		log.Printf("[pool] %s failure %d/%d: %v", member.tag, failures, p.options.FailureThreshold, cause)
+		p.logger.Warn("代理 ", member.tag, " 失败 ", failures, "/", p.options.FailureThreshold, ": ", cause)
+		log.Printf("[节点池] %s 失败 %d/%d: %v", member.tag, failures, p.options.FailureThreshold, cause)
 	}
 }
 
@@ -704,7 +704,7 @@ func upgradeProbeConn(ctx context.Context, conn net.Conn, host string, useTLS, t
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		// Return the original connection so the caller's deferred Close keeps
 		// working; the failed handshake did not take over its lifetime.
-		return conn, fmt.Errorf("tls handshake: %w", err)
+		return conn, fmt.Errorf("TLS 握手失败: %w", err)
 	}
 	return tlsConn, nil
 }
@@ -721,7 +721,7 @@ func httpProbe(conn net.Conn, host, path string, timeout time.Duration) (time.Du
 
 	// Send HTTP request
 	if _, err := conn.Write([]byte(request)); err != nil {
-		return 0, fmt.Errorf("write request: %w", err)
+		return 0, fmt.Errorf("写入请求失败: %w", err)
 	}
 
 	// Try to set read deadline (ignore errors for connections that don't support it)
@@ -730,7 +730,7 @@ func httpProbe(conn net.Conn, host, path string, timeout time.Duration) (time.Du
 	req, _ := http.NewRequest(http.MethodGet, path, nil)
 	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
 	if err != nil {
-		return 0, fmt.Errorf("read response: %w", err)
+		return 0, fmt.Errorf("读取响应失败: %w", err)
 	}
 	defer resp.Body.Close()
 	return time.Since(start), nil
@@ -766,9 +766,9 @@ func (p *poolOutbound) probeLocation(ctx context.Context, member *memberState, t
 		}
 	}
 	if lastErr == nil {
-		lastErr = errors.New("trace request failed")
+		lastErr = errors.New("Trace 请求失败")
 	}
-	traceErr := fmt.Errorf("trace request failed after %d attempts: %w", attempts, lastErr)
+	traceErr := fmt.Errorf("Trace 请求在尝试 %d 次后仍失败: %w", attempts, lastErr)
 	return monitor.ProbeResult{
 		TraceError:    traceErr.Error(),
 		TraceAttempts: attempts,
@@ -792,27 +792,27 @@ func (p *poolOutbound) probeLocationOnce(ctx context.Context, member *memberStat
 	_ = conn.SetWriteDeadline(time.Now().Add(attemptTimeout))
 	request := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Proxy2API-monitor\r\n\r\n", probeLocationPath, probeLocationHost)
 	if _, err := conn.Write([]byte(request)); err != nil {
-		return monitor.ProbeResult{}, fmt.Errorf("write trace request: %w", err)
+		return monitor.ProbeResult{}, fmt.Errorf("写入 Trace 请求失败: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(attemptTimeout))
 
 	req, _ := http.NewRequest(http.MethodGet, probeLocationPath, nil)
 	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
 	if err != nil {
-		return monitor.ProbeResult{}, fmt.Errorf("read trace response: %w", err)
+		return monitor.ProbeResult{}, fmt.Errorf("读取 Trace 响应失败: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return monitor.ProbeResult{}, fmt.Errorf("trace endpoint returned %s", resp.Status)
+		return monitor.ProbeResult{}, fmt.Errorf("Trace 接口返回状态 %s", resp.Status)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return monitor.ProbeResult{}, fmt.Errorf("read trace body: %w", err)
+		return monitor.ProbeResult{}, fmt.Errorf("读取 Trace 响应内容失败: %w", err)
 	}
 	ip, country := parseCloudflareTrace(body)
 	if ip == "" || country == "" {
-		return monitor.ProbeResult{}, errors.New("trace response does not contain valid ip and loc")
+		return monitor.ProbeResult{}, errors.New("Trace 响应中没有有效的 IP 和地区信息")
 	}
 	return monitor.ProbeResult{
 		IP:      ip,
@@ -898,7 +898,7 @@ func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, des
 	requestCancel()
 	if connectivityErr != nil {
 		result.ConnectivityError = connectivityErr.Error()
-		probeErrors = append(probeErrors, fmt.Errorf("generate_204 failed: %w", connectivityErr))
+		probeErrors = append(probeErrors, fmt.Errorf("generate_204 探测失败: %w", connectivityErr))
 	} else {
 		result.ConnectivityOK = true
 		result.Latency = duration
@@ -916,7 +916,7 @@ func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, des
 		if result.TraceError == "" {
 			result.TraceError = locationErr.Error()
 		}
-		probeErrors = append(probeErrors, fmt.Errorf("trace failed: %w", locationErr))
+		probeErrors = append(probeErrors, fmt.Errorf("Trace 探测失败: %w", locationErr))
 	} else {
 		result.TraceOK = true
 		result.IP = location.IP
@@ -960,7 +960,7 @@ func dialProbeTarget(ctx context.Context, member *memberState, destination M.Soc
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return nil, fmt.Errorf("proxy handshake failed after retry: %w", lastErr)
+	return nil, fmt.Errorf("重试后代理握手仍失败: %w", lastErr)
 }
 
 func isRetryableProbeHandshakeError(err error) bool {
@@ -978,7 +978,7 @@ func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Conte
 	return func(ctx context.Context, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
 		destination, host, path, useTLS, tlsInsecure, ok := p.monitor.DestinationForProbe()
 		if !ok {
-			return monitor.ProbeResult{}, E.New("probe target is not configured")
+			return monitor.ProbeResult{}, E.New("未配置探测目标")
 		}
 		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure, report)
 	}
@@ -992,7 +992,7 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context, 
 	return func(ctx context.Context, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
 		destination, host, path, useTLS, tlsInsecure, ok := p.monitor.DestinationForProbe()
 		if !ok {
-			return monitor.ProbeResult{}, E.New("probe target is not configured")
+			return monitor.ProbeResult{}, E.New("未配置探测目标")
 		}
 		// Ensure members are initialized
 		p.mu.Lock()
@@ -1014,7 +1014,7 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context, 
 		p.mu.Unlock()
 
 		if member == nil {
-			return monitor.ProbeResult{}, E.New("member not found: ", tag)
+			return monitor.ProbeResult{}, E.New("节点池成员不存在: ", tag)
 		}
 		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure, report)
 	}

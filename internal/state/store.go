@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -17,7 +19,7 @@ import (
 
 const (
 	FileName         = ".proxy2api-state.db"
-	currentVersion   = 1
+	currentVersion   = 2
 	defaultFlush     = time.Second
 	defaultRetention = 30 * 24 * time.Hour
 )
@@ -26,6 +28,7 @@ var (
 	bucketMeta          = []byte("meta")
 	bucketNodes         = []byte("nodes")
 	bucketSubscriptions = []byte("subscriptions")
+	bucketTraffic       = []byte("traffic_daily")
 	keyVersion          = []byte("version")
 	keyCatalogCommitted = []byte("catalog_committed_at")
 	keyCatalogSubs      = []byte("catalog_subscriptions")
@@ -100,6 +103,22 @@ type SubscriptionState struct {
 	UpdatedAt    time.Time                   `json:"updated_at"`
 }
 
+type TrafficDay struct {
+	Date          string    `json:"date"`
+	UploadBytes   int64     `json:"upload_bytes"`
+	DownloadBytes int64     `json:"download_bytes"`
+	TotalBytes    int64     `json:"total_bytes"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type TrafficMonth struct {
+	Month         string       `json:"month"`
+	Days          []TrafficDay `json:"days"`
+	UploadBytes   int64        `json:"upload_bytes"`
+	DownloadBytes int64        `json:"download_bytes"`
+	TotalBytes    int64        `json:"total_bytes"`
+}
+
 type NodeDefinition struct {
 	ID              string `json:"id,omitempty"`
 	Name            string `json:"name"`
@@ -117,14 +136,15 @@ type Store struct {
 	flushEvery time.Duration
 	retention  time.Duration
 
-	writeMu      sync.Mutex
-	mu           sync.Mutex
-	pendingNodes map[string]NodeRecord
-	pendingSub   *SubscriptionState
-	wake         chan struct{}
-	stop         chan struct{}
-	done         chan struct{}
-	closeOnce    sync.Once
+	writeMu        sync.Mutex
+	mu             sync.Mutex
+	pendingNodes   map[string]NodeRecord
+	pendingSub     *SubscriptionState
+	pendingTraffic map[string]TrafficDay
+	wake           chan struct{}
+	stop           chan struct{}
+	done           chan struct{}
+	closeOnce      sync.Once
 }
 
 func NodeID(nodeKey string) string {
@@ -134,24 +154,25 @@ func NodeID(nodeKey string) string {
 
 func Open(configPath string) (*Store, error) {
 	if configPath == "" {
-		return nil, errors.New("state store requires a config path")
+		return nil, errors.New("状态存储缺少配置路径")
 	}
 	dir := filepath.Dir(configPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create state directory: %w", err)
+		return nil, fmt.Errorf("创建状态目录失败: %w", err)
 	}
 	db, err := bolt.Open(filepath.Join(dir, FileName), 0o600, &bolt.Options{Timeout: 2 * time.Second})
 	if err != nil {
-		return nil, fmt.Errorf("open state database: %w", err)
+		return nil, fmt.Errorf("打开状态数据库失败: %w", err)
 	}
 	s := &Store{
-		db:           db,
-		flushEvery:   defaultFlush,
-		retention:    defaultRetention,
-		pendingNodes: make(map[string]NodeRecord),
-		wake:         make(chan struct{}, 1),
-		stop:         make(chan struct{}),
-		done:         make(chan struct{}),
+		db:             db,
+		flushEvery:     defaultFlush,
+		retention:      defaultRetention,
+		pendingNodes:   make(map[string]NodeRecord),
+		pendingTraffic: make(map[string]TrafficDay),
+		wake:           make(chan struct{}, 1),
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 	if err := s.initialize(); err != nil {
 		_ = db.Close()
@@ -180,7 +201,7 @@ func LoadRecoverySnapshot(configPath string) (map[string]NodeRecord, Subscriptio
 	}
 	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true, Timeout: 2 * time.Second})
 	if err != nil {
-		return nil, subscriptions, false, false, nil, fmt.Errorf("open recovery state: %w", err)
+		return nil, subscriptions, false, false, nil, fmt.Errorf("打开恢复状态失败: %w", err)
 	}
 	defer db.Close()
 	foundSubscription := false
@@ -190,7 +211,7 @@ func LoadRecoverySnapshot(configPath string) (map[string]NodeRecord, Subscriptio
 			foundCatalog = bucket.Get(keyCatalogCommitted) != nil
 			if value := bucket.Get(keyCatalogSubs); value != nil {
 				if err := json.Unmarshal(value, &catalogSubscriptions); err != nil {
-					return fmt.Errorf("decode recovery catalog subscriptions: %w", err)
+					return fmt.Errorf("解析恢复目录中的订阅失败: %w", err)
 				}
 			}
 		}
@@ -198,7 +219,7 @@ func LoadRecoverySnapshot(configPath string) (map[string]NodeRecord, Subscriptio
 			if err := bucket.ForEach(func(key, value []byte) error {
 				var record NodeRecord
 				if err := json.Unmarshal(value, &record); err != nil {
-					return fmt.Errorf("decode recovery node %q: %w", key, err)
+					return fmt.Errorf("解析恢复节点 %q 失败: %w", key, err)
 				}
 				nodes[string(key)] = record
 				return nil
@@ -210,7 +231,7 @@ func LoadRecoverySnapshot(configPath string) (map[string]NodeRecord, Subscriptio
 			if value := bucket.Get(keyGlobal); value != nil {
 				foundSubscription = true
 				if err := json.Unmarshal(value, &subscriptions); err != nil {
-					return fmt.Errorf("decode recovery subscription state: %w", err)
+					return fmt.Errorf("解析恢复订阅状态失败: %w", err)
 				}
 			}
 		}
@@ -231,13 +252,16 @@ func (s *Store) initialize() error {
 		if _, err = tx.CreateBucketIfNotExists(bucketSubscriptions); err != nil {
 			return err
 		}
+		if _, err = tx.CreateBucketIfNotExists(bucketTraffic); err != nil {
+			return err
+		}
 		if existing := meta.Get(keyVersion); existing != nil {
 			var version int
 			if err := json.Unmarshal(existing, &version); err != nil {
-				return fmt.Errorf("decode state database version: %w", err)
+				return fmt.Errorf("解析状态数据库版本失败: %w", err)
 			}
 			if version > currentVersion {
-				return fmt.Errorf("state database version %d is newer than supported version %d", version, currentVersion)
+				return fmt.Errorf("状态数据库版本 %d 高于当前支持的版本 %d", version, currentVersion)
 			}
 		}
 		version, err := json.Marshal(currentVersion)
@@ -258,7 +282,7 @@ func (s *Store) LoadNodes() (map[string]NodeRecord, error) {
 		return bucket.ForEach(func(key, value []byte) error {
 			var record NodeRecord
 			if err := json.Unmarshal(value, &record); err != nil {
-				return fmt.Errorf("decode node state %q: %w", key, err)
+				return fmt.Errorf("解析节点状态 %q 失败: %w", key, err)
 			}
 			result[string(key)] = record
 			return nil
@@ -423,6 +447,143 @@ func (s *Store) LoadSubscriptionState() (SubscriptionState, bool, error) {
 	return result, found, err
 }
 
+// AddTraffic queues one measured traffic interval for the local calendar day.
+func (s *Store) AddTraffic(at time.Time, uploadBytes, downloadBytes int64) {
+	if s == nil || (uploadBytes <= 0 && downloadBytes <= 0) {
+		return
+	}
+	if uploadBytes < 0 {
+		uploadBytes = 0
+	}
+	if downloadBytes < 0 {
+		downloadBytes = 0
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	date := at.In(time.Local).Format("2006-01-02")
+	s.mu.Lock()
+	record := s.pendingTraffic[date]
+	record.Date = date
+	record.UploadBytes += uploadBytes
+	record.DownloadBytes += downloadBytes
+	record.TotalBytes = record.UploadBytes + record.DownloadBytes
+	record.UpdatedAt = at.UTC()
+	s.pendingTraffic[date] = record
+	s.mu.Unlock()
+	s.signal()
+}
+
+// LoadTrafficMonth returns persisted and not-yet-flushed daily totals.
+func (s *Store) LoadTrafficMonth(month string) (TrafficMonth, error) {
+	if s == nil {
+		return TrafficMonth{}, errors.New("流量状态库未启用")
+	}
+	if err := validateTrafficMonth(month); err != nil {
+		return TrafficMonth{}, err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	result, err := loadTrafficMonthFromDB(s.db, month)
+	if err != nil {
+		return TrafficMonth{}, err
+	}
+	prefix := month + "-"
+	s.mu.Lock()
+	for date, pending := range s.pendingTraffic {
+		if len(date) >= len(prefix) && date[:len(prefix)] == prefix {
+			mergeTrafficDay(&result, pending)
+		}
+	}
+	s.mu.Unlock()
+	return finalizeTrafficMonth(result), nil
+}
+
+// LoadTrafficMonthSnapshot reads a stopped project's traffic history without
+// starting its proxy runtime.
+func LoadTrafficMonthSnapshot(configPath, month string) (TrafficMonth, error) {
+	if err := validateTrafficMonth(month); err != nil {
+		return TrafficMonth{}, err
+	}
+	path := filepath.Join(filepath.Dir(configPath), FileName)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return TrafficMonth{Month: month, Days: []TrafficDay{}}, nil
+		}
+		return TrafficMonth{}, err
+	}
+	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true, Timeout: 2 * time.Second})
+	if err != nil {
+		return TrafficMonth{}, fmt.Errorf("打开流量历史失败: %w", err)
+	}
+	defer db.Close()
+	return loadTrafficMonthFromDB(db, month)
+}
+
+func validateTrafficMonth(month string) error {
+	if _, err := time.Parse("2006-01", month); err != nil {
+		return fmt.Errorf("月份必须使用 YYYY-MM 格式")
+	}
+	return nil
+}
+
+func loadTrafficMonthFromDB(db *bolt.DB, month string) (TrafficMonth, error) {
+	result := TrafficMonth{Month: month, Days: []TrafficDay{}}
+	prefix := []byte(month + "-")
+	err := db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketTraffic)
+		if bucket == nil {
+			return nil
+		}
+		cursor := bucket.Cursor()
+		for key, value := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, value = cursor.Next() {
+			var day TrafficDay
+			if err := json.Unmarshal(value, &day); err != nil {
+				return fmt.Errorf("解析流量记录 %q 失败: %w", key, err)
+			}
+			if day.Date == "" {
+				day.Date = string(key)
+			}
+			mergeTrafficDay(&result, day)
+		}
+		return nil
+	})
+	if err != nil {
+		return TrafficMonth{}, err
+	}
+	return finalizeTrafficMonth(result), nil
+}
+
+func mergeTrafficDay(month *TrafficMonth, addition TrafficDay) {
+	for i := range month.Days {
+		if month.Days[i].Date != addition.Date {
+			continue
+		}
+		month.Days[i].UploadBytes += addition.UploadBytes
+		month.Days[i].DownloadBytes += addition.DownloadBytes
+		month.Days[i].TotalBytes = month.Days[i].UploadBytes + month.Days[i].DownloadBytes
+		if addition.UpdatedAt.After(month.Days[i].UpdatedAt) {
+			month.Days[i].UpdatedAt = addition.UpdatedAt
+		}
+		return
+	}
+	addition.TotalBytes = addition.UploadBytes + addition.DownloadBytes
+	month.Days = append(month.Days, addition)
+}
+
+func finalizeTrafficMonth(month TrafficMonth) TrafficMonth {
+	month.UploadBytes = 0
+	month.DownloadBytes = 0
+	for i := range month.Days {
+		month.Days[i].TotalBytes = month.Days[i].UploadBytes + month.Days[i].DownloadBytes
+		month.UploadBytes += month.Days[i].UploadBytes
+		month.DownloadBytes += month.Days[i].DownloadBytes
+	}
+	month.TotalBytes = month.UploadBytes + month.DownloadBytes
+	sort.Slice(month.Days, func(i, j int) bool { return month.Days[i].Date < month.Days[j].Date })
+	return month
+}
+
 func (s *Store) QueueNode(record NodeRecord) {
 	if record.ID == "" {
 		return
@@ -436,7 +597,7 @@ func (s *Store) QueueNode(record NodeRecord) {
 
 func (s *Store) SaveNodeNow(record NodeRecord) error {
 	if record.ID == "" {
-		return errors.New("node state requires an id")
+		return errors.New("节点状态缺少 ID")
 	}
 	record.UpdatedAt = time.Now().UTC()
 	data, err := json.Marshal(record)
@@ -578,8 +739,10 @@ func (s *Store) Flush() error {
 	s.pendingNodes = make(map[string]NodeRecord)
 	subscription := s.pendingSub
 	s.pendingSub = nil
+	traffic := s.pendingTraffic
+	s.pendingTraffic = make(map[string]TrafficDay)
 	s.mu.Unlock()
-	if len(nodes) == 0 && subscription == nil {
+	if len(nodes) == 0 && subscription == nil && len(traffic) == 0 {
 		return nil
 	}
 	err := s.db.Update(func(tx *bolt.Tx) error {
@@ -601,17 +764,43 @@ func (s *Store) Flush() error {
 		}
 		if subscription != nil {
 			subBucket := tx.Bucket(bucketSubscriptions)
+			writeSubscription := true
 			if existing := subBucket.Get(keyGlobal); existing != nil {
 				var current SubscriptionState
 				if json.Unmarshal(existing, &current) == nil && current.UpdatedAt.After(subscription.UpdatedAt) {
-					return nil
+					writeSubscription = false
 				}
 			}
-			data, err := json.Marshal(subscription)
+			if writeSubscription {
+				data, err := json.Marshal(subscription)
+				if err != nil {
+					return err
+				}
+				if err := subBucket.Put(keyGlobal, data); err != nil {
+					return err
+				}
+			}
+		}
+		trafficBucket := tx.Bucket(bucketTraffic)
+		for date, increment := range traffic {
+			current := TrafficDay{Date: date}
+			if existing := trafficBucket.Get([]byte(date)); existing != nil {
+				if err := json.Unmarshal(existing, &current); err != nil {
+					return fmt.Errorf("解析流量记录 %q 失败: %w", date, err)
+				}
+			}
+			current.Date = date
+			current.UploadBytes += increment.UploadBytes
+			current.DownloadBytes += increment.DownloadBytes
+			current.TotalBytes = current.UploadBytes + current.DownloadBytes
+			if increment.UpdatedAt.After(current.UpdatedAt) {
+				current.UpdatedAt = increment.UpdatedAt
+			}
+			data, err := json.Marshal(current)
 			if err != nil {
 				return err
 			}
-			if err := subBucket.Put(keyGlobal, data); err != nil {
+			if err := trafficBucket.Put([]byte(date), data); err != nil {
 				return err
 			}
 		}
@@ -626,6 +815,17 @@ func (s *Store) Flush() error {
 		}
 		if subscription != nil && (s.pendingSub == nil || s.pendingSub.UpdatedAt.Before(subscription.UpdatedAt)) {
 			s.pendingSub = subscription
+		}
+		for date, increment := range traffic {
+			pending := s.pendingTraffic[date]
+			pending.Date = date
+			pending.UploadBytes += increment.UploadBytes
+			pending.DownloadBytes += increment.DownloadBytes
+			pending.TotalBytes = pending.UploadBytes + pending.DownloadBytes
+			if increment.UpdatedAt.After(pending.UpdatedAt) {
+				pending.UpdatedAt = increment.UpdatedAt
+			}
+			s.pendingTraffic[date] = pending
 		}
 		s.mu.Unlock()
 	}
@@ -676,7 +876,7 @@ func (s *Store) flushLoop() {
 			}
 		case <-timer.C:
 			if err := s.Flush(); err != nil {
-				log.Printf("[state] background flush failed: %v", err)
+				log.Printf("[状态] 后台写入失败: %v", err)
 			}
 			armed = false
 		}

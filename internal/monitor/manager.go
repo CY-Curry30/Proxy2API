@@ -30,6 +30,8 @@ type Config struct {
 	ProxyPassword    string // 代理池的密码（用于导出）
 	ExternalIP       string // 外部 IP 地址，用于导出时替换 0.0.0.0
 	SkipCertVerify   bool   // 全局跳过 SSL 证书验证
+	ProbeCoordinator *ProbeCoordinator
+	ProbeOwner       string // process-wide probe coordinator owner identity
 	ProbeConcurrency int    // 并发探测线程数（批量探测与周期健康检查共用）
 	StickyNode       string // 粘性入口指定节点；空值默认选择最低延迟节点
 	TrafficAPI       string // Project-specific sing-box Clash traffic endpoint.
@@ -135,31 +137,37 @@ type entry struct {
 
 // Manager aggregates all node states for the UI/API.
 type Manager struct {
-	cfg              Config
-	probeDst         M.Socksaddr
-	probeHost        string // probe target hostname (TLS SNI when probeTLS is true)
-	probePath        string // HTTP request path, including the query string
-	probeTLS         bool   // whether the probe target uses HTTPS
-	probeTLSInsecure bool   // global HTTPS certificate verification setting
-	probeReady       bool
-	probeConcurrency int
-	probeInterval    time.Duration
-	probeTimeout     time.Duration
-	stickyNode       string
-	entryExits       map[uint16]string
-	probeScheduleCh  chan struct{}
-	periodicOnce     sync.Once
-	mu               sync.RWMutex
-	nodes            map[string]*entry
-	ctx              context.Context
-	cancel           context.CancelFunc
-	logger           Logger
-	stateStore       *state.Store
-	restoredNodes    map[string]state.NodeRecord
-	recoveredCount   atomic.Int32
-	asyncMu          sync.Mutex
-	asyncStopped     bool
-	asyncWG          sync.WaitGroup
+	cfg                Config
+	probeDst           M.Socksaddr
+	probeHost          string // probe target hostname (TLS SNI when probeTLS is true)
+	probePath          string // HTTP request path, including the query string
+	probeTLS           bool   // whether the probe target uses HTTPS
+	probeTLSInsecure   bool   // global HTTPS certificate verification setting
+	probeReady         bool
+	probeConcurrency   int
+	probeInterval      time.Duration
+	probeTimeout       time.Duration
+	probeCoordinator   *ProbeCoordinator
+	probeOwner         string
+	stickyNode         string
+	entryExits         map[uint16]string
+	probeScheduleCh    chan struct{}
+	periodicOnce       sync.Once
+	mu                 sync.RWMutex
+	nodes              map[string]*entry
+	ctx                context.Context
+	cancel             context.CancelFunc
+	logger             Logger
+	stateStore         *state.Store
+	restoredNodes      map[string]state.NodeRecord
+	recoveredCount     atomic.Int32
+	asyncMu            sync.Mutex
+	asyncStopped       bool
+	asyncWG            sync.WaitGroup
+	probeCallbackMu    sync.Mutex
+	probeCallbackWG    sync.WaitGroup
+	probeCallbacksOff  bool
+	probeSubscriptions map[string]func()
 
 	// Sweep progress for the WebUI. probeSweepActive is 1 while probeAllNodes
 	// runs; the counters let the dashboard show a live "初始化探测中 3200/8363".
@@ -179,6 +187,7 @@ type Manager struct {
 	// registered nodes still get probed).
 	probeGate        sync.Mutex
 	sweepRunning     bool
+	sweepCancel      context.CancelFunc
 	rerunRequested   bool
 	rerunPendingOnly bool
 }
@@ -272,24 +281,27 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg.ProbeTimeout = 110 * time.Second
 	}
 	m := &Manager{
-		cfg:              cfg,
-		nodes:            make(map[string]*entry),
-		ctx:              ctx,
-		cancel:           cancel,
-		probeConcurrency: clampProbeConcurrency(cfg.ProbeConcurrency),
-		probeInterval:    cfg.ProbeInterval,
-		probeTimeout:     cfg.ProbeTimeout,
-		stickyNode:       strings.TrimSpace(cfg.StickyNode),
-		entryExits:       make(map[uint16]string),
-		probeScheduleCh:  make(chan struct{}, 1),
-		stateStore:       cfg.StateStore,
-		restoredNodes:    make(map[string]state.NodeRecord),
+		cfg:                cfg,
+		nodes:              make(map[string]*entry),
+		ctx:                ctx,
+		cancel:             cancel,
+		probeConcurrency:   clampProbeConcurrency(cfg.ProbeConcurrency),
+		probeInterval:      cfg.ProbeInterval,
+		probeTimeout:       cfg.ProbeTimeout,
+		probeCoordinator:   cfg.ProbeCoordinator,
+		probeOwner:         strings.TrimSpace(cfg.ProbeOwner),
+		stickyNode:         strings.TrimSpace(cfg.StickyNode),
+		entryExits:         make(map[uint16]string),
+		probeScheduleCh:    make(chan struct{}, 1),
+		probeSubscriptions: make(map[string]func()),
+		stateStore:         cfg.StateStore,
+		restoredNodes:      make(map[string]state.NodeRecord),
 	}
 	if cfg.StateStore != nil {
 		restored, err := cfg.StateStore.LoadNodes()
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("load node runtime state: %w", err)
+			return nil, fmt.Errorf("加载节点运行状态失败: %w", err)
 		}
 		m.restoredNodes = restored
 	}
@@ -327,9 +339,13 @@ func (m *Manager) SetProbeSchedule(interval, timeout time.Duration) {
 		timeout = 110 * time.Second
 	}
 	m.mu.Lock()
+	profileChanged := m.probeTimeout != timeout
 	m.probeInterval = interval
 	m.probeTimeout = timeout
 	m.mu.Unlock()
+	if profileChanged {
+		m.rebindProbeSubscriptions()
+	}
 	select {
 	case m.probeScheduleCh <- struct{}{}:
 	default:
@@ -368,7 +384,7 @@ func (m *Manager) ProbeAfterRelease(tag string) {
 
 		_, err := m.ProbeWithResult(ctx, tag)
 		if err != nil && m.logger != nil {
-			m.logger.Warn("post-release probe failed for ", tag, ": ", err)
+			m.logger.Warn("节点解除拉黑后的探测失败 ", tag, ": ", err)
 		}
 	}()
 }
@@ -454,9 +470,14 @@ func (m *Manager) HasSubscriptionNodes(rawURL string) bool {
 func (m *Manager) SetProbeTarget(probeTarget string, skipCertVerify bool) {
 	dst, host, path, useTLS, tlsInsecure, ready := resolveProbeTarget(probeTarget, skipCertVerify)
 	m.mu.Lock()
+	profileChanged := m.probeDst != dst || m.probeHost != host || m.probePath != path ||
+		m.probeTLS != useTLS || m.probeTLSInsecure != tlsInsecure
 	m.probeDst, m.probeHost, m.probePath = dst, host, path
 	m.probeTLS, m.probeTLSInsecure, m.probeReady = useTLS, tlsInsecure, ready
 	m.mu.Unlock()
+	if profileChanged {
+		m.rebindProbeSubscriptions()
+	}
 }
 
 // StartPeriodicHealthCheck starts a background goroutine that periodically checks all nodes.
@@ -500,7 +521,7 @@ func (m *Manager) StartPeriodicHealthCheck(interval, timeout time.Duration) {
 	})
 
 	if m.logger != nil {
-		m.logger.Info("periodic health check started, interval: ", interval)
+		m.logger.Info("周期健康检查已启动，间隔：", interval)
 	}
 }
 
@@ -560,14 +581,25 @@ func (m *Manager) probeNodes(timeout time.Duration, pendingOnly bool) {
 		m.probeGate.Unlock()
 		return
 	}
+	sweepCtx, sweepCancel := context.WithCancel(m.ctx)
 	m.sweepRunning = true
+	m.sweepCancel = sweepCancel
 	m.probeGate.Unlock()
 
 	currentPendingOnly := pendingOnly
 	for {
-		m.runProbeSweep(timeout, currentPendingOnly)
+		m.runProbeSweep(sweepCtx, timeout, currentPendingOnly)
 
 		m.probeGate.Lock()
+		if sweepCtx.Err() != nil {
+			m.rerunRequested = false
+			m.rerunPendingOnly = false
+			m.sweepRunning = false
+			m.sweepCancel = nil
+			m.probeGate.Unlock()
+			sweepCancel()
+			return
+		}
 		if m.rerunRequested {
 			m.rerunRequested = false
 			currentPendingOnly = m.rerunPendingOnly
@@ -576,15 +608,35 @@ func (m *Manager) probeNodes(timeout time.Duration, pendingOnly bool) {
 			continue // A trigger arrived mid-sweep; run exactly one more pass.
 		}
 		m.sweepRunning = false
+		m.sweepCancel = nil
 		m.probeGate.Unlock()
+		sweepCancel()
 		return
 	}
+}
+
+// CancelProbeSweep cancels the active periodic/reload health-check sweep and
+// drops any coalesced follow-up pass. Completed node results remain intact.
+func (m *Manager) CancelProbeSweep() bool {
+	m.probeGate.Lock()
+	if !m.sweepRunning {
+		m.probeGate.Unlock()
+		return false
+	}
+	cancel := m.sweepCancel
+	m.rerunRequested = false
+	m.rerunPendingOnly = false
+	m.probeGate.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return true
 }
 
 // runProbeSweep checks all registered nodes concurrently. It is only ever
 // invoked by probeAllNodes, which guarantees single-flight execution, so the
 // shared probeSweep* progress counters are never written by two sweeps at once.
-func (m *Manager) runProbeSweep(timeout time.Duration, pendingOnly bool) {
+func (m *Manager) runProbeSweep(sweepCtx context.Context, timeout time.Duration, pendingOnly bool) {
 	m.mu.RLock()
 	entries := make([]*entry, 0, len(m.nodes))
 	for _, e := range m.nodes {
@@ -603,7 +655,7 @@ func (m *Manager) runProbeSweep(timeout time.Duration, pendingOnly bool) {
 	}
 
 	if m.logger != nil {
-		m.logger.Info("starting health check for ", len(entries), " nodes")
+		m.logger.Info("开始对 ", len(entries), " 个节点进行健康检查")
 	}
 
 	// Publish sweep progress for the WebUI. Reset counters, mark active, and
@@ -626,7 +678,11 @@ func (m *Manager) runProbeSweep(timeout time.Duration, pendingOnly bool) {
 	var availableCount atomic.Int32
 	var failedCount atomic.Int32
 
+launchProbes:
 	for _, e := range entries {
+		if sweepCtx.Err() != nil {
+			break
+		}
 		e.mu.RLock()
 		probeFn := e.probe
 		tag := e.info.Tag
@@ -636,7 +692,7 @@ func (m *Manager) runProbeSweep(timeout time.Duration, pendingOnly bool) {
 			// A healthy node must pass both connectivity and Trace checks. Without
 			// a probe function neither can be verified, so record a completed failure
 			// instead of leaving the node unchecked or optimistically available.
-			probeErr := errors.New("probe not available for this node")
+			probeErr := errors.New("该节点不支持探测")
 			e.applyProbeResult(ProbeResult{}, probeErr, e.currentAvailabilityEpoch())
 			failedCount.Add(1)
 			m.probeSweepFail.Add(1)
@@ -644,17 +700,24 @@ func (m *Manager) runProbeSweep(timeout time.Duration, pendingOnly bool) {
 			continue
 		}
 
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-sweepCtx.Done():
+			break launchProbes
+		}
 		wg.Add(1)
 		go func(entry *entry, probe probeFunc, tag string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			ctx, cancel := context.WithTimeout(m.ctx, timeout)
+			ctx, cancel := context.WithTimeout(sweepCtx, timeout)
 			defer cancel()
 
 			availabilityEpoch := entry.currentAvailabilityEpoch()
-			result, err := executeProbe(ctx, probe, entry.applyProbeProgress)
+			result, err := m.executeNodeProbe(ctx, entry, probe, false)
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return
+			}
 
 			entry.mu.RLock()
 			uri := entry.info.URI
@@ -670,14 +733,18 @@ func (m *Manager) runProbeSweep(timeout time.Duration, pendingOnly bool) {
 			m.probeSweepDone.Add(1)
 
 			if err != nil && m.logger != nil {
-				m.logger.Warn("probe failed: ", FormatProbeFailure(tag, uri, err))
+				m.logger.Warn("探测失败: ", FormatProbeFailure(tag, uri, err))
 			}
 		}(e, probeFn, tag)
 	}
 	wg.Wait()
 
-	if m.logger != nil {
-		m.logger.Info("health check completed: ", availableCount.Load(), " available, ", failedCount.Load(), " failed")
+	if sweepCtx.Err() != nil {
+		if m.logger != nil {
+			m.logger.Info("健康检查已取消：已完成 ", m.probeSweepDone.Load(), "/", len(entries), " 个节点")
+		}
+	} else if m.logger != nil {
+		m.logger.Info("健康检查完成：", availableCount.Load(), " 个可用，", failedCount.Load(), " 个失败")
 	}
 }
 
@@ -689,7 +756,18 @@ func (m *Manager) Stop() {
 		m.cancel()
 	}
 	m.asyncMu.Unlock()
+	m.probeCallbackMu.Lock()
+	m.probeCallbacksOff = true
+	m.probeCallbackMu.Unlock()
+	m.mu.Lock()
+	unsubscribers := m.probeSubscriptions
+	m.probeSubscriptions = make(map[string]func())
+	m.mu.Unlock()
+	for _, unsubscribe := range unsubscribers {
+		unsubscribe()
+	}
 	m.asyncWG.Wait()
+	m.probeCallbackWG.Wait()
 }
 
 func parsePort(value string) uint16 {
@@ -703,7 +781,6 @@ func parsePort(value string) uint16 {
 // Register ensures a node is tracked and returns its entry.
 func (m *Manager) Register(info NodeInfo) *EntryHandle {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	e, ok := m.nodes[info.Tag]
 	if !ok {
 		e = &entry{
@@ -725,6 +802,8 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 		e.persistLocked(false)
 		e.mu.Unlock()
 	}
+	m.mu.Unlock()
+	m.subscribeProbeEntry(e)
 	return &EntryHandle{ref: e}
 }
 
@@ -732,7 +811,6 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 // during a config reload so stale entries don't persist in the dashboard.
 func (m *Manager) ClearNodes() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	records := make([]state.NodeRecord, 0, len(m.nodes))
 	for _, e := range m.nodes {
 		e.mu.Lock()
@@ -744,17 +822,23 @@ func (m *Manager) ClearNodes() {
 	}
 	if m.stateStore != nil {
 		if err := m.stateStore.SaveNodesNow(records); err != nil && m.logger != nil {
-			m.logger.Warn("failed to persist node state before clearing monitor: ", err)
+			m.logger.Warn("清空监控数据前保存节点状态失败: ", err)
 		}
 		if restored, err := m.stateStore.LoadNodes(); err == nil {
 			m.restoredNodes = restored
 		} else if m.logger != nil {
-			m.logger.Warn("failed to reload persisted node state: ", err)
+			m.logger.Warn("重新加载已保存的节点状态失败: ", err)
 		}
 	}
 	m.nodes = make(map[string]*entry)
 	m.entryExits = make(map[uint16]string)
 	m.recoveredCount.Store(0)
+	unsubscribers := m.probeSubscriptions
+	m.probeSubscriptions = make(map[string]func())
+	m.mu.Unlock()
+	for _, unsubscribe := range unsubscribers {
+		unsubscribe()
+	}
 }
 
 func (m *Manager) HasRecoveredNodes() bool {
@@ -853,17 +937,20 @@ func (m *Manager) ProbeWithResult(ctx context.Context, tag string) (ProbeResult,
 		return ProbeResult{}, err
 	}
 	if e.probe == nil {
-		return ProbeResult{}, errors.New("probe not available for this node")
+		return ProbeResult{}, errors.New("该节点不支持探测")
 	}
 	e.mu.RLock()
 	suppressed := e.suppressed
 	e.mu.RUnlock()
 	if suppressed {
-		return ProbeResult{}, errors.New("node belongs to a paused subscription")
+		return ProbeResult{}, errors.New("节点属于已暂停的订阅")
 	}
 
 	availabilityEpoch := e.currentAvailabilityEpoch()
-	result, err := executeProbe(ctx, e.probe, e.applyProbeProgress)
+	result, err := m.executeNodeProbe(ctx, e, e.probe, true)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return result, err
+	}
 
 	e.applyProbeResult(result, err, availabilityEpoch)
 	if err != nil {
@@ -915,6 +1002,111 @@ func executeProbe(ctx context.Context, probe probeFunc, onProgress func(ProbeRes
 	}
 }
 
+// executeNodeProbe routes a probe through the process-wide coordinator when
+// one is configured. Availability, blacklist and failure counters remain
+// project-local; only the expensive network check is shared.
+func (m *Manager) executeNodeProbe(ctx context.Context, e *entry, probe probeFunc, force bool) (ProbeResult, error) {
+	if m.probeCoordinator == nil {
+		return executeProbe(ctx, probe, e.applyProbeProgress)
+	}
+	key := m.probeCacheKey(e)
+	m.mu.RLock()
+	maxAge := m.probeInterval
+	m.mu.RUnlock()
+	if maxAge <= 0 {
+		maxAge = 5 * time.Minute
+	}
+	return m.probeCoordinator.ExecuteOwned(ctx, m.probeOwner, key, maxAge, force, probe, e.applyProbeProgress)
+}
+
+func (m *Manager) probeCacheKey(e *entry) string {
+	e.mu.RLock()
+	id := e.info.ID
+	if id == "" {
+		id = e.info.URI
+	}
+	e.mu.RUnlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return fmt.Sprintf("%s\x00%s\x00%d\x00%s\x00%s\x00%t\x00%t\x00%d", id, m.probeDst.AddrString(), m.probeDst.Port, m.probeHost, m.probePath, m.probeTLS, m.probeTLSInsecure, m.probeTimeout)
+}
+
+func (m *Manager) subscribeProbeEntry(e *entry) {
+	if m.probeCoordinator == nil || m.probeOwner == "" || e == nil {
+		return
+	}
+	key := m.probeCacheKey(e)
+	tag := ""
+	e.mu.RLock()
+	tag = e.info.Tag
+	e.mu.RUnlock()
+	m.probeCallbackMu.Lock()
+	if m.probeCallbacksOff {
+		m.probeCallbackMu.Unlock()
+		return
+	}
+	unsubscribe := m.probeCoordinator.Subscribe(key, m.probeOwner, func(result ProbeResult, err error) {
+		if !m.beginProbeCallback() {
+			return
+		}
+		defer m.probeCallbackWG.Done()
+		m.mu.RLock()
+		current := m.nodes[tag] == e
+		m.mu.RUnlock()
+		// Unsubscribe cannot retract a notification already copied by the
+		// coordinator. Ignore such a stale result if the node's effective probe
+		// profile changed while that notification was in flight.
+		if !current || m.probeCacheKey(e) != key {
+			return
+		}
+		e.applyProbeResult(result, err, e.currentAvailabilityEpoch())
+	})
+	m.mu.Lock()
+	if current := m.nodes[tag]; current != e {
+		m.mu.Unlock()
+		m.probeCallbackMu.Unlock()
+		unsubscribe()
+		return
+	}
+	old := m.probeSubscriptions[tag]
+	m.probeSubscriptions[tag] = unsubscribe
+	m.mu.Unlock()
+	m.probeCallbackMu.Unlock()
+	if old != nil {
+		old()
+	}
+}
+
+func (m *Manager) rebindProbeSubscriptions() {
+	if m.probeCoordinator == nil || m.probeOwner == "" {
+		return
+	}
+	m.mu.Lock()
+	old := m.probeSubscriptions
+	m.probeSubscriptions = make(map[string]func(), len(m.nodes))
+	entries := make([]*entry, 0, len(m.nodes))
+	for _, e := range m.nodes {
+		entries = append(entries, e)
+	}
+	m.mu.Unlock()
+	for _, unsubscribe := range old {
+		unsubscribe()
+	}
+	for _, e := range entries {
+		m.subscribeProbeEntry(e)
+	}
+}
+
+func (m *Manager) beginProbeCallback() bool {
+	m.probeCallbackMu.Lock()
+	defer m.probeCallbackMu.Unlock()
+	if m.probeCallbacksOff {
+		return false
+	}
+	m.probeCallbackWG.Add(1)
+	return true
+}
+
 func mergeProbeResult(current, update ProbeResult) ProbeResult {
 	if update.ConnectivityOK {
 		current.ConnectivityOK = true
@@ -946,7 +1138,7 @@ func (m *Manager) Release(tag string) error {
 		return err
 	}
 	if e.release == nil {
-		return errors.New("release not available for this node")
+		return errors.New("该节点不支持解除拉黑")
 	}
 	e.release()
 	return nil
@@ -976,7 +1168,7 @@ func (m *Manager) entry(tag string) (*entry, error) {
 	e, ok := m.nodes[tag]
 	m.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("node %s not found", tag)
+		return nil, fmt.Errorf("节点 %s 不存在", tag)
 	}
 	return e, nil
 }
@@ -1079,7 +1271,7 @@ func (e *entry) persistLocked(critical bool) {
 	record := e.stateRecordLocked()
 	if critical {
 		if err := e.store.SaveNodeNow(record); err != nil {
-			fmt.Printf("state: persist node %s: %v\n", e.info.Tag, err)
+			fmt.Printf("状态：保存节点 %s 失败: %v\n", e.info.Tag, err)
 		}
 		return
 	}
@@ -1119,7 +1311,7 @@ func (e *entry) applyProbeResult(result ProbeResult, err error, availabilityEpoc
 	} else {
 		// Defensive fallback for custom probe functions returning an incomplete
 		// result without an error.
-		e.lastError = "probe incomplete: generate_204 and trace must both succeed"
+		e.lastError = "探测不完整：generate_204 和 Trace 必须同时成功"
 	}
 }
 
@@ -1150,10 +1342,10 @@ func (e *entry) applyProbeProgressLocked(result ProbeResult) {
 
 	var progressErrors []string
 	if result.ConnectivityError != "" {
-		progressErrors = append(progressErrors, "generate_204 failed: "+result.ConnectivityError)
+		progressErrors = append(progressErrors, "generate_204 探测失败: "+result.ConnectivityError)
 	}
 	if result.TraceError != "" {
-		progressErrors = append(progressErrors, "trace failed: "+result.TraceError)
+		progressErrors = append(progressErrors, "Trace 探测失败: "+result.TraceError)
 	}
 	if len(progressErrors) > 0 {
 		e.initialCheckDone = true

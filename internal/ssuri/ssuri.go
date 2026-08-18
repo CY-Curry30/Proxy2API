@@ -27,11 +27,11 @@ type URI struct {
 func Parse(raw string) (URI, error) {
 	schemeEnd := strings.Index(raw, "://")
 	if schemeEnd < 0 {
-		return URI{}, errors.New("shadowsocks uri missing scheme")
+		return URI{}, errors.New("Shadowsocks URI 缺少协议")
 	}
 	scheme := strings.ToLower(raw[:schemeEnd])
 	if scheme != "ss" && scheme != "shadowsocks" {
-		return URI{}, fmt.Errorf("unsupported shadowsocks scheme %q", raw[:schemeEnd])
+		return URI{}, fmt.Errorf("不支持的 Shadowsocks 协议 %q", raw[:schemeEnd])
 	}
 
 	rest := raw[schemeEnd+3:]
@@ -45,13 +45,13 @@ func Parse(raw string) (URI, error) {
 	if queryIdx := strings.Index(rest, "?"); queryIdx >= 0 {
 		parsedQuery, err := url.ParseQuery(rest[queryIdx+1:])
 		if err != nil {
-			return URI{}, fmt.Errorf("parse shadowsocks query: %w", err)
+			return URI{}, fmt.Errorf("解析 Shadowsocks 查询参数失败: %w", err)
 		}
 		query = parsedQuery
 		rest = rest[:queryIdx]
 	}
 	if rest == "" {
-		return URI{}, errors.New("shadowsocks uri missing payload")
+		return URI{}, errors.New("Shadowsocks URI 缺少内容")
 	}
 
 	if strings.Contains(rest, "@") {
@@ -63,7 +63,7 @@ func Parse(raw string) (URI, error) {
 func parseSIP002(rest string, query url.Values, fragment string) (URI, error) {
 	atIdx := strings.LastIndex(rest, "@")
 	if atIdx <= 0 || atIdx == len(rest)-1 {
-		return URI{}, errors.New("shadowsocks uri must include userinfo and host")
+		return URI{}, errors.New("Shadowsocks URI 必须包含用户信息和主机地址")
 	}
 
 	userInfo := rest[:atIdx]
@@ -82,13 +82,13 @@ func parseSIP002(rest string, query url.Values, fragment string) (URI, error) {
 func parseLegacy(encoded string, query url.Values, fragment string) (URI, error) {
 	decoded, err := decodeBase64(encoded)
 	if err != nil {
-		return URI{}, fmt.Errorf("decode legacy shadowsocks payload: %w", err)
+		return URI{}, fmt.Errorf("解码旧版 Shadowsocks 内容失败: %w", err)
 	}
 
 	decodedText := string(decoded)
 	atIdx := strings.LastIndex(decodedText, "@")
 	if atIdx <= 0 || atIdx == len(decodedText)-1 {
-		return URI{}, errors.New("legacy shadowsocks payload must be method:password@host:port")
+		return URI{}, errors.New("旧版 Shadowsocks 内容必须采用 method:password@host:port 格式")
 	}
 	methodPart := decodedText[:atIdx]
 	hostPort := decodedText[atIdx+1:]
@@ -112,7 +112,7 @@ func parseUserInfo(userInfo string) (string, string, error) {
 
 	unescaped, err := url.PathUnescape(userInfo)
 	if err != nil {
-		return "", "", fmt.Errorf("decode shadowsocks userinfo: %w", err)
+		return "", "", fmt.Errorf("解码 Shadowsocks 用户信息失败: %w", err)
 	}
 	return parsePlainUserInfo(unescaped)
 }
@@ -120,20 +120,20 @@ func parseUserInfo(userInfo string) (string, string, error) {
 func parsePlainUserInfo(userInfo string) (string, string, error) {
 	method, password, ok := strings.Cut(userInfo, ":")
 	if !ok {
-		return "", "", errors.New("shadowsocks userinfo format must be method:password")
+		return "", "", errors.New("Shadowsocks 用户信息必须采用 method:password 格式")
 	}
 	if method == "" {
-		return "", "", errors.New("shadowsocks method is required")
+		return "", "", errors.New("Shadowsocks 加密方式不能为空")
 	}
 	if password == "" {
-		return "", "", errors.New("shadowsocks password is required")
+		return "", "", errors.New("Shadowsocks 密码不能为空")
 	}
 	return method, password, nil
 }
 
 func parseHostPort(hostPort string) (string, int, error) {
 	if hostPort == "" {
-		return "", 0, errors.New("shadowsocks host is required")
+		return "", 0, errors.New("Shadowsocks 主机地址不能为空")
 	}
 
 	host := ""
@@ -141,13 +141,13 @@ func parseHostPort(hostPort string) (string, int, error) {
 	if strings.HasPrefix(hostPort, "[") {
 		end := strings.Index(hostPort, "]")
 		if end < 0 {
-			return "", 0, errors.New("invalid IPv6 host")
+			return "", 0, errors.New("无效的 IPv6 主机地址")
 		}
 		host = hostPort[1:end]
 		remainder := hostPort[end+1:]
 		if remainder != "" {
 			if !strings.HasPrefix(remainder, ":") {
-				return "", 0, errors.New("invalid IPv6 host port")
+				return "", 0, errors.New("无效的 IPv6 主机端口")
 			}
 			parsedPort, err := parsePort(remainder[1:])
 			if err != nil {
@@ -156,7 +156,7 @@ func parseHostPort(hostPort string) (string, int, error) {
 			port = parsedPort
 		}
 	} else if strings.Count(hostPort, ":") > 1 {
-		return "", 0, errors.New("IPv6 shadowsocks host must use [addr]:port")
+		return "", 0, errors.New("IPv6 Shadowsocks 主机必须使用 [地址]:端口 格式")
 	} else if h, p, err := net.SplitHostPort(hostPort); err == nil {
 		host = h
 		parsedPort, err := parsePort(p)
@@ -177,25 +177,25 @@ func parseHostPort(hostPort string) (string, int, error) {
 	}
 
 	if host == "" {
-		return "", 0, errors.New("shadowsocks host is required")
+		return "", 0, errors.New("Shadowsocks 主机地址不能为空")
 	}
 	unescapedHost, err := url.PathUnescape(host)
 	if err != nil {
-		return "", 0, fmt.Errorf("decode shadowsocks host: %w", err)
+		return "", 0, fmt.Errorf("解码 Shadowsocks 主机地址失败: %w", err)
 	}
 	return unescapedHost, port, nil
 }
 
 func parsePort(portText string) (int, error) {
 	if portText == "" {
-		return 0, errors.New("shadowsocks port is required")
+		return 0, errors.New("Shadowsocks 端口不能为空")
 	}
 	port, err := strconv.Atoi(portText)
 	if err != nil {
-		return 0, fmt.Errorf("invalid shadowsocks port %q", portText)
+		return 0, fmt.Errorf("无效的 Shadowsocks 端口 %q", portText)
 	}
 	if port <= 0 || port > 65535 {
-		return 0, fmt.Errorf("invalid shadowsocks port %q", portText)
+		return 0, fmt.Errorf("无效的 Shadowsocks 端口 %q", portText)
 	}
 	return port, nil
 }
@@ -203,7 +203,7 @@ func parsePort(portText string) (int, error) {
 func decodeBase64(s string) ([]byte, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return nil, errors.New("empty base64 value")
+		return nil, errors.New("Base64 内容为空")
 	}
 
 	encodings := []*base64.Encoding{

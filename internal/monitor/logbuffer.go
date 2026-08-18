@@ -40,6 +40,13 @@ func (lb *LogBuffer) Content() string {
 	return string(lb.buf)
 }
 
+// Clear removes all buffered console output. New log writes continue normally.
+func (lb *LogBuffer) Clear() {
+	lb.mu.Lock()
+	lb.buf = lb.buf[:0]
+	lb.mu.Unlock()
+}
+
 // SharedLogBuffer is the global log buffer accessible by the server.
 var SharedLogBuffer *LogBuffer
 

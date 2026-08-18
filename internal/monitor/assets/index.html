@@ -416,6 +416,15 @@
     .cell-trunc-uri { max-width: 360px; }
     .config-node-source { display: flex; align-items: center; gap: 7px; min-width: 0; }
     .config-node-source-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+    .config-node-header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .config-node-select-cell { width: 40px; padding-right: 0; text-align: center; }
+    .config-node-select {
+      width: 16px; height: 16px; margin: 0; cursor: pointer; vertical-align: middle;
+      accent-color: var(--primary);
+    }
+    .config-node-row-selected { background: var(--primary-light); }
+    .config-node-row-selected:hover { background: var(--primary-light); }
+    #configNodeBatchDeleteBtn:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
     
     .badge {
       padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500;
@@ -436,7 +445,7 @@
     .progress-float { 
       position: absolute; right: 24px; top: 12px; background: var(--bg-panel); 
       border: 1px solid var(--border); padding: 8px 16px; border-radius: 6px;
-      display: flex; gap: 16px; font-size: 12px; box-shadow: var(--shadow-md);
+      display: flex; align-items: center; flex-wrap: wrap; gap: 12px 16px; font-size: 12px; box-shadow: var(--shadow-md);
     }
 
     /* Modal */
@@ -523,6 +532,19 @@
     .table-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .table-tool { min-height: 34px; width: auto; min-width: 120px; padding: 6px 10px; }
     .table-search { min-width: 230px; flex: 1 1 230px; }
+    .table-filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg-panel) 96%, var(--bg-hover));
+    }
+    .table-filter-bar .table-search { min-width: 180px; }
+    .table-result-count { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+    .table-result-count strong { color: var(--text-main); font-weight: 600; }
+    .table-empty-state { display: none; text-align: center; padding: 40px; color: var(--text-muted); }
     .project-schedule-table { min-width: 900px; }
     .project-schedule-table th,
     .project-schedule-table td { vertical-align: middle; }
@@ -535,9 +557,20 @@
     .subscription-summary { display: flex; gap: 20px; flex-wrap: wrap; color: var(--text-muted); font-size: 12px; }
     .subscription-summary strong { color: var(--text-main); font-weight: 600; }
     @media (max-width: 760px) {
+      .sidebar { width: 112px; flex: 0 0 112px; }
+      .brand { padding: 0 10px; gap: 6px; font-size: 12px; }
+      .nav-item { padding: 10px 12px; gap: 8px; white-space: nowrap; }
+      .main { min-width: 0; }
+      .header { height: auto; min-height: 60px; gap: 8px; padding: 8px 12px; flex-wrap: wrap; }
+      .header-left { flex: 1 1 140px; min-width: 0; }
+      .project-switcher, .project-select { width: 100%; min-width: 0; }
+      .header-actions { width: 100%; overflow-x: auto; padding-bottom: 2px; }
+      .header-actions > * { flex: 0 0 auto; }
+      .content { padding: 12px; }
       .table-tools { width: 100%; }
-      .table-tool, .table-search { width: 100%; min-width: 0; }
+      .table-tool, .table-search, .table-filter-bar .table-search { width: 100%; min-width: 0; }
       .panel-header { align-items: flex-start; flex-direction: column; }
+      .config-node-header-actions { width: 100%; justify-content: space-between; }
     }
 
     .toast-container { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; align-items: flex-end; gap: 10px; width: min(480px, calc(100vw - 48px)); z-index: 2000; pointer-events: none; }
@@ -559,7 +592,7 @@
     /* ECharts containers */
     .charts-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr));
       gap: 16px;
       margin-bottom: 24px;
     }
@@ -578,107 +611,88 @@
       z-index: 10;
     }
     .chart-container { width: 100%; height: 100%; }
+    .region-map-panel {
+      height: 320px;
+    }
+    .region-map-metrics {
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      bottom: 10px;
+      z-index: 11;
+      pointer-events: none;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .console-log-search {
+      width: 220px;
+      height: 30px;
+    }
+    .console-log-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
     .region-availability {
+      width: 100%;
       height: 100%;
-      padding-top: 32px;
-      display: flex;
-      flex-direction: column;
-      min-height: 0;
-    }
-    .region-overview {
-      min-height: 36px;
-      display: flex;
-      align-items: center;
-      gap: 18px;
-      color: var(--text-muted);
-      font-size: 11px;
-      border-bottom: 1px solid var(--border);
-    }
-    .region-overview strong {
-      margin-left: 5px;
-      color: var(--text-main);
-      font-family: var(--font-mono);
-      font-size: 12px;
-      font-weight: 600;
-    }
-    .region-list {
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
-      scrollbar-gutter: stable;
-      box-sizing: border-box;
-      padding-right: 12px;
-    }
-    .region-list-header,
-    .region-row {
-      display: grid;
-      grid-template-columns: minmax(88px, 120px) 78px minmax(100px, 1fr);
-      gap: 8px;
-      align-items: center;
-    }
-    .region-list-header {
-      position: sticky;
-      top: 0;
-      z-index: 2;
-      min-height: 28px;
-      color: var(--text-muted);
-      background: var(--bg-panel);
-      font-size: 10px;
-      text-transform: uppercase;
-      border-bottom: 1px solid var(--border);
-    }
-    .region-row {
-      min-height: 36px;
-      border-bottom: 1px solid var(--border-light);
-    }
-    .region-row:last-child { border-bottom: 0; }
-    .region-name {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: var(--text-main);
-      font-weight: 600;
-    }
-    .region-count {
-      color: var(--text-muted);
-      font-family: var(--font-mono);
-      font-size: 11px;
-      white-space: nowrap;
-    }
-    .region-rate {
-      display: grid;
-      grid-template-columns: 1fr 38px;
-      gap: 8px;
-      align-items: center;
-      min-width: 0;
-    }
-    .region-rate-track {
-      height: 6px;
-      overflow: hidden;
-      background: var(--border);
-      border-radius: 3px;
-    }
-    .region-rate-fill { height: 100%; border-radius: 3px; }
-    .region-rate-value {
-      color: var(--text-muted);
-      font-family: var(--font-mono);
-      font-size: 10px;
-      text-align: right;
     }
     .region-empty {
-      flex: 1;
+      width: 100%;
+      height: 100%;
       display: flex;
       align-items: center;
       justify-content: center;
       color: var(--text-muted);
       font-size: 12px;
     }
-    @media (max-width: 520px) {
-      .region-list-header,
-      .region-row { grid-template-columns: 96px 64px minmax(82px, 1fr); gap: 8px; }
-      .region-overview { gap: 12px; }
-      .region-rate { grid-template-columns: 1fr 34px; gap: 6px; }
+    .traffic-calendar-panel {
+      height: 320px;
+    }
+    .traffic-calendar-toolbar {
+      position: absolute;
+      top: 42px;
+      left: 16px;
+      right: 12px;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+    .traffic-calendar-total { white-space: nowrap; }
+    .traffic-calendar-month {
+      width: 132px;
+      height: 32px;
+      padding: 0 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg-main);
+      color: var(--text-main);
+      font: inherit;
+    }
+    @media (max-width: 760px) {
+      .region-map-panel { height: 320px; }
+      .region-map-metrics { bottom: 8px; font-size: 10px; }
+      .console-log-panel-header { flex-wrap: wrap; gap: 8px; }
+      .console-log-actions { width: 100%; flex-wrap: wrap; justify-content: flex-end; }
+      .console-log-search { flex: 1 1 100%; width: 100%; }
+      .traffic-calendar-panel { height: 360px; }
+      .traffic-calendar-toolbar {
+        top: 58px;
+        left: 16px;
+        right: 16px;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+      }
+      .traffic-calendar-total { white-space: normal; line-height: 1.4; }
+      .traffic-calendar-month { width: 100%; }
     }
 
   </style>
@@ -749,6 +763,7 @@
         <span style="color:var(--text-main)">探测中: <span id="probeStats">0/0</span></span>
         <span style="color:var(--success)">成功: <span id="probeSuccess">0</span></span>
         <span style="color:var(--error)">失败: <span id="probeFail">0</span></span>
+        <button class="btn btn-sm btn-danger" id="cancelProbeBtn" type="button" onclick="cancelProbeAll()">取消探测</button>
       </div>
     </div>
 
@@ -770,7 +785,7 @@
           <svg class="icon-auto" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
           <span class="theme-mode-label" id="themeModeLabel">跟随系统</span>
         </button>
-        <button class="btn btn-primary" onclick="probeAllNodes()">⚡ 批量探测</button>
+        <button class="btn btn-primary" id="probeAllBtn" onclick="probeAllNodes()">⚡ 批量探测</button>
         <button class="btn" id="refreshSubBtn" onclick="refreshSubscription()" style="display:none;">刷新订阅</button>
         <button class="btn header-secondary" onclick="exportNodes()">导出配置</button>
         <button class="btn header-secondary" onclick="exportNodes(true)">全部导出</button>
@@ -853,17 +868,22 @@
         </div>
 
         <div class="charts-grid">
-          <div class="chart-panel">
-            <div class="chart-title">Region Availability</div>
-            <div class="region-availability" id="regionAvailability"></div>
-          </div>
-          <div class="chart-panel">
-            <div class="chart-title">最优节点延迟 (Top Fastest Nodes)</div>
-            <div class="chart-container" id="latencyChart"></div>
+          <div class="chart-panel region-map-panel">
+            <div class="chart-title">全球节点延迟分布 (Global Latency)</div>
+            <div class="region-availability" id="regionAvailability" role="img" aria-label="全球节点地域分布与最优节点延迟图"></div>
+            <div class="region-map-metrics" id="regionMapMetrics" aria-label="国家、延迟、可用统计"></div>
           </div>
           <div class="chart-panel">
             <div class="chart-title">实时流量带宽 (Real-time Traffic)</div>
             <div class="chart-container" id="trafficChart"></div>
+          </div>
+          <div class="chart-panel traffic-calendar-panel">
+            <div class="chart-title">月度总流量 (Monthly Total Traffic)</div>
+            <div class="traffic-calendar-toolbar">
+              <span class="traffic-calendar-total" id="trafficCalendarTotal">加载中...</span>
+              <input class="traffic-calendar-month" id="trafficCalendarMonth" type="month" aria-label="流量统计月份" onchange="loadTrafficCalendar(true)" />
+            </div>
+            <div class="chart-container" id="trafficCalendarChart" role="img" aria-label="按日展示总流量的月度日历图"></div>
           </div>
         </div>
 
@@ -942,12 +962,34 @@
         </div>
 
         <div class="panel">
-          <div class="panel-header"><div class="panel-title">节点定义</div></div>
+          <div class="panel-header">
+            <div class="panel-title">节点定义</div>
+            <div class="config-node-header-actions">
+              <div class="table-result-count">显示 <strong id="configNodeVisibleCount">0</strong> / <span id="configNodeTotalCount">0</span></div>
+              <button type="button" class="btn btn-sm btn-danger" id="configNodeBatchDeleteBtn" onclick="deleteSelectedConfigNodes()" disabled>
+                删除选中（<span id="configNodeSelectedCount">0</span>）
+              </button>
+            </div>
+          </div>
+          <div class="table-filter-bar">
+            <select id="configNodeSubscriptionFilter" class="setting-input table-tool" onchange="renderConfigNodes()" title="订阅筛选">
+              <option value="all">全部订阅来源</option>
+              <option value="__non_subscription__">非订阅节点</option>
+            </select>
+            <input id="configNodeNameSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称" oninput="renderConfigNodes()" />
+            <input id="configNodeURLSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点 URL" oninput="renderConfigNodes()" />
+            <select id="configNodeNameSort" class="setting-input table-tool" onchange="renderConfigNodes()" title="名称排序">
+              <option value="default">默认排序</option>
+              <option value="asc">名称升序</option>
+              <option value="desc">名称降序</option>
+            </select>
+          </div>
           <div class="table-container">
             <table>
-              <thead><tr><th>名称</th><th>URI</th><th>来源</th><th>操作</th></tr></thead>
+              <thead><tr><th class="config-node-select-cell"><input id="configNodeSelectAll" class="config-node-select" type="checkbox" onchange="toggleAllVisibleConfigNodes(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>名称</th><th>URI</th><th>来源</th><th>操作</th></tr></thead>
               <tbody id="configNodesTableBody"></tbody>
             </table>
+            <div id="configNodesEmptyState" class="table-empty-state">暂无节点</div>
           </div>
         </div>
       </div>
@@ -957,7 +999,7 @@
         <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
           <h2 style="font-size:18px;">订阅配置</h2>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button class="btn" onclick="refreshManagedSubscription('')">更新全部</button>
+            <button id="subscriptionRefreshAllBtn" class="btn" onclick="refreshManagedSubscription('')">更新全部</button>
             <button class="btn btn-primary" onclick="showSubscriptionModal()">添加订阅</button>
           </div>
         </div>
@@ -981,14 +1023,36 @@
               <span>订阅 <strong id="subscriptionTotalCount">0</strong></span>
               <span>有效节点 <strong id="subscriptionActiveNodes">0</strong></span>
               <span>下次刷新 <strong id="subscriptionNextRefresh">-</strong></span>
+              <span>显示 <strong id="subscriptionVisibleCount">0</strong></span>
             </div>
+          </div>
+          <div class="table-filter-bar">
+            <select id="subscriptionStatusFilter" class="setting-input table-tool" onchange="renderSubscriptions()" title="状态筛选">
+              <option value="all">全部状态</option>
+              <option value="active">有效</option>
+              <option value="disabled">已关闭</option>
+              <option value="expired">已到期</option>
+              <option value="quota_exhausted">流量用尽</option>
+              <option value="error">更新失败</option>
+              <option value="pending">待更新</option>
+            </select>
+            <input id="subscriptionSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索订阅名称或 URL" oninput="renderSubscriptions()" />
+            <select id="subscriptionSort" class="setting-input table-tool" onchange="renderSubscriptions()" title="订阅排序">
+              <option value="default">默认排序</option>
+              <option value="expires_asc">到期时间升序</option>
+              <option value="expires_desc">到期时间降序</option>
+              <option value="refresh_asc">最后更新升序</option>
+              <option value="refresh_desc">最后更新降序</option>
+              <option value="traffic_asc">已用流量升序</option>
+              <option value="traffic_desc">已用流量降序</option>
+            </select>
           </div>
           <div class="table-container">
             <table>
-              <thead><tr><th>状态</th><th>订阅</th><th>节点</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
+              <thead><tr><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
               <tbody id="subscriptionsTableBody"></tbody>
             </table>
-            <div id="subscriptionsEmptyState" style="display:none; text-align:center; padding:40px; color:var(--text-muted);">暂无订阅</div>
+            <div id="subscriptionsEmptyState" class="table-empty-state">暂无订阅</div>
           </div>
         </div>
       </div>
@@ -1109,10 +1173,12 @@
           </form>
 
           <div class="panel" style="margin-bottom:16px;">
-            <div class="panel-header">
+            <div class="panel-header console-log-panel-header">
               <div class="panel-title">控制台日志 (Console Logs)</div>
-              <div style="display:flex; align-items:center; gap:12px;">
+              <div class="console-log-actions">
+                <input id="consoleLogSearch" class="setting-input console-log-search" type="search" placeholder="搜索日志内容" aria-label="搜索日志内容" oninput="filterConsoleLogs()" />
                 <label style="font-size:13px; color:var(--text-muted); display:flex; align-items:center; gap:6px;"><input type="checkbox" id="autoScrollLogs" checked> 自动滚动</label>
+                <button class="btn btn-sm btn-danger" type="button" onclick="clearConsoleLogs()">清屏</button>
                 <button class="btn btn-sm" type="button" onclick="pollLogs()">↺ 刷新</button>
               </div>
             </div>
@@ -1261,7 +1327,7 @@
           <div class="checkbox-grid" id="projectSubscriptionCheckboxes">
             <!-- Populated dynamically -->
           </div>
-          <em style="font-size:11px;color:var(--text-muted);">勾选的订阅才会为该项目加载节点，后续新添加的订阅需手动勾选。</em>
+          <em style="font-size:11px;color:var(--text-muted);">勾选的订阅会为该项目加载节点；在项目页面新添加的订阅会自动关联当前项目。</em>
           <div class="form-section-grid">
             <div class="checkbox-row"><input type="checkbox" id="projectEnabled" checked /><label for="projectEnabled">启用项目</label></div>
             <div class="checkbox-row"><input type="checkbox" id="projectAutostart" checked /><label for="projectAutostart">服务启动时自动运行</label></div>
@@ -1313,7 +1379,9 @@
   <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
 
   <script>
-    let currentProjectID = localStorage.getItem('proxy2apiProject') || '';
+    const storedProjectID = localStorage.getItem('proxy2apiProject');
+    let currentProjectID = storedProjectID === '__all__' ? '' : (storedProjectID || '');
+    let projectScopeInitialized = storedProjectID !== null;
     let defaultProjectID = '';
     let projectsCache = [];
     let projectPortHintsCache = {occupied: [], recommended: {}};
@@ -1328,6 +1396,11 @@
       return `/api/projects/${encodeURIComponent(currentProjectID)}${path.slice(4)}`;
     }
 
+    function globalScopePath(path) {
+      if (currentProjectID || typeof path !== 'string') return path;
+      return `${path}${path.includes('?') ? '&' : '?'}scope=global`;
+    }
+
     window.fetch = function(input, init) {
 	  if (typeof input === 'string') {
 		const scopedPath = projectAPIPath(input);
@@ -1335,7 +1408,7 @@
 		const isProjectRequest = scopedPath !== input;
 		return nativeFetch(scopedPath, init).then(response => {
 		  if (isProjectRequest && scopedProject !== currentProjectID) {
-			throw new DOMException('Project switched while request was pending', 'AbortError');
+			throw new DOMException('切换项目时请求仍在处理中', 'AbortError');
 		  }
 		  return response;
 		});
@@ -1350,10 +1423,16 @@
     let sweepProgressPollTimer = null;
     let sweepProgressHideTimer = null;
     let sweepStartPollsRemaining = 0;
+    let probeCancellationRequested = false;
+    let probeCancelInProgress = false;
+    let activeProbeController = null;
+    let activeProbeCancelPath = '';
     let currentRegionFilter = 'all';
     let nodeRenderLimit = 300;
     let isEditMode = false;
     let configNodes = [];
+    let visibleConfigNodeNames = [];
+    let selectedConfigNodeNames = new Set();
     let subscriptionsCache = [];
     let stickyNodeTag = '';
     let stickyEnabled = false;
@@ -1373,10 +1452,18 @@
     }
 
     // Chart instances
-    let latencyChartInst = null;
+    const WORLD_MAP_NAME = 'proxy2api-world';
+    const WORLD_MAP_URL = 'https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@v5.1.2/geojson/ne_50m_admin_0_countries.geojson';
+    let worldMapLoadPromise = null;
+    let regionMapChartInst = null;
     let successRateChartInst = null;
     let failureChartInst = null;
     let trafficChartInst = null;
+    let trafficCalendarChartInst = null;
+    let trafficCalendarPayload = null;
+    let trafficCalendarLoadToken = 0;
+    let trafficCalendarLastLoadedAt = 0;
+    let trafficCalendarLastScope = '';
     let trafficSource = null;
     let trafficDataUp = [];
     let trafficDataDown = [];
@@ -1384,10 +1471,11 @@
 
     // Resize observer for charts
     window.addEventListener('resize', () => {
-      latencyChartInst && latencyChartInst.resize();
+      regionMapChartInst && regionMapChartInst.resize();
       successRateChartInst && successRateChartInst.resize();
       failureChartInst && failureChartInst.resize();
       trafficChartInst && trafficChartInst.resize();
+      trafficCalendarChartInst && trafficCalendarChartInst.resize();
     });
 
     function showToast(msg, type='success') {
@@ -1404,7 +1492,7 @@
     }
 
     function isSharedCatalogMode() {
-      return !currentProjectID && projectsCache.length === 0;
+      return !currentProjectID;
     }
 
     function projectStatusView(status) {
@@ -1560,15 +1648,26 @@
     function renderProjectSelector() {
       const select = document.getElementById('projectSelect');
       select.replaceChildren();
-      if (!projectsCache.length) {
-        select.add(new Option('全部（无项目）', ''));
-      }
+      select.add(new Option('全局', ''));
       projectsCache.forEach(project => {
         const option = new Option(project.name, project.id);
         select.add(option);
       });
       select.value = currentProjectID;
       select.disabled = projectsCache.length === 0;
+      syncRuntimeControls();
+    }
+
+    function syncRuntimeControls() {
+      const hasProject = Boolean(currentProject());
+      const probeButton = document.getElementById('probeAllBtn');
+      if (probeButton) {
+        probeButton.disabled = false;
+        probeButton.style.display = '';
+        probeButton.title = hasProject ? '' : '手动探测全局目录中的全部节点';
+      }
+      const refreshButton = document.getElementById('refreshSubBtn');
+      if (refreshButton && !hasProject) refreshButton.style.display = 'none';
     }
 
     function renderProjectManagement() {
@@ -1644,14 +1743,15 @@
       projectsCache = data.items || [];
       projectPortHintsCache = data.port_hints || {occupied: [], recommended: {}};
       defaultProjectID = data.default_project || '';
-      if (!projectsCache.some(project => project.id === currentProjectID)) {
+      if ((!projectScopeInitialized || currentProjectID) && !projectsCache.some(project => project.id === currentProjectID)) {
         currentProjectID = defaultProjectID || projectsCache[0]?.id || '';
         if (currentProjectID) {
           localStorage.setItem('proxy2apiProject', currentProjectID);
         } else {
-          localStorage.removeItem('proxy2apiProject');
+          localStorage.setItem('proxy2apiProject', '__all__');
         }
       }
+      projectScopeInitialized = true;
       renderProjectSelector();
       return currentProject();
     }
@@ -1688,7 +1788,7 @@
       const tbody = document.getElementById('projectProbeSettingsTableBody');
       if (!tbody) return;
       const panel = document.getElementById('projectProbeSettingsPanel');
-      if (panel) panel.style.display = projectsCache.length ? 'block' : 'none';
+      if (panel) panel.style.display = currentProject() ? 'block' : 'none';
       const projects = currentProject() ? [currentProject()] : [];
       tbody.innerHTML = projects.map(project => {
         const probe = projectScheduleSettings(project).probe;
@@ -1732,7 +1832,7 @@
       const tbody = document.getElementById('projectSubscriptionSettingsTableBody');
       if (!tbody) return;
       const panel = document.getElementById('projectSubscriptionSettingsPanel');
-      if (panel) panel.style.display = projectsCache.length ? 'block' : 'none';
+      if (panel) panel.style.display = currentProject() ? 'block' : 'none';
       const projects = currentProject() ? [currentProject()] : [];
       tbody.innerHTML = projects.map(project => {
         const subscription = projectScheduleSettings(project).subscription_refresh;
@@ -1812,6 +1912,8 @@
     function resetProjectView() {
       allNodesCache = [];
       configNodes = [];
+      visibleConfigNodeNames = [];
+      selectedConfigNodeNames.clear();
       subscriptionsCache = [];
       cachedBlacklistDuration = null;
       stickyNodeTag = '';
@@ -1824,15 +1926,21 @@
       trafficDataUp = [];
       trafficDataDown = [];
       trafficTime = [];
+      trafficCalendarLoadToken++;
+      trafficCalendarPayload = null;
+      trafficCalendarLastLoadedAt = 0;
+      trafficCalendarLastScope = '';
 	  stopLogPolling();
-	  document.getElementById('configNodesTableBody').replaceChildren();
 	  document.getElementById('subscriptionWarning').style.display = 'none';
-	  document.getElementById('subscriptionsTableBody').replaceChildren();
-	  document.getElementById('subscriptionsEmptyState').style.display = 'block';
 	  document.getElementById('subscriptionTotalCount').textContent = '0';
 	  document.getElementById('subscriptionActiveNodes').textContent = '0';
 	  document.getElementById('subscriptionNextRefresh').textContent = '-';
-	  document.getElementById('currentSubscriptionProjectName').textContent = currentProject()?.name || '全部（无项目）';
+	  document.getElementById('currentSubscriptionProjectName').textContent = currentProject()?.name || '全局';
+	  renderProjectProbeSettings();
+	  renderProjectSubscriptionSettings();
+	  syncConfigNodeFilterOptions();
+	  renderConfigNodes();
+	  renderSubscriptions();
 	  document.getElementById('debugNodesTableBody').replaceChildren();
 	  document.getElementById('debugTotalUpload').textContent = '0 B';
 	  document.getElementById('debugTotalDownload').textContent = '0 B';
@@ -1840,26 +1948,30 @@
 	  disconnectDebugTraffic();
 	  debugTrafficUpTotal = 0;
 	  debugTrafficDownTotal = 0;
-	  document.getElementById('consoleLogs').value = '';
+      consoleLogsRaw = '';
+      document.getElementById('consoleLogs').value = '';
 	  window._debugNodes = [];
 	  _savedCoreSnapshot = '';
 	  document.querySelector('#settingsTab form')?.reset();
-	  latencyChartInst && latencyChartInst.clear();
-	  successRateChartInst && successRateChartInst.clear();
+      regionMapChartInst && regionMapChartInst.clear();
+      const regionMapMetrics = document.getElementById('regionMapMetrics');
+      if (regionMapMetrics) regionMapMetrics.textContent = '';
+      successRateChartInst && successRateChartInst.clear();
 	  failureChartInst && failureChartInst.clear();
 	  trafficChartInst && trafficChartInst.clear();
+      trafficCalendarChartInst && trafficCalendarChartInst.clear();
       updateDashboardStats({nodes: []});
       applyNodeFilters();
     }
 
     async function switchProject(projectID) {
-      if (!projectID) return;
       if (projectID === currentProjectID) {
         renderProjectManagement();
         return;
       }
       currentProjectID = projectID;
-      localStorage.setItem('proxy2apiProject', currentProjectID);
+      projectScopeInitialized = true;
+      localStorage.setItem('proxy2apiProject', currentProjectID || '__all__');
       resetProjectView();
       renderProjectSelector();
       renderProjectManagement();
@@ -1875,6 +1987,8 @@
         await refresh();
         connectTrafficSSE();
 		if (activeTab && activeTab.id === 'debugTab') loadDebugData();
+      } else if (isSharedCatalogMode()) {
+        await refresh();
       }
     }
 
@@ -1906,7 +2020,11 @@
       // Collect selected subscriptions from checkbox grid
       const checkboxes = document.querySelectorAll('#projectSubscriptionCheckboxes input[type="checkbox"]');
       const selectedSubscriptions = [];
-      checkboxes.forEach(cb => { if (cb.checked) selectedSubscriptions.push(cb.value); });
+      const excludedSubscriptions = [];
+      checkboxes.forEach(cb => {
+        if (cb.checked) selectedSubscriptions.push(cb.value);
+        else excludedSubscriptions.push(cb.value);
+      });
       return {
         mode: document.getElementById('projectMode').value,
         external_ip: document.getElementById('projectExternalIP').value.trim(),
@@ -1936,7 +2054,8 @@
         },
         probe: schedules.probe,
         subscription_refresh: schedules.subscription_refresh,
-        selected_subscriptions: selectedSubscriptions
+        selected_subscriptions: selectedSubscriptions,
+        excluded_subscriptions: excludedSubscriptions
       };
     }
 
@@ -1993,7 +2112,7 @@
       try {
         const res = await nativeFetch('/api/subscriptions');
         const data = await res.json();
-        subscriptions = (data.items || []).map(item => ({
+        subscriptions = (data.global_items || data.items || []).map(item => ({
           url: item.url,
           name: item.name || item.url
         }));
@@ -2005,11 +2124,14 @@
         }
       }
       const selected = (settings && settings.selected_subscriptions) || [];
+      const excluded = (settings && settings.excluded_subscriptions) || [];
       const selectedMap = {};
+      const excludedMap = {};
       selected.forEach(url => { selectedMap[url] = true; });
+      excluded.forEach(url => { excludedMap[url] = true; });
       grid.innerHTML = subscriptions.map((subscription, i) => {
         const {url, name} = subscription;
-        const checked = selected.length === 0 || selectedMap[url] ? 'checked' : '';
+        const checked = !excludedMap[url] && (selected.length === 0 || selectedMap[url]) ? 'checked' : '';
         const id = `subcheck-${i}`;
         return `<div class="checkbox-row" title="${escapeHtml(url)}">
           <input type="checkbox" id="${id}" value="${escapeHtml(url)}" ${checked} />
@@ -2084,7 +2206,7 @@
       try {
         const response = await nativeFetch(`/api/projects/${encodeURIComponent(project.id)}/${action}`, {method:'POST'});
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || `${action} failed`);
+        if (!response.ok) throw new Error(data.error || (action === 'start' ? '启动项目失败' : '停止项目失败'));
         await loadProjects();
         if (project.id === currentProjectID) {
           resetProjectView();
@@ -2166,7 +2288,7 @@
       const text = String(message || '').trim();
       if (!text) return;
       try {
-        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('clipboard unavailable');
+        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('剪贴板不可用');
         await navigator.clipboard.writeText(text);
       } catch (error) {
         const textarea = document.createElement('textarea');
@@ -2207,7 +2329,7 @@
       try {
         const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password:pwd})});
 		if (res.ok) { document.getElementById('loginOverlay').classList.remove('show'); await initializeProjects(); }
-        else { err.textContent = 'Auth Failed'; err.style.display = 'block'; }
+        else { err.textContent = '登录验证失败'; err.style.display = 'block'; }
       } catch (ex) { err.textContent = ex.message; err.style.display = 'block'; }
     }
 
@@ -2261,7 +2383,7 @@
       return 'var(--error)';
     }
     function formatTime(ts) {
-      if(tsc || ts==='0001-01-01T00:00:00Z') return '-';
+      if(!ts || ts==='0001-01-01T00:00:00Z') return '-';
       return new Date(ts).toLocaleTimeString();
     }
 
@@ -2310,7 +2432,7 @@
 
     async function refresh() {
       try {
-        const res = await fetch('/api/nodes');
+        const res = await fetch(globalScopePath('/api/nodes'));
         if (res.status === 401) { document.getElementById('loginOverlay').classList.add('show'); stopAutoRefresh(); return; }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -2349,7 +2471,7 @@
       sweepProgressPollTimer = null;
       if (isProbing) return;
       try {
-        const res = await fetch('/api/nodes');
+        const res = await fetch(globalScopePath('/api/nodes'));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const wasActive = sweepWasActive;
@@ -2381,6 +2503,17 @@
     function updateSweepProgress(sweep) {
       if (isProbing) return;
       const wrap = document.getElementById('probeProgress');
+      if (probeCancellationRequested) {
+        wrap.classList.remove('show');
+        if (sweep && sweep.active) {
+          scheduleSweepProgressPoll(250);
+        } else {
+          probeCancellationRequested = false;
+          sweepWasActive = false;
+          document.getElementById('probeAllBtn').disabled = false;
+        }
+        return;
+      }
       if (sweep && sweep.active && sweep.total > 0) {
         if (sweepProgressHideTimer) {
           clearTimeout(sweepProgressHideTimer);
@@ -2393,6 +2526,8 @@
         const pct = sweep.total > 0 ? (sweep.done / sweep.total * 100) : 0;
         document.getElementById('probeProgressFill').style.width = `${pct}%`;
         wrap.classList.add('show');
+        document.getElementById('probeAllBtn').disabled = true;
+        document.getElementById('cancelProbeBtn').disabled = false;
         sweepWasActive = true;
         scheduleSweepProgressPoll();
       } else if (sweepWasActive) {
@@ -2404,6 +2539,7 @@
           if (!isProbing && !sweepWasActive) wrap.classList.remove('show');
           sweepProgressHideTimer = null;
         }, 1500);
+        document.getElementById('probeAllBtn').disabled = false;
       }
     }
 
@@ -2428,91 +2564,327 @@
 
     function getCssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
-    function renderRegionAvailability() {
+    function countryDisplayName(countryCode) {
+      if (!/^[A-Z]{2}$/.test(countryCode)) return countryCode || '未知地区';
+      try {
+        if (typeof Intl.DisplayNames === 'function') {
+          return new Intl.DisplayNames(['zh-CN'], {type: 'region'}).of(countryCode) || countryCode;
+        }
+      } catch (error) {}
+      return countryCode;
+    }
+
+    function ensureWorldMap() {
+      if (echarts.getMap(WORLD_MAP_NAME)) return Promise.resolve();
+      if (worldMapLoadPromise) return worldMapLoadPromise;
+
+      worldMapLoadPromise = nativeFetch(WORLD_MAP_URL, {cache: 'force-cache'})
+        .then(response => {
+          if (!response.ok) throw new Error(`地图资源加载失败 (${response.status})`);
+          return response.json();
+        })
+        .then(geoJSON => {
+          for (const feature of geoJSON.features || []) {
+            const properties = feature.properties || (feature.properties = {});
+            const countryCode = [properties.ISO_A2_EH, properties.ISO_A2, properties.POSTAL, properties.WB_A2]
+              .map(value => String(value || '').trim().toUpperCase())
+              .find(value => /^[A-Z]{2}$/.test(value));
+            properties.name = countryCode || properties.NAME_EN || properties.NAME || properties.ADMIN || 'UNKNOWN';
+          }
+          echarts.registerMap(WORLD_MAP_NAME, geoJSON);
+        })
+        .catch(error => {
+          worldMapLoadPromise = null;
+          throw error;
+        });
+      return worldMapLoadPromise;
+    }
+
+    async function renderRegionAvailability() {
       const container = document.getElementById('regionAvailability');
       if (!container) return;
 
-      const regionStats = new Map();
+      const countryStats = new Map();
       allNodesCache.forEach(node => {
-        const rawRegion = String(node.region || '').trim();
-        const key = rawRegion ? rawRegion.toLowerCase() : 'other';
-        if (!regionStats.has(key)) {
-          regionStats.set(key, { name: rawRegion ? rawRegion.toUpperCase() : 'OTHER', total: 0, healthy: 0 });
+        const countryCode = String(node.country || node.region || '').trim().toUpperCase();
+        if (!/^[A-Z]{2}$/.test(countryCode)) {
+          return;
         }
-        const stat = regionStats.get(key);
+        if (!countryStats.has(countryCode)) countryStats.set(countryCode, {countryCode, total: 0, healthy: 0, latencyNodes: []});
+        const stat = countryStats.get(countryCode);
         stat.total++;
         if (!node.blacklisted && node.initial_check_done && node.available) stat.healthy++;
+        const latency = Number(node.last_latency_ms);
+        if (!node.blacklisted && Number.isFinite(latency) && latency > 0) {
+          stat.latencyNodes.push({name: node.name || node.tag || '未命名节点', latency});
+        }
       });
 
-      const regions = Array.from(regionStats.values())
-        .map(stat => ({ ...stat, rate: stat.total > 0 ? Math.round(stat.healthy / stat.total * 100) : 0 }))
-        .sort((a, b) => b.healthy - a.healthy || b.total - a.total || a.name.localeCompare(b.name));
-      const healthyTotal = regions.reduce((sum, stat) => sum + stat.healthy, 0);
-      const nodeTotal = regions.reduce((sum, stat) => sum + stat.total, 0);
+      const countries = Array.from(countryStats.values()).map(stat => ({
+        ...stat,
+        rate: stat.total > 0 ? Math.round(stat.healthy / stat.total * 100) : 0,
+        latencyNodes: stat.latencyNodes
+          .sort((a, b) => a.latency - b.latency)
+          .slice(0, 5),
+        best_latency_ms: stat.latencyNodes.length ? stat.latencyNodes[0].latency : null
+      }));
+      const healthyTotal = countries.reduce((sum, stat) => sum + stat.healthy, 0);
+      const locatedTotal = countries.reduce((sum, stat) => sum + stat.total, 0);
+      const compactMap = window.innerWidth <= 760;
+      const latencyValues = countries
+        .map(stat => stat.best_latency_ms)
+        .filter(latency => Number.isFinite(latency) && latency > 0);
+      const latencyMin = latencyValues.length ? Math.min(...latencyValues) : 0;
+      const latencyMax = latencyValues.length ? Math.max(...latencyValues) : 1;
+      const latencyScaleMax = latencyMax > latencyMin ? latencyMax : latencyMin + 1;
+      const mapMetrics = [
+        ['国家', `${countries.length}`],
+        ['延迟', latencyValues.length ? `${latencyMin}-${latencyScaleMax} ms` : '-'],
+        ['可用', `${healthyTotal}/${locatedTotal}`]
+      ];
+      const metricsElement = document.getElementById('regionMapMetrics');
+      if (metricsElement) metricsElement.textContent = mapMetrics.map(metric => `${metric[0]}：${metric[1]}`).join(' · ');
 
-      if (regions.length === 0) {
-        container.innerHTML = '<div class="region-empty">暂无地域数据</div>';
+      if (!regionMapChartInst) {
+        container.replaceChildren();
+        regionMapChartInst = initEchart('regionAvailability');
+      }
+      const chart = regionMapChartInst;
+      if (!chart) return;
+      if (!echarts.getMap(WORLD_MAP_NAME)) {
+        chart.showLoading('default', {
+          text: '正在加载全球地图',
+          color: getCssVar('--primary'),
+          textColor: getCssVar('--text-muted'),
+          maskColor: 'transparent'
+        });
+      }
+
+      try {
+        await ensureWorldMap();
+        if (chart.isDisposed()) return;
+        chart.hideLoading();
+        chart.setOption({
+          backgroundColor: 'transparent',
+          tooltip: {
+            trigger: 'item',
+            backgroundColor: getCssVar('--bg-panel'),
+            borderColor: getCssVar('--border'),
+            textStyle: {color: getCssVar('--text-main')},
+            formatter: params => {
+              const countryName = countryDisplayName(params.name);
+              const stat = params.data;
+              if (!stat || !Number.isFinite(stat.total)) return `${escapeHtml(countryName)}<br/>暂无节点`;
+              const latencyList = (stat.latencyNodes || [])
+                .map((node, index) => `${index + 1}. ${escapeHtml(node.name)}：${node.latency} ms`)
+                .join('<br/>');
+              return `国家：${escapeHtml(countryName)} · ${escapeHtml(stat.countryCode)}<br/>延迟（前 5）：<br/>${latencyList || '暂无有效延迟'}<br/>可用：${stat.healthy} / ${stat.total}（${stat.rate}%）`;
+            }
+          },
+          visualMap: {
+            show: false,
+            type: 'continuous',
+            min: latencyMin,
+            max: latencyScaleMax,
+            seriesIndex: 0,
+            inRange: {color: [getCssVar('--success'), getCssVar('--warning'), getCssVar('--error')]},
+            outOfRange: {color: [getCssVar('--bg-hover')]}
+          },
+          series: [{
+            name: '国家最佳延迟',
+            type: 'map',
+            map: WORLD_MAP_NAME,
+            roam: true,
+            scaleLimit: {min: 1, max: 8},
+            layoutCenter: compactMap ? ['50%', '50%'] : ['50%', '50%'],
+            layoutSize: compactMap ? '110%' : '120%',
+            selectedMode: false,
+            itemStyle: {
+              areaColor: getCssVar('--bg-hover'),
+              borderColor: getCssVar('--border'),
+              borderWidth: 0.7
+            },
+            emphasis: {
+              label: {show: false},
+              itemStyle: {borderColor: getCssVar('--text-main'), borderWidth: 1}
+            },
+            data: countries.map(stat => ({
+              name: stat.countryCode,
+              value: Number.isFinite(stat.best_latency_ms) ? stat.best_latency_ms : -1,
+              countryCode: stat.countryCode,
+              total: stat.total,
+              healthy: stat.healthy,
+              rate: stat.rate,
+              latencyNodes: stat.latencyNodes,
+              best_latency_ms: stat.best_latency_ms
+            }))
+          }]
+        }, true);
+      } catch (error) {
+        if (!chart.isDisposed()) chart.dispose();
+        if (regionMapChartInst === chart) regionMapChartInst = null;
+        container.innerHTML = `<div class="region-empty">${escapeHtml(error.message || '全球地图加载失败')}</div>`;
+      }
+    }
+
+    function localMonthValue(date = new Date()) {
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    function renderTrafficCalendar(payload, errorMessage = '') {
+      const container = document.getElementById('trafficCalendarChart');
+      const totalLabel = document.getElementById('trafficCalendarTotal');
+      if (!container || !totalLabel) return;
+      if (!trafficCalendarChartInst) trafficCalendarChartInst = initEchart('trafficCalendarChart');
+      const chart = trafficCalendarChartInst;
+      if (!chart) return;
+
+      if (errorMessage) {
+        totalLabel.textContent = errorMessage;
+        chart.clear();
+        chart.setOption({
+          graphic: [{
+            type: 'text', left: 'center', top: 'middle', silent: true,
+            style: {text: errorMessage, fill: getCssVar('--text-muted'), font: '12px sans-serif'}
+          }]
+        }, true);
         return;
       }
 
-      const rows = regions.map(stat => {
-        const color = stat.healthy === 0 ? 'var(--error)' : (stat.healthy < stat.total ? 'var(--warning)' : 'var(--success)');
-        const title = `${stat.name}: ${stat.healthy}/${stat.total} 可用 (${stat.rate}%)`;
-        return `<div class="region-row" title="${escapeHtml(title)}">
-          <div class="region-name">${escapeHtml(stat.name)}</div>
-          <div class="region-count">${stat.healthy} / ${stat.total}</div>
-          <div class="region-rate">
-            <div class="region-rate-track"><div class="region-rate-fill" style="width:${stat.rate}%; background:${color};"></div></div>
-            <div class="region-rate-value">${stat.rate}%</div>
-          </div>
-        </div>`;
-      }).join('');
+      const month = payload?.month || document.getElementById('trafficCalendarMonth').value || localMonthValue();
+      const parts = month.split('-').map(Number);
+      const year = parts[0];
+      const monthNumber = parts[1];
+      const dayCount = new Date(year, monthNumber, 0).getDate();
+      const byDate = new Map((payload?.days || []).map(day => [day.date, day]));
+      const values = [];
+      for (let day = 1; day <= dayCount; day++) {
+        const date = `${month}-${String(day).padStart(2, '0')}`;
+        const detail = byDate.get(date) || {date, upload_bytes: 0, download_bytes: 0, total_bytes: 0};
+        values.push([date, Number(detail.total_bytes) || 0, Number(detail.upload_bytes) || 0, Number(detail.download_bytes) || 0]);
+      }
+      const totalBytes = Number(payload?.total_bytes) || 0;
+      const uploadBytes = Number(payload?.upload_bytes) || 0;
+      const downloadBytes = Number(payload?.download_bytes) || 0;
+      const maxDaily = Math.max(1, ...values.map(item => item[1]));
+      const compact = container.clientWidth < 600;
+      totalLabel.textContent = `总计 ${formatBytes(totalBytes)} · ↑ ${formatBytes(uploadBytes)} · ↓ ${formatBytes(downloadBytes)}`;
 
-      container.innerHTML = `
-        <div class="region-overview">
-          <span>地域<strong>${regions.length}</strong></span>
-          <span>可用节点<strong>${healthyTotal} / ${nodeTotal}</strong></span>
-        </div>
-        <div class="region-list">
-          <div class="region-list-header"><span>地域</span><span>可用 / 总数</span><span>可用率</span></div>
-          ${rows}
-        </div>`;
+      chart.setOption({
+        backgroundColor: 'transparent',
+        tooltip: {
+          trigger: 'item',
+          renderMode: 'richText',
+          backgroundColor: getCssVar('--bg-panel'),
+          borderColor: getCssVar('--border'),
+          textStyle: {color: getCssVar('--text-main')},
+          formatter: params => {
+            const value = params.value || [];
+            return `${value[0] || ''}\n总流量：${formatBytes(value[1])}\n上行：${formatBytes(value[2])}\n下行：${formatBytes(value[3])}`;
+          }
+        },
+        visualMap: {
+          min: 0,
+          max: maxDaily,
+          type: 'continuous',
+          orient: 'horizontal',
+          left: 'center',
+          bottom: 4,
+          itemWidth: 8,
+          itemHeight: compact ? 100 : 160,
+          calculable: false,
+          hoverLink: false,
+          text: [formatBytes(maxDaily), '0 B'],
+          textGap: 8,
+          textStyle: {color: getCssVar('--text-muted'), fontSize: 11},
+          inRange: {color: [getCssVar('--bg-hover'), '#93c5fd', '#2563eb', '#0f766e']}
+        },
+        calendar: {
+          range: month,
+          orient: 'vertical',
+          top: window.innerWidth <= 760 ? 132 : 80,
+          bottom: 48,
+          left: compact ? 16 : 48,
+          right: compact ? 16 : 48,
+          cellSize: ['auto', 'auto'],
+          itemStyle: {color: getCssVar('--bg-hover'), borderColor: getCssVar('--bg-panel'), borderWidth: 3},
+          splitLine: {show: false},
+          yearLabel: {show: false},
+          monthLabel: {show: false},
+          dayLabel: {
+            show: true,
+            firstDay: 1,
+            nameMap: ['日', '一', '二', '三', '四', '五', '六'],
+            color: getCssVar('--text-muted'),
+            fontSize: 11,
+            margin: compact ? 6 : 10
+          }
+        },
+        series: [{
+          name: '每日总流量',
+          type: 'heatmap',
+          coordinateSystem: 'calendar',
+          data: values.map(value => ({
+            value,
+            label: {color: value[1] / maxDaily > 0.45 ? '#ffffff' : getCssVar('--text-main')}
+          })),
+          label: {
+            show: true,
+            position: 'insideTopLeft',
+            distance: 0,
+            padding: [5, 0, 0, 5],
+            fontSize: compact ? 10 : 12,
+            formatter: params => String(Number(String(params.value[0]).slice(-2)))
+          },
+          emphasis: {itemStyle: {borderColor: getCssVar('--text-main'), borderWidth: 1}}
+        }]
+      }, true);
+    }
+
+    async function loadTrafficCalendar(force = false) {
+      const monthInput = document.getElementById('trafficCalendarMonth');
+      if (!monthInput) return;
+      if (!monthInput.value) monthInput.value = localMonthValue();
+      const month = monthInput.value;
+      const project = currentProject();
+      if (project && project.status !== 'running') {
+        renderTrafficCalendar(null, '项目未运行');
+        return;
+      }
+
+      const scope = currentProjectID || '__global__';
+      const cacheKey = `${scope}|${month}`;
+      if (!force && trafficCalendarPayload && trafficCalendarLastScope === cacheKey && Date.now() - trafficCalendarLastLoadedAt < 60000) {
+        renderTrafficCalendar(trafficCalendarPayload);
+        return;
+      }
+
+      const token = ++trafficCalendarLoadToken;
+      document.getElementById('trafficCalendarTotal').textContent = '加载中...';
+      try {
+        const path = globalScopePath(`/api/traffic/calendar?month=${encodeURIComponent(month)}`);
+        const response = await fetch(path);
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        if (token !== trafficCalendarLoadToken || monthInput.value !== month || scope !== (currentProjectID || '__global__')) return;
+        trafficCalendarPayload = data;
+        trafficCalendarLastLoadedAt = Date.now();
+        trafficCalendarLastScope = cacheKey;
+        renderTrafficCalendar(data);
+      } catch (error) {
+        if (token !== trafficCalendarLoadToken) return;
+        trafficCalendarPayload = null;
+        renderTrafficCalendar(null, error.message || '流量历史加载失败');
+      }
     }
 
     function updateDashboardCharts() {
-      if(!latencyChartInst) latencyChartInst = initEchart('latencyChart');
-
       renderRegionAvailability();
+      loadTrafficCalendar();
 
       if (!allNodesCache || allNodesCache.length === 0) return;
 
-      // Latency Chart Data
-      const sorted = allNodesCache
-        .filter(n => !n.blacklisted && n.last_latency_ms > 0)
-        .sort((a,b) => a.last_latency_ms - b.last_latency_ms)
-        .slice(0, 10);
-      const latencyX = sorted.map(n => n.name || n.tag);
-      const latencyY = sorted.map(n => n.last_latency_ms);
-
-      latencyChartInst && latencyChartInst.setOption({
-        backgroundColor: 'transparent',
-        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: getCssVar('--bg-panel'), borderColor: getCssVar('--border'), textStyle: { color: getCssVar('--text-main') } },
-        grid: { left: '3%', right: '4%', bottom: '5%', top: '25%', containLabel: true },
-        xAxis: { type: 'value', splitLine: { lineStyle: { color: getCssVar('--border'), type: 'dashed' } }, axisLabel: { color: getCssVar('--text-muted'), formatter: '{value} ms' } },
-        yAxis: { type: 'category', data: latencyX.reverse(), axisLabel: { color: getCssVar('--text-muted'), width: 90, overflow: 'truncate' } },
-        series: [{
-          name: 'Latency', type: 'bar', data: latencyY.reverse(),
-          itemStyle: {
-            color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [
-              { offset: 0, color: '#10b981' },
-              { offset: 1, color: '#3b82f6' }
-            ]),
-            borderRadius: [0, 4, 4, 0]
-          }
-        }]
-      });
-
-      // 3. Traffic Chart
+      // Traffic Chart
       if(!trafficChartInst) {
         trafficChartInst = initEchart('trafficChart');
         trafficChartInst.setOption({
@@ -2679,7 +3051,7 @@
           statusTitle = '尚未完成首次探测';
         } else if (!n.available) {
           badge = 'badge-error';
-          statusText = '异常 Error';
+          statusText = '异常';
           statusTitle = n.last_error || '最近一次探测失败';
         } else {
           badge = 'badge-healthy';
@@ -2743,7 +3115,7 @@
       showToast('探测中...');
       const partialRefreshTimer = setInterval(() => refresh(), 2000);
       try {
-        const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/probe', {method:'POST'});
+        const r = await fetch(globalScopePath('/api/nodes/'+encodeURIComponent(tag)+'/probe'), {method:'POST'});
         const d = await r.json();
         const details = [];
         if(d.connectivity_ok) {
@@ -2842,11 +3214,18 @@
     let isProbing = false;
     async function probeAllNodes() {
       if(isProbing) return; isProbing = true;
+      const controller = new AbortController();
+      activeProbeController = controller;
+      activeProbeCancelPath = projectAPIPath(globalScopePath('/api/nodes/probe-cancel'));
+      probeCancellationRequested = false;
+      document.getElementById('probeAllBtn').disabled = true;
+      document.getElementById('cancelProbeBtn').disabled = false;
+      document.getElementById('cancelProbeBtn').textContent = '取消探测';
       document.getElementById('probeProgress').classList.add('show');
       document.getElementById('probeProgressFill').style.width = '0%';
       let total = 0, current = 0, suc = 0, fail = 0;
       try {
-        const res = await fetch('/api/nodes/probe-all', { method: 'POST' });
+        const res = await fetch(globalScopePath('/api/nodes/probe-all'), { method: 'POST', signal: controller.signal });
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = '';
@@ -2873,18 +3252,58 @@
                    const traceFailed = Number(d.trace_failed) || 0;
                    const msg = `探测完成：延迟成功${d.success}，失败${d.failed}；Trace 成功${traceSuccess}，失败${traceFailed}`;
                    showToast(msg, traceFailed > 0 ? 'error' : 'success');
+                 } else if (d.type === 'cancelled') {
+                   showToast('探测已取消');
+                 } else if (d.type === 'error') {
+                   showToast(d.message || '批量探测失败', 'error');
                  }
                } catch(e){}
             }
           }
         }
-      } catch(e){}
+      } catch(e){
+        if (e.name !== 'AbortError') showToast(e.message || '批量探测失败', 'error');
+      }
       finally {
+        if (activeProbeController === controller) {
+          activeProbeController = null;
+          activeProbeCancelPath = '';
+        }
         isProbing = false;
+        document.getElementById('probeAllBtn').disabled = false;
+        document.getElementById('cancelProbeBtn').disabled = false;
+        document.getElementById('cancelProbeBtn').textContent = '取消探测';
         setTimeout(()=>{
           if (!sweepWasActive) document.getElementById('probeProgress').classList.remove('show');
           refresh();
         }, 2000);
+      }
+    }
+
+    async function cancelProbeAll() {
+      if (probeCancelInProgress) return;
+      probeCancelInProgress = true;
+      probeCancellationRequested = true;
+      const button = document.getElementById('cancelProbeBtn');
+      button.disabled = true;
+      button.textContent = '取消中...';
+      const cancelPath = activeProbeCancelPath || projectAPIPath(globalScopePath('/api/nodes/probe-cancel'));
+      if (activeProbeController) activeProbeController.abort();
+      try {
+        const response = await nativeFetch(cancelPath, {method:'POST'});
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || '取消探测失败');
+        showToast(data.cancelled ? '探测已取消' : data.message);
+        sweepStartPollsRemaining = 0;
+        document.getElementById('probeProgress').classList.remove('show');
+        scheduleSweepProgressPoll(250);
+      } catch (error) {
+        probeCancellationRequested = false;
+        showToast(error.message || '取消探测失败', 'error');
+      } finally {
+        probeCancelInProgress = false;
+        button.disabled = false;
+        button.textContent = '取消探测';
       }
     }
 
@@ -2906,7 +3325,8 @@
       return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
     }
 
-    function subscriptionStatusView(status) {
+    function subscriptionStatusView(status, globalView=false) {
+      if (globalView && status === 'not_in_project') return ['badge-offline', '已配置'];
       switch (status) {
         case 'disabled': return ['badge-offline', '已关闭'];
         case 'active': return ['badge-healthy', '有效'];
@@ -2918,10 +3338,11 @@
     }
 
     function applyCurrentSubscriptionPayload(data) {
-      subscriptionsCache = data.items || [];
+      const globalView = !currentProjectID;
+      subscriptionsCache = globalView ? (data.global_items || data.items || []) : (data.items || []);
       document.getElementById('subscriptionTotalCount').textContent = subscriptionsCache.length;
       document.getElementById('subscriptionActiveNodes').textContent = data.node_count || 0;
-      document.getElementById('subscriptionNextRefresh').textContent = data.enabled ? formatDateTime(data.next_refresh) : '-';
+      document.getElementById('subscriptionNextRefresh').textContent = globalView ? '-' : (data.enabled ? formatDateTime(data.next_refresh) : '-');
       renderSubscriptions();
     }
 
@@ -2934,7 +3355,7 @@
     }
 
     async function loadCurrentProjectSubscriptions() {
-      const response = await fetch('/api/subscriptions');
+      const response = await fetch(globalScopePath('/api/subscriptions'));
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '加载失败');
       applyCurrentSubscriptionPayload(data);
@@ -2945,7 +3366,11 @@
         await loadProjects();
         renderProjectSubscriptionSettings();
         const project = currentProject();
-        document.getElementById('currentSubscriptionProjectName').textContent = project ? project.name : '全部（无项目）';
+        const refreshAllButton = document.getElementById('subscriptionRefreshAllBtn');
+        refreshAllButton.disabled = Boolean(project && project.status !== 'running');
+        refreshAllButton.style.display = '';
+        refreshAllButton.title = project ? '' : '手动更新全部全局订阅';
+        document.getElementById('currentSubscriptionProjectName').textContent = project ? project.name : '全局';
         if (!project && isSharedCatalogMode()) {
           await loadCurrentProjectSubscriptions();
           return;
@@ -2963,35 +3388,84 @@
     function renderSubscriptions() {
       const tbody = document.getElementById('subscriptionsTableBody');
       const empty = document.getElementById('subscriptionsEmptyState');
-      empty.style.display = subscriptionsCache.length ? 'none' : 'block';
-      tbody.innerHTML = subscriptionsCache.map(item => {
-        const [badge, label] = subscriptionStatusView(item.status);
+      const statusFilter = document.getElementById('subscriptionStatusFilter')?.value || 'all';
+      const query = (document.getElementById('subscriptionSearchInput')?.value || '').trim().toLowerCase();
+      const sort = document.getElementById('subscriptionSort')?.value || 'default';
+      const knownStatuses = ['active', 'disabled', 'expired', 'quota_exhausted', 'error'];
+      const globalView = !currentProjectID;
+      const projectsHeader = document.getElementById('subscriptionProjectsHeader');
+      if (projectsHeader) projectsHeader.style.display = globalView ? '' : 'none';
+      const items = subscriptionsCache
+        .map((item, index) => ({item, index}))
+        .filter(({item}) => {
+          const status = knownStatuses.includes(item.status) ? item.status : 'pending';
+          if (statusFilter !== 'all' && status !== statusFilter) return false;
+          if (!query) return true;
+          return [item.name, item.url, ...(item.used_by_projects || [])].some(value => String(value || '').toLowerCase().includes(query));
+        });
+      if (sort !== 'default') {
+        const direction = sort.endsWith('_asc') ? 1 : -1;
+        const field = sort.replace(/_(asc|desc)$/, '');
+        items.sort((a, b) => {
+          if (field === 'traffic') {
+            return direction * ((Number(a.item.used_bytes) || 0) - (Number(b.item.used_bytes) || 0)) || a.index - b.index;
+          }
+          const key = field === 'expires' ? 'expires_at' : 'last_refresh';
+          const aValue = subscriptionSortTime(a.item[key]);
+          const bValue = subscriptionSortTime(b.item[key]);
+          if (!aValue && !bValue) return a.index - b.index;
+          if (!aValue) return 1;
+          if (!bValue) return -1;
+          return direction * (aValue - bValue) || a.index - b.index;
+        });
+      }
+      const visibleItems = items.map(entry => entry.item);
+      empty.textContent = subscriptionsCache.length ? '没有匹配的订阅' : '暂无订阅';
+      empty.style.display = visibleItems.length ? 'none' : 'block';
+      document.getElementById('subscriptionVisibleCount').textContent = visibleItems.length;
+      tbody.innerHTML = visibleItems.map(item => {
+        const [badge, label] = subscriptionStatusView(item.status, globalView);
+		const modifyLabel = globalView ? '修改' : '全局修改';
+		const toggleLabel = `${globalView ? '' : '全局'}${item.enabled ? '关闭' : '开启'}`;
+		const deleteLabel = globalView ? '删除' : '移出项目';
         const traffic = item.total_bytes > 0
           ? `${formatBytes(item.used_bytes)} / ${formatBytes(item.total_bytes)}`
           : (item.used_bytes > 0 ? `${formatBytes(item.used_bytes)} / 不限` : '-');
         const remaining = item.total_bytes > 0 ? `剩余 ${formatBytes(item.remaining_bytes)}` : '';
+        const usedByProjects = (item.used_by_projects || []).filter(Boolean);
+        const usedByText = usedByProjects.length ? usedByProjects.join('、') : '-';
         const statusTitle = item.last_error || (item.included ? '节点已加入节点池' : '节点未加入节点池');
         return `<tr>
           <td><span class="badge ${badge}" title="${escapeHtml(statusTitle)}">${label}</span></td>
           <td><div class="cell-trunc" style="max-width:300px;font-weight:500" title="${escapeHtml(item.url)}">${escapeHtml(item.name || item.url)}</div><div class="cell-trunc tt-mono" style="max-width:300px;font-size:11px;color:var(--text-muted)" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</div></td>
+          ${globalView ? `<td><div class="cell-trunc" style="max-width:220px" title="${escapeHtml(usedByText)}">${escapeHtml(usedByText)}</div></td>` : ''}
           <td class="tt-mono">${item.node_count || 0}</td>
           <td><div class="tt-mono">${traffic}</div><div style="font-size:11px;color:var(--text-muted)">${remaining}</div></td>
           <td class="tt-mono">${item.expires_at > 0 ? formatDateTime(item.expires_at) : '-'}</td>
           <td class="tt-mono">${formatDateTime(item.last_refresh)}</td>
           <td>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
-              <button class="btn btn-sm" onclick="showSubscriptionModal('${escapeAttrJs(item.url)}')">修改</button>
-              <button class="btn btn-sm ${item.enabled ? '' : 'btn-primary'}" onclick="toggleSubscription('${escapeAttrJs(item.url)}', ${item.enabled ? 'false' : 'true'})">${item.enabled ? '关闭' : '开启'}</button>
+              <button class="btn btn-sm" onclick="showSubscriptionModal('${escapeAttrJs(item.url)}')">${modifyLabel}</button>
+              <button class="btn btn-sm ${item.enabled ? '' : 'btn-primary'}" onclick="toggleSubscription('${escapeAttrJs(item.url)}', ${item.enabled ? 'false' : 'true'})">${toggleLabel}</button>
               <button class="btn btn-sm" onclick="refreshManagedSubscription('${escapeAttrJs(item.url)}')" ${item.enabled ? '' : 'disabled'}>更新</button>
-              <button class="btn btn-sm btn-danger" onclick="deleteSubscription('${escapeAttrJs(item.url)}')">删除</button>
+              <button class="btn btn-sm btn-danger" onclick="deleteSubscription('${escapeAttrJs(item.url)}')">${deleteLabel}</button>
             </div>
           </td>
         </tr>`;
       }).join('');
     }
 
+    function subscriptionSortTime(value) {
+      if (!value || value === '0001-01-01T00:00:00Z') return 0;
+      if (typeof value === 'number') return value;
+      const milliseconds = new Date(value).getTime();
+      return Number.isNaN(milliseconds) ? 0 : milliseconds;
+    }
+
     function showSubscriptionModal(rawURL='') {
-      document.getElementById('subscriptionModalTitle').textContent = rawURL ? '修改订阅' : '添加订阅';
+      document.getElementById('subscriptionModalTitle').textContent = rawURL
+        ? '修改全局订阅'
+        : (currentProjectID ? '添加全局订阅并加入当前项目' : '添加全局订阅');
       document.getElementById('subscriptionURL').value = rawURL;
       document.getElementById('subscriptionOriginalURL').value = rawURL;
       document.getElementById('subscriptionModalOverlay').classList.add('show');
@@ -3001,12 +3475,17 @@
       event.preventDefault();
       const url = document.getElementById('subscriptionURL').value.trim();
       const originalURL = document.getElementById('subscriptionOriginalURL').value;
-      showFullscreenLoading(originalURL ? '修改订阅中...' : '添加订阅中...', '正在更新节点池');
+      if (originalURL && currentProjectID && !confirm('修改订阅地址会影响所有项目，确定继续？')) return;
+      const project = currentProject();
+      showFullscreenLoading(
+        originalURL ? '修改订阅中...' : '添加订阅中...',
+        project ? '正在更新项目节点池' : '正在保存全局订阅定义'
+      );
       try {
-        const response = await fetch('/api/subscriptions', {
+        const response = await fetch(globalScopePath('/api/subscriptions'), {
           method: originalURL ? 'PUT' : 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({url, original_url: originalURL})
+          body: JSON.stringify({url, original_url: originalURL, scope: currentProjectID ? 'project' : 'global'})
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || '保存失败');
@@ -3022,13 +3501,19 @@
     }
 
     async function deleteSubscription(rawURL) {
-      if (!confirm('确定删除该订阅并移出其节点？')) return;
+      const deleteGlobal = !currentProjectID;
+      if (currentProjectID) {
+        if (!confirm('确定仅从当前项目移除该订阅及其节点？\n\n全局订阅及其他项目不会受影响。')) return;
+      } else if (!confirm('确定删除该全局订阅并移出其节点？')) {
+        return;
+      }
       showFullscreenLoading('删除订阅中...', '正在更新节点池');
       try {
-        const response = await fetch('/api/subscriptions', {method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:rawURL})});
+        const response = await fetch(globalScopePath('/api/subscriptions'), {method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:rawURL, delete_global:deleteGlobal, scope:deleteGlobal ? 'global' : 'project'})});
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || '删除失败');
-        if (data.refresh_error) showToast(data.refresh_error, 'error'); else showToast('订阅已删除');
+        if (data.refresh_error || data.reload_error) showToast(data.refresh_error || data.reload_error, 'error');
+        else showToast(data.message || (deleteGlobal ? '全局订阅已删除' : '订阅已从当前项目移除'));
         await loadSubscriptionsPage();
         refresh();
       } catch (error) {
@@ -3039,12 +3524,13 @@
     }
 
     async function toggleSubscription(rawURL, enabled) {
-      showFullscreenLoading(enabled ? '开启订阅中...' : '关闭订阅中...', enabled ? '正在恢复缓存节点并启动探测' : '正在暂停更新并屏蔽节点');
+      if (currentProjectID && !confirm(`确定在全局${enabled ? '开启' : '关闭'}该订阅？\n\n此操作会影响所有项目。`)) return;
+      showFullscreenLoading(enabled ? '开启订阅中...' : '关闭订阅中...', currentProjectID ? (enabled ? '正在恢复缓存节点并启动探测' : '正在暂停更新并屏蔽节点') : '正在更新全局目录（不会自动探测）');
       try {
-        const response = await fetch('/api/subscriptions', {
+        const response = await fetch(globalScopePath('/api/subscriptions'), {
           method: 'PATCH',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({url: rawURL, enabled})
+          body: JSON.stringify({url: rawURL, enabled, scope: currentProjectID ? 'project' : 'global'})
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || '操作失败');
@@ -3059,9 +3545,9 @@
     }
 
     async function refreshManagedSubscription(rawURL) {
-      showFullscreenLoading(rawURL ? '更新订阅中...' : '更新全部订阅中...', '正在拉取订阅并重载节点池');
+      showFullscreenLoading(rawURL ? '更新订阅中...' : '更新全部订阅中...', currentProjectID ? '正在拉取订阅并重载节点池' : '正在手动拉取全局订阅');
       try {
-        const response = await fetch('/api/subscriptions/refresh', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:rawURL})});
+        const response = await fetch(globalScopePath('/api/subscriptions/refresh'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:rawURL})});
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || '更新失败');
         showToast('订阅更新完成');
@@ -3075,6 +3561,10 @@
     }
 
     async function fetchSubscriptionStatus() {
+      if (!currentProject()) {
+        document.getElementById('refreshSubBtn').style.display = 'none';
+        return;
+      }
       try {
         const res = await fetch('/api/subscription/status');
         if(!res.ok) return;
@@ -3083,11 +3573,15 @@
         if(!d.enabled) { btn.style.display='none'; return; }
         btn.style.display='inline-flex';
         document.getElementById('subscriptionStatus').textContent = `[Sub: ${d.node_count}]`;
-        document.getElementById('subscriptionTrend').textContent = d.is_refreshing ? 'Syncing...' : (d.last_error ? 'ERR' : 'OK');
+        document.getElementById('subscriptionTrend').textContent = d.is_refreshing ? '更新中...' : (d.last_error ? '错误' : '正常');
       } catch(e){}
     }
     
     async function refreshSubscription() {
+      if (!currentProject()) {
+        showToast('请切换到具体项目后更新订阅', 'error');
+        return;
+      }
       try {
         const s = await fetch('/api/subscription/status').then(r=>r.json());
         if(s.nodes_modified && !confirm('本地节点已修改，刷新将覆盖，继续？')) return;
@@ -3103,13 +3597,71 @@
       try {
         await loadProjects();
         renderProjectProbeSettings();
-        const res = await fetch('/api/nodes/config');
+        const res = await fetch(globalScopePath('/api/nodes/config'));
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || '加载节点失败');
         configNodes = data.nodes || [];
-        const tbody = document.getElementById('configNodesTableBody');
-        tbody.innerHTML = configNodes.map((n, i) => `
-          <tr>
+        const availableNames = new Set(configNodes.map(node => String(node.name || '')));
+        for (const name of selectedConfigNodeNames) {
+          if (!availableNames.has(name)) selectedConfigNodeNames.delete(name);
+        }
+        syncConfigNodeFilterOptions();
+        renderConfigNodes();
+        document.getElementById('subscriptionWarning').style.display = configNodes.some(n=>n.source==='subscription') ? 'block' : 'none';
+      } catch(e){}
+    }
+
+    function syncConfigNodeFilterOptions() {
+      const subscriptionSelect = document.getElementById('configNodeSubscriptionFilter');
+      if (!subscriptionSelect) return;
+
+      const selectedSubscription = subscriptionSelect.value;
+      const subscriptions = [...new Set(configNodes
+        .filter(node => node.source === 'subscription')
+        .map(node => String(node.subscription_name || '未知订阅').trim()))]
+        .sort((a, b) => a.localeCompare(b, 'zh-CN', {numeric:true, sensitivity:'base'}));
+
+      subscriptionSelect.replaceChildren(
+        new Option('全部订阅来源', 'all'),
+        new Option('非订阅节点', '__non_subscription__')
+      );
+      subscriptions.forEach(name => subscriptionSelect.add(new Option(name, name)));
+      subscriptionSelect.value = selectedSubscription === '__non_subscription__' || subscriptions.includes(selectedSubscription)
+        ? selectedSubscription
+        : 'all';
+    }
+
+    function renderConfigNodes() {
+      const tbody = document.getElementById('configNodesTableBody');
+      const empty = document.getElementById('configNodesEmptyState');
+      if (!tbody || !empty) return;
+      const subscriptionFilter = document.getElementById('configNodeSubscriptionFilter')?.value || 'all';
+      const nameQuery = (document.getElementById('configNodeNameSearch')?.value || '').trim().toLowerCase();
+      const urlQuery = (document.getElementById('configNodeURLSearch')?.value || '').trim().toLowerCase();
+      const sort = document.getElementById('configNodeNameSort')?.value || 'default';
+      const nodes = configNodes
+        .map((node, index) => ({node, index}))
+        .filter(({node}) => {
+          const name = String(node.name || '');
+          const subscriptionName = String(node.subscription_name || '未知订阅');
+          if (subscriptionFilter === '__non_subscription__' && node.source === 'subscription') return false;
+          if (subscriptionFilter !== 'all' && subscriptionFilter !== '__non_subscription__'
+              && (node.source !== 'subscription' || subscriptionName !== subscriptionFilter)) return false;
+          if (nameQuery && !name.toLowerCase().includes(nameQuery)) return false;
+          if (urlQuery && !String(node.uri || '').toLowerCase().includes(urlQuery)) return false;
+          return true;
+        });
+      if (sort !== 'default') {
+        const direction = sort === 'asc' ? 1 : -1;
+        nodes.sort((a, b) => direction * String(a.node.name || '').localeCompare(
+          String(b.node.name || ''), 'zh-CN', {numeric:true, sensitivity:'base'}
+        ) || a.index - b.index);
+      }
+      const visibleNodes = nodes.map(item => item.node);
+      visibleConfigNodeNames = visibleNodes.map(node => String(node.name || ''));
+      tbody.innerHTML = visibleNodes.map(n => `
+          <tr class="${selectedConfigNodeNames.has(String(n.name || '')) ? 'config-node-row-selected' : ''}">
+            <td class="config-node-select-cell"><input class="config-node-select" type="checkbox" ${selectedConfigNodeNames.has(String(n.name || '')) ? 'checked' : ''} onchange="toggleConfigNodeSelection('${escapeAttrJs(n.name)}', this.checked, this)" aria-label="选择节点 ${escapeHtml(n.name)}" /></td>
             <td><strong class="cell-trunc" style="display:inline-block;vertical-align:bottom" title="${escapeHtml(n.name)}">${escapeHtml(n.name)}</strong></td>
             <td class="tt-mono cell-trunc cell-trunc-uri" title="${escapeHtml(n.uri)}">${escapeHtml(n.uri)}</td>
             <td>${renderConfigNodeSource(n)}</td>
@@ -3119,8 +3671,43 @@
             </td>
           </tr>
         `).join('');
-        document.getElementById('subscriptionWarning').style.display = configNodes.some(n=>n.source==='subscription') ? 'block' : 'none';
-      } catch(e){}
+      document.getElementById('configNodeVisibleCount').textContent = visibleNodes.length;
+      document.getElementById('configNodeTotalCount').textContent = configNodes.length;
+      empty.textContent = configNodes.length ? '没有匹配的节点' : '暂无节点';
+      empty.style.display = visibleNodes.length ? 'none' : 'block';
+      updateConfigNodeSelectionUI();
+    }
+
+    function updateConfigNodeSelectionUI() {
+      const selectAll = document.getElementById('configNodeSelectAll');
+      const selectedVisibleCount = visibleConfigNodeNames.reduce(
+        (count, name) => count + (selectedConfigNodeNames.has(name) ? 1 : 0), 0
+      );
+      if (selectAll) {
+        selectAll.checked = visibleConfigNodeNames.length > 0 && selectedVisibleCount === visibleConfigNodeNames.length;
+        selectAll.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleConfigNodeNames.length;
+        selectAll.disabled = visibleConfigNodeNames.length === 0;
+      }
+      const count = selectedConfigNodeNames.size;
+      const countElement = document.getElementById('configNodeSelectedCount');
+      const deleteButton = document.getElementById('configNodeBatchDeleteBtn');
+      if (countElement) countElement.textContent = count;
+      if (deleteButton) deleteButton.disabled = count === 0;
+    }
+
+    function toggleConfigNodeSelection(name, checked, checkbox) {
+      if (checked) selectedConfigNodeNames.add(name);
+      else selectedConfigNodeNames.delete(name);
+      checkbox?.closest('tr')?.classList.toggle('config-node-row-selected', checked);
+      updateConfigNodeSelectionUI();
+    }
+
+    function toggleAllVisibleConfigNodes(checked) {
+      visibleConfigNodeNames.forEach(name => {
+        if (checked) selectedConfigNodeNames.add(name);
+        else selectedConfigNodeNames.delete(name);
+      });
+      renderConfigNodes();
     }
 
     function renderConfigNodeSource(node) {
@@ -3165,7 +3752,7 @@
       const p = { name: document.getElementById('nodeName').value, uri: document.getElementById('nodeUri').value };
       try {
         const editName = document.getElementById('nodeEditName').value;
-        const url = isEditMode ? '/api/nodes/config/'+encodeURIComponent(editName) : '/api/nodes/config';
+        const url = globalScopePath(isEditMode ? '/api/nodes/config/'+encodeURIComponent(editName) : '/api/nodes/config');
         const method = isEditMode ? 'PUT' : 'POST';
         const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)});
 		const d = await r.json();
@@ -3180,10 +3767,57 @@
 		}
       } catch(e){ showToast(e.message || '加载节点失败', 'error'); }
     }
-    async function deleteNode(name) {
-      if(!confirm('Delete '+name+'?')) return;
+    async function deleteSelectedConfigNodes() {
+      const availableNames = new Set(configNodes.map(node => String(node.name || '')));
+      const names = [...selectedConfigNodeNames].filter(name => availableNames.has(name));
+      if (!names.length) {
+        selectedConfigNodeNames.clear();
+        updateConfigNodeSelectionUI();
+        showToast('请先选择要删除的节点', 'error');
+        return;
+      }
+
+      let deleteGlobal = true;
+      if (currentProjectID) {
+        if (!confirm(`确定从当前项目移除选中的 ${names.length} 个节点？`)) return;
+        deleteGlobal = confirm('是否同时删除这些全局节点？\n\n确定：从全局删除，并影响所有项目\n取消：仅从当前项目移除，全局仍保留');
+      } else if (!confirm(`确定删除选中的 ${names.length} 个全局节点？`)) {
+        return;
+      }
+
+      const deleteButton = document.getElementById('configNodeBatchDeleteBtn');
+      if (deleteButton) deleteButton.disabled = true;
+      showFullscreenLoading('正在删除节点...', `正在处理 ${names.length} 个节点`);
       try {
-        const r = await fetch('/api/nodes/config/'+encodeURIComponent(name), {method:'DELETE'});
+        const response = await fetch(globalScopePath('/api/nodes/config'), {
+          method: 'DELETE',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({names, delete_global: deleteGlobal})
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || '批量删除失败');
+        names.forEach(name => selectedConfigNodeNames.delete(name));
+        const reloadError = data.reload_error || data.shared_reload_error;
+        if (reloadError) showToast(`${data.message || '节点已删除'}：${reloadError}`, 'error');
+        else showToast(data.message || `已删除 ${data.deleted_count || names.length} 个节点`);
+        await loadConfigNodes();
+        refresh();
+      } catch (error) {
+        showToast(error.message || '批量删除失败', 'error');
+      } finally {
+        hideFullscreenLoading();
+        updateConfigNodeSelectionUI();
+      }
+    }
+
+    async function deleteNode(name) {
+      let deleteGlobal = true;
+      if (currentProjectID) {
+        if(!confirm('确定从当前项目移除节点 '+name+'？')) return;
+        deleteGlobal = confirm('是否同时删除全局节点？\n\n确定：从全局删除，并影响所有项目\n取消：仅从当前项目移除，全局仍保留');
+      } else if(!confirm('确定删除全局节点 '+name+'？')) return;
+      try {
+        const r = await fetch('/api/nodes/config/'+encodeURIComponent(name)+'?delete_global='+deleteGlobal, {method:'DELETE'});
 		const d = await r.json();
 		if(r.ok) {
 		  if(d.reload_error) showToast(`节点已删除，但自动重载失败：${d.reload_error}`, 'error');
@@ -3282,7 +3916,7 @@
       if (!content) { showToast('请输入或选择节点配置', 'error'); return; }
       showFullscreenLoading('导入节点中...', '正在解析配置并重载节点池');
       try {
-        const response = await fetch('/api/nodes/import', {
+        const response = await fetch(globalScopePath('/api/nodes/import'), {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify({content, filename: file ? file.name : ''})
@@ -3475,6 +4109,25 @@
     }
 
     let logPollInterval = null;
+    let consoleLogsRaw = '';
+    function renderConsoleLogView(autoScroll = false) {
+      const textarea = document.getElementById('consoleLogs');
+      if (!textarea) return;
+      const query = (document.getElementById('consoleLogSearch')?.value || '').trim().toLowerCase();
+      const previousTop = textarea.scrollTop;
+      const visibleLogs = query
+        ? consoleLogsRaw.split(/\r?\n/).filter(line => line.toLowerCase().includes(query)).join('\n')
+        : consoleLogsRaw;
+      textarea.value = visibleLogs;
+      if (autoScroll && document.getElementById('autoScrollLogs')?.checked) {
+        textarea.scrollTop = textarea.scrollHeight;
+      } else {
+        textarea.scrollTop = Math.min(previousTop, textarea.scrollHeight);
+      }
+    }
+    function filterConsoleLogs() {
+      renderConsoleLogView(false);
+    }
     function startLogPolling() {
       pollLogs();
       if (!logPollInterval) logPollInterval = setInterval(pollLogs, 2000);
@@ -3482,20 +4135,25 @@
     function stopLogPolling() {
       if (logPollInterval) { clearInterval(logPollInterval); logPollInterval = null; }
     }
+    async function clearConsoleLogs() {
+      try {
+        const response = await fetch('/api/logs', {method:'DELETE'});
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || '清空日志失败');
+        consoleLogsRaw = '';
+        renderConsoleLogView(false);
+        showToast(data.message || '控制台日志已清空');
+      } catch (error) {
+        showToast(error.message || '清空日志失败', 'error');
+      }
+    }
     async function pollLogs() {
       try {
         const r = await fetch('/api/logs');
         const d = await r.json();
-        if (d.logs) {
-          const ta = document.getElementById('consoleLogs');
-          const autoScroll = document.getElementById('autoScrollLogs').checked;
-          const prevTop = ta.scrollTop;
-          ta.value = d.logs;
-          if (autoScroll) {
-             ta.scrollTop = ta.scrollHeight;
-          } else {
-             ta.scrollTop = prevTop;
-          }
+        if (typeof d.logs === 'string') {
+          consoleLogsRaw = d.logs;
+          renderConsoleLogView(true);
         }
       } catch(e){}
     }
@@ -3507,10 +4165,11 @@
     function getOsTheme() { return osMediaQuery.matches ? 'dark' : 'light'; }
 
     function reRenderCharts() {
-      if (latencyChartInst) { latencyChartInst.dispose(); latencyChartInst = null; }
+      if (regionMapChartInst) { regionMapChartInst.dispose(); regionMapChartInst = null; }
       if (trafficChartInst) { trafficChartInst.dispose(); trafficChartInst = null; }
       if (successRateChartInst) { successRateChartInst.dispose(); successRateChartInst = null; }
       if (failureChartInst) { failureChartInst.dispose(); failureChartInst = null; }
+      if (trafficCalendarChartInst) { trafficCalendarChartInst.dispose(); trafficCalendarChartInst = null; }
 
       const dash = document.getElementById('dashboardTab');
       if (dash && dash.classList.contains('active') && typeof updateDashboardCharts === 'function') {

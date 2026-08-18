@@ -64,7 +64,7 @@ func WithSharedConfig(shared *config.Config, mu *sync.RWMutex) Option {
 }
 
 // WithAutomaticHealthChecks controls background and post-reload probes. It is
-// disabled by the projectless shared catalog, where probes are manual only.
+// disabled by the global shared catalog, where probes are manual only.
 func WithAutomaticHealthChecks(enabled bool) Option {
 	return func(m *Manager) { m.automaticHealthChecks = enabled }
 }
@@ -127,11 +127,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	if m.cfg == nil {
 		m.mu.Unlock()
-		return errors.New("box manager requires config")
+		return errors.New("代理核心管理器缺少配置")
 	}
 	if m.currentBox != nil {
 		m.mu.Unlock()
-		return errors.New("sing-box already running")
+		return errors.New("sing-box 已在运行")
 	}
 	m.applyConfigSettings(m.cfg)
 	m.baseCtx = ctx
@@ -143,7 +143,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	if len(cfg.Nodes) == 0 {
 		if err := m.persistActiveNodeCatalog(cfg); err != nil {
-			m.logger.Warnf("failed to persist empty active node catalog: %v", err)
+			m.logger.Warnf("保存空的活动节点目录失败: %v", err)
 		}
 		m.mu.Lock()
 		monitorMgr := m.monitorMgr
@@ -158,7 +158,7 @@ func (m *Manager) Start(ctx context.Context) error {
 				monitorMgr.StartPeriodicHealthCheck(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
 			}
 		}
-		m.logger.Warnf("started without active nodes; management and subscription services remain available")
+		m.logger.Warnf("当前没有活动节点，管理和订阅服务仍可使用")
 		return nil
 	}
 
@@ -175,13 +175,13 @@ func (m *Manager) Start(ctx context.Context) error {
 			_ = instance.Close()
 			// Check if it's a port conflict error
 			if conflictPort := extractPortFromBindError(err); conflictPort > 0 {
-				m.logger.Warnf("port %d is in use, reassigning and retrying...", conflictPort)
+				m.logger.Warnf("端口 %d 已被占用，正在重新分配并重试...", conflictPort)
 				if reassigned := reassignConflictingPort(cfg, conflictPort); reassigned {
 					m.poolState.Reset() // Reset only this project's state for rebuild
 					continue
 				}
 			}
-			return fmt.Errorf("start sing-box: %w", err)
+			return fmt.Errorf("启动 sing-box 失败: %w", err)
 		}
 		break // Success
 	}
@@ -191,7 +191,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Unlock()
 	m.poolState.ActivateRestoredBlacklists()
 	if err := m.persistActiveNodeCatalog(cfg); err != nil {
-		m.logger.Warnf("failed to persist active node catalog: %v", err)
+		m.logger.Warnf("保存活动节点目录失败: %v", err)
 	}
 
 	// Start periodic health check after nodes are registered
@@ -207,12 +207,12 @@ func (m *Manager) Start(ctx context.Context) error {
 		if startHealthCheck {
 			monitorMgr.StartPeriodicHealthCheck(cfg.ProbeIntervalOrDefault(), cfg.ProbeTimeoutOrDefault())
 		}
-		if !startHealthCheck || monitorMgr.HasRecoveredNodes() {
+		if m.automaticHealthChecks && (!startHealthCheck || monitorMgr.HasRecoveredNodes()) {
 			go monitorMgr.ProbeAllNow(cfg.ProbeTimeoutOrDefault())
 		}
 	}
 
-	m.logger.Infof("sing-box instance started with %d nodes", len(cfg.Nodes))
+	m.logger.Infof("sing-box 实例已启动，共 %d 个节点", len(cfg.Nodes))
 
 	return nil
 }
@@ -221,7 +221,7 @@ func (m *Manager) Start(ctx context.Context) error {
 // For multi-port mode, we must stop the old instance first to release ports.
 func (m *Manager) Reload(newCfg *config.Config) error {
 	if newCfg == nil {
-		return errors.New("new config is nil")
+		return errors.New("新配置不能为空")
 	}
 	if err := m.validateConfig(newCfg); err != nil {
 		return err
@@ -230,7 +230,7 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 	m.mu.Lock()
 	if m.currentBox == nil {
 		m.mu.Unlock()
-		return errors.New("manager not started")
+		return errors.New("管理器尚未启动")
 	}
 	ctx := m.baseCtx
 	oldBox := m.currentBox
@@ -242,14 +242,14 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 		ctx = context.Background()
 	}
 
-	m.logger.Infof("reloading with %d nodes", len(newCfg.Nodes))
+	m.logger.Infof("正在使用 %d 个节点重新加载", len(newCfg.Nodes))
 
 	// For multi-port mode, we must close old instance first to release ports
 	// This causes a brief interruption but avoids port conflicts
 	if oldBox != nil {
-		m.logger.Infof("stopping old instance to release ports...")
+		m.logger.Infof("正在停止旧实例以释放端口...")
 		if err := oldBox.Close(); err != nil {
-			m.logger.Warnf("error closing old instance: %v", err)
+			m.logger.Warnf("关闭旧实例时出错: %v", err)
 		}
 	}
 
@@ -284,7 +284,7 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 		instance, err = m.createBox(ctx, newCfg)
 		if err != nil {
 			m.rollbackToOldConfig(ctx, oldCfg)
-			return fmt.Errorf("create new box: %w", err)
+			return fmt.Errorf("创建新的代理核心失败: %w", err)
 		}
 		if err = instance.Start(); err == nil {
 			started = true
@@ -297,12 +297,12 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 		if conflictPort == 0 {
 			// Not a port conflict: unrecoverable by retrying. Roll back now.
 			m.rollbackToOldConfig(ctx, oldCfg)
-			return fmt.Errorf("start new box: %w", err)
+			return fmt.Errorf("启动新的代理核心失败: %w", err)
 		}
 
 		// Give the OS more time to release the just-closed listener, then retry
 		// the same port assignment.
-		m.logger.Warnf("port %d still in use on start attempt %d/%d, waiting for release and retrying...", conflictPort, retry+1, maxRetries)
+		m.logger.Warnf("第 %d/%d 次启动时端口 %d 仍被占用，等待释放后重试...", retry+1, maxRetries, conflictPort)
 		time.Sleep(300 * time.Millisecond)
 
 		// Only after we've waited through the first half of our attempts do we
@@ -311,7 +311,7 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 		// reassigned this way; if it is the conflict we simply keep waiting.
 		if retry >= maxRetries/2 {
 			if reassignConflictingPort(newCfg, conflictPort) {
-				m.logger.Warnf("port %d persistently in use; reassigned the affected node to a fresh port", conflictPort)
+				m.logger.Warnf("端口 %d 持续被占用，已为受影响节点重新分配端口", conflictPort)
 				m.poolState.Reset()
 			}
 		}
@@ -321,9 +321,9 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 		// Never commit a closed / non-running instance as the current box: doing
 		// so silently kills every port (2323 and all 24000+) with no error. Fall
 		// back to the previous configuration instead.
-		m.logger.Errorf("new box failed to start after %d attempts: %v", maxRetries, lastStartErr)
+		m.logger.Errorf("新代理核心在尝试 %d 次后仍启动失败: %v", maxRetries, lastStartErr)
 		m.rollbackToOldConfig(ctx, oldCfg)
-		return fmt.Errorf("start new box: exhausted %d attempts: %w", maxRetries, lastStartErr)
+		return fmt.Errorf("启动新的代理核心失败，已尝试 %d 次: %w", maxRetries, lastStartErr)
 	}
 
 	m.applyConfigSettings(newCfg)
@@ -334,7 +334,7 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 	m.mu.Unlock()
 	m.poolState.ActivateRestoredBlacklists()
 	if err := m.persistActiveNodeCatalog(newCfg); err != nil {
-		m.logger.Warnf("failed to persist active node catalog: %v", err)
+		m.logger.Warnf("保存活动节点目录失败: %v", err)
 	}
 
 	// Sync config to monitor server so future WebUI settings changes target the current config pointer
@@ -350,7 +350,7 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 		}
 	}
 
-	m.logger.Infof("reload completed successfully with %d nodes", len(newCfg.Nodes))
+	m.logger.Infof("重新加载成功，共 %d 个节点", len(newCfg.Nodes))
 
 	return nil
 }
@@ -360,9 +360,9 @@ func (m *Manager) rollbackToOldConfig(ctx context.Context, oldCfg *config.Config
 	if oldCfg == nil {
 		return
 	}
-	m.logger.Warnf("attempting rollback to previous config...")
+	m.logger.Warnf("正在回滚到上一份配置...")
 	if err := m.validateConfig(oldCfg); err != nil {
-		m.logger.Errorf("rollback config validation failed: %v", err)
+		m.logger.Errorf("回滚配置验证失败: %v", err)
 		return
 	}
 	m.poolState.Reset()
@@ -379,7 +379,7 @@ func (m *Manager) rollbackToOldConfig(ctx context.Context, oldCfg *config.Config
 		var err error
 		instance, err = m.createBox(ctx, oldCfg)
 		if err != nil {
-			m.logger.Errorf("rollback failed to create box: %v", err)
+			m.logger.Errorf("回滚时创建代理核心失败: %v", err)
 			return
 		}
 		if err = instance.Start(); err == nil {
@@ -387,11 +387,11 @@ func (m *Manager) rollbackToOldConfig(ctx context.Context, oldCfg *config.Config
 		}
 		_ = instance.Close()
 		instance = nil
-		m.logger.Warnf("rollback start attempt %d/%d failed: %v", attempt+1, rollbackAttempts, err)
+		m.logger.Warnf("第 %d/%d 次回滚启动失败: %v", attempt+1, rollbackAttempts, err)
 		time.Sleep(300 * time.Millisecond)
 	}
 	if instance == nil {
-		m.logger.Errorf("rollback failed to start box after %d attempts", rollbackAttempts)
+		m.logger.Errorf("回滚时代理核心在尝试 %d 次后仍启动失败", rollbackAttempts)
 		return
 	}
 	m.mu.Lock()
@@ -400,13 +400,13 @@ func (m *Manager) rollbackToOldConfig(ctx context.Context, oldCfg *config.Config
 	m.mu.Unlock()
 	m.poolState.ActivateRestoredBlacklists()
 	if err := m.persistActiveNodeCatalog(oldCfg); err != nil {
-		m.logger.Warnf("failed to restore active node catalog after rollback: %v", err)
+		m.logger.Warnf("回滚后恢复活动节点目录失败: %v", err)
 	}
 	// Sync config pointer to monitor server after rollback
 	if m.monitorServer != nil {
 		m.monitorServer.SetConfig(m.cfg)
 	}
-	m.logger.Infof("rollback successful")
+	m.logger.Infof("回滚成功")
 }
 
 func (m *Manager) validateConfig(cfg *config.Config) error {
@@ -414,7 +414,7 @@ func (m *Manager) validateConfig(cfg *config.Config) error {
 		return nil
 	}
 	if err := m.configValidator(cfg); err != nil {
-		return fmt.Errorf("validate project config: %w", err)
+		return fmt.Errorf("验证项目配置失败: %w", err)
 	}
 	return nil
 }
@@ -460,7 +460,7 @@ func (m *Manager) persistActiveNodeCatalog(cfg *config.Config) error {
 		return nil
 	}
 	if m.monitorMgr == nil {
-		return errors.New("monitor manager is unavailable")
+		return errors.New("监控管理器不可用")
 	}
 	snapshots := m.monitorMgr.Snapshot()
 	records := make([]state.NodeRecord, 0, len(snapshots))
@@ -512,7 +512,7 @@ func newBoxRecover(opts box.Options) (instance *box.Box, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			instance = nil
-			err = fmt.Errorf("sing-box panicked during initialization: %v", r)
+			err = fmt.Errorf("sing-box 初始化时发生异常: %v", r)
 		}
 	}()
 	return box.New(opts)
@@ -523,15 +523,15 @@ func newBoxRecover(opts box.Options) (instance *box.Box, err error) {
 // removing the offending outbound each time.
 func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, error) {
 	if cfg == nil {
-		return nil, errors.New("config is nil")
+		return nil, errors.New("配置不能为空")
 	}
 	if m.monitorMgr == nil {
-		return nil, errors.New("monitor manager not initialized")
+		return nil, errors.New("监控管理器尚未初始化")
 	}
 
 	opts, err := builder.Build(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("build sing-box options: %w", err)
+		return nil, fmt.Errorf("构建 sing-box 选项失败: %w", err)
 	}
 
 	maxRetries := len(cfg.Nodes)*3 + 50 // Dynamically scale retries to configuration size
@@ -552,7 +552,7 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		instance, err := newBoxRecover(box.Options{Context: boxCtx, Options: opts})
 		if err == nil {
 			if attempt > 0 {
-				log.Printf("✅ sing-box instance created after removing %d invalid outbound(s)", attempt)
+				log.Printf("✅ 移除 %d 个无效出站后已创建 sing-box 实例", attempt)
 			}
 			return instance, nil
 		}
@@ -560,16 +560,16 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		// Check if this is an outbound initialization error we can recover from
 		matches := outboundErrRe.FindStringSubmatch(err.Error())
 		if matches == nil {
-			return nil, fmt.Errorf("create sing-box instance: %w", err)
+			return nil, fmt.Errorf("创建 sing-box 实例失败: %w", err)
 		}
 
 		idx, convErr := strconv.Atoi(matches[1])
 		if convErr != nil || idx < 0 || idx >= len(opts.Outbounds) {
-			return nil, fmt.Errorf("create sing-box instance: %w", err)
+			return nil, fmt.Errorf("创建 sing-box 实例失败: %w", err)
 		}
 
 		badTag := opts.Outbounds[idx].Tag
-		log.Printf("⚠️  Outbound '%s' failed sing-box validation: %v (removing and retrying)", badTag, err)
+		log.Printf("⚠️  出站 %q 未通过 sing-box 验证: %v（将移除并重试）", badTag, err)
 
 		// Remove the offending outbound
 		opts.Outbounds = append(opts.Outbounds[:idx], opts.Outbounds[idx+1:]...)
@@ -585,7 +585,7 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 
 					// If the pool is now empty, remove it to avoid another validation error
 					if len(poolOpts.Members) == 0 {
-						log.Printf("⚠️  Removing empty pool '%s'", ob.Tag)
+						log.Printf("⚠️  正在移除空节点池 %q", ob.Tag)
 						removedPoolTags = append(removedPoolTags, ob.Tag)
 						continue // skip adding this empty pool
 					}
@@ -621,13 +621,13 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		}
 	}
 
-	return nil, fmt.Errorf("create sing-box instance: too many invalid outbounds (exceeded %d retries)", maxRetries)
+	return nil, fmt.Errorf("创建 sing-box 实例失败：无效出站过多（已超过 %d 次重试）", maxRetries)
 }
 
 // gracefulSwitch swaps the current box with a new one.
 func (m *Manager) gracefulSwitch(newBox *box.Box) error {
 	if newBox == nil {
-		return errors.New("new box is nil")
+		return errors.New("新的代理核心实例为空")
 	}
 
 	m.mu.Lock()
@@ -640,7 +640,7 @@ func (m *Manager) gracefulSwitch(newBox *box.Box) error {
 		go m.drainOldBox(old, drainTimeout)
 	}
 
-	m.logger.Infof("switched to new instance, draining old for %s", drainTimeout)
+	m.logger.Infof("已切换到新实例，旧实例将在 %s 内完成连接排空", drainTimeout)
 	return nil
 }
 
@@ -653,10 +653,10 @@ func (m *Manager) drainOldBox(oldBox *box.Box, timeout time.Duration) {
 		time.Sleep(timeout)
 	}
 	if err := oldBox.Close(); err != nil {
-		m.logger.Errorf("failed to close old instance: %v", err)
+		m.logger.Errorf("关闭旧实例失败: %v", err)
 		return
 	}
-	m.logger.Infof("old instance closed after %s drain", timeout)
+	m.logger.Infof("旧实例已在 %s 排空后关闭", timeout)
 }
 
 // removeFromSlice removes an element from a string slice.
@@ -686,11 +686,11 @@ func (m *Manager) waitForHealthCheck(timeout time.Duration) error {
 	for {
 		available, total := m.availableNodeCount()
 		if available >= m.minAvailableNodes {
-			m.logger.Infof("health check passed: %d/%d nodes available", available, total)
+			m.logger.Infof("健康检查通过：%d/%d 个节点可用", available, total)
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout: %d/%d nodes available (need >= %d)", available, total, m.minAvailableNodes)
+			return fmt.Errorf("等待超时：%d/%d 个节点可用（至少需要 %d 个）", available, total, m.minAvailableNodes)
 		}
 		<-ticker.C
 	}
@@ -723,7 +723,7 @@ func (m *Manager) ensureMonitor(ctx context.Context) error {
 	monitorMgr, err := monitor.NewManager(m.monitorCfg)
 	if err != nil {
 		m.mu.Unlock()
-		return fmt.Errorf("init monitor manager: %w", err)
+		return fmt.Errorf("初始化监控管理器失败: %w", err)
 	}
 	monitorMgr.SetLogger(monitorLoggerAdapter{logger: m.logger})
 	m.monitorMgr = monitorMgr
@@ -773,11 +773,11 @@ func (defaultLogger) Infof(format string, args ...any) {
 }
 
 func (defaultLogger) Warnf(format string, args ...any) {
-	log.Printf("[boxmgr] WARN: "+format, args...)
+	log.Printf("[代理核心] 警告: "+format, args...)
 }
 
 func (defaultLogger) Errorf(format string, args ...any) {
-	log.Printf("[boxmgr] ERROR: "+format, args...)
+	log.Printf("[代理核心] 错误: "+format, args...)
 }
 
 // monitorLoggerAdapter adapts Logger to monitor.Logger interface.
@@ -799,7 +799,7 @@ func (a monitorLoggerAdapter) Warn(args ...any) {
 
 // --- NodeManager interface implementation ---
 
-var errConfigUnavailable = errors.New("config is not initialized")
+var errConfigUnavailable = errors.New("配置尚未初始化")
 
 func (m *Manager) sourceConfigLocked() *config.Config {
 	if m.sharedCfg != nil {
@@ -862,7 +862,7 @@ func (m *Manager) CreateNode(ctx context.Context, node config.NodeConfig) (confi
 	cfg.Nodes = append(cfg.Nodes, normalized)
 	if err := cfg.Save(); err != nil {
 		cfg.Nodes = cfg.Nodes[:len(cfg.Nodes)-1]
-		return config.NodeConfig{}, fmt.Errorf("save config: %w", err)
+		return config.NodeConfig{}, fmt.Errorf("保存配置失败: %w", err)
 	}
 	return normalized, nil
 }
@@ -939,7 +939,7 @@ func (m *Manager) ImportConfigNodes(ctx context.Context, nodes []config.NodeConf
 	}
 	if err := cfg.Save(); err != nil {
 		cfg.Nodes = backup
-		return nil, skipped, fmt.Errorf("save imported nodes: %w", err)
+		return nil, skipped, fmt.Errorf("保存导入节点失败: %w", err)
 	}
 	return added, skipped, nil
 }
@@ -982,20 +982,37 @@ func (m *Manager) UpdateNode(ctx context.Context, name string, node config.NodeC
 	cfg.Nodes[idx] = normalized
 	if err := cfg.Save(); err != nil {
 		cfg.Nodes[idx] = prev
-		return config.NodeConfig{}, fmt.Errorf("save config: %w", err)
+		return config.NodeConfig{}, fmt.Errorf("保存配置失败: %w", err)
 	}
 	return normalized, nil
 }
 
 // DeleteNode removes a node by name and saves the config.
 func (m *Manager) DeleteNode(ctx context.Context, name string) error {
+	_, err := m.DeleteNodes(ctx, []string{name})
+	return err
+}
+
+// DeleteNodes removes multiple nodes atomically and saves the config once.
+func (m *Manager) DeleteNodes(ctx context.Context, names []string) (int, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
-	name = strings.TrimSpace(name)
+	requested := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return 0, fmt.Errorf("%w: 节点名称不能为空", monitor.ErrInvalidNode)
+		}
+		requested[name] = struct{}{}
+	}
+	if len(requested) == 0 {
+		return 0, fmt.Errorf("%w: 请选择要删除的节点", monitor.ErrInvalidNode)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.sharedMu != nil {
@@ -1005,21 +1022,31 @@ func (m *Manager) DeleteNode(ctx context.Context, name string) error {
 
 	cfg := m.sourceConfigLocked()
 	if cfg == nil {
-		return errConfigUnavailable
+		return 0, errConfigUnavailable
 	}
 
-	idx := m.nodeIndexLocked(name)
-	if idx == -1 {
-		return monitor.ErrNodeNotFound
+	found := make(map[string]struct{}, len(requested))
+	remaining := make([]config.NodeConfig, 0, len(cfg.Nodes))
+	for _, node := range cfg.Nodes {
+		if _, shouldDelete := requested[node.Name]; shouldDelete {
+			found[node.Name] = struct{}{}
+			continue
+		}
+		remaining = append(remaining, node)
+	}
+	for name := range requested {
+		if _, exists := found[name]; !exists {
+			return 0, fmt.Errorf("%w: %s", monitor.ErrNodeNotFound, name)
+		}
 	}
 
 	backup := cloneNodes(cfg.Nodes)
-	cfg.Nodes = append(cfg.Nodes[:idx], cfg.Nodes[idx+1:]...)
+	cfg.Nodes = remaining
 	if err := cfg.Save(); err != nil {
 		cfg.Nodes = backup
-		return fmt.Errorf("save config: %w", err)
+		return 0, fmt.Errorf("保存配置失败: %w", err)
 	}
-	return nil
+	return len(requested), nil
 }
 
 // TriggerReload reloads the sing-box instance with current config.
@@ -1050,7 +1077,7 @@ func (m *Manager) deactivateProxyCore(newCfg *config.Config) error {
 
 	if oldBox != nil {
 		if err := oldBox.Close(); err != nil {
-			m.logger.Warnf("error closing proxy core for empty node pool: %v", err)
+			m.logger.Warnf("清空节点池时关闭代理核心出错: %v", err)
 		}
 	}
 	m.poolState.Reset()
@@ -1062,17 +1089,17 @@ func (m *Manager) deactivateProxyCore(newCfg *config.Config) error {
 		m.monitorServer.SetConfig(newCfg)
 	}
 	if err := m.persistActiveNodeCatalog(newCfg); err != nil {
-		m.logger.Warnf("failed to persist empty active node catalog: %v", err)
+		m.logger.Warnf("保存空的活动节点目录失败: %v", err)
 	}
 	m.applyConfigSettings(newCfg)
-	m.logger.Warnf("proxy core stopped because no active nodes remain")
+	m.logger.Warnf("由于没有活动节点，代理核心已停止")
 	return nil
 }
 
 // ReloadWithPortMap gracefully switches to a new configuration, preserving port assignments.
 func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]uint16) error {
 	if newCfg == nil {
-		return errors.New("new config is nil")
+		return errors.New("新配置不能为空")
 	}
 	if len(newCfg.Nodes) == 0 {
 		if err := m.validateConfig(newCfg); err != nil {
@@ -1086,7 +1113,7 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 	// ports to the rest. It is always run (an empty map simply means "assign
 	// all ports fresh"), since createNewConfig no longer pre-assigns them.
 	if err := newCfg.NormalizeWithPortMap(portMap); err != nil {
-		return fmt.Errorf("normalize config with port map: %w", err)
+		return fmt.Errorf("使用端口映射规范化配置失败: %w", err)
 	}
 
 	m.mu.RLock()
@@ -1102,7 +1129,7 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 			m.monitorMgr.ClearNodes()
 		}
 		if err := m.Start(ctx); err != nil {
-			return fmt.Errorf("restart proxy core from empty node pool: %w", err)
+			return fmt.Errorf("从空节点池重启代理核心失败: %w", err)
 		}
 		if m.monitorServer != nil {
 			m.monitorServer.SetConfig(newCfg)
@@ -1115,7 +1142,7 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 	// port per node. Best-effort: a write failure does not affect the running
 	// proxy, only the next restart's ability to restore ports.
 	if err := newCfg.SaveNodePortMap(); err != nil {
-		m.logger.Warnf("failed to persist node ports: %v", err)
+		m.logger.Warnf("保存节点端口失败: %v", err)
 	}
 	return nil
 }
@@ -1175,11 +1202,11 @@ func reassignConflictingPort(cfg *config.Config, conflictPort uint16) bool {
 			for usedPorts[newPort] || !config.IsPortAvailable(address, newPort) {
 				newPort++
 				if newPort > 65535 {
-					log.Printf("❌ No available port found for node %q", cfg.Nodes[idx].Name)
+					log.Printf("❌ 没有可分配给节点 %q 的端口", cfg.Nodes[idx].Name)
 					return false
 				}
 			}
-			log.Printf("⚠️  Port %d in use, reassigning node %q to port %d", conflictPort, cfg.Nodes[idx].Name, newPort)
+			log.Printf("⚠️  端口 %d 已被占用，正在将节点 %q 重新分配到端口 %d", conflictPort, cfg.Nodes[idx].Name, newPort)
 			cfg.Nodes[idx].Port = newPort
 			return true
 		}
@@ -1214,6 +1241,12 @@ func (m *Manager) CurrentConfig() *config.Config {
 	return m.cfg
 }
 
+// AutomaticHealthChecksEnabled reports whether this runtime may start probes
+// outside explicit monitor API requests.
+func (m *Manager) AutomaticHealthChecksEnabled() bool {
+	return m != nil && m.automaticHealthChecks
+}
+
 func (m *Manager) copyConfigLocked() *config.Config {
 	if m.cfg == nil {
 		return nil
@@ -1227,6 +1260,15 @@ func (m *Manager) copyConfigLocked() *config.Config {
 	}
 	if len(m.cfg.DisabledSubscriptions) > 0 {
 		cloned.DisabledSubscriptions = append([]string(nil), m.cfg.DisabledSubscriptions...)
+	}
+	if len(m.cfg.SelectedSubscriptions) > 0 {
+		cloned.SelectedSubscriptions = append([]string(nil), m.cfg.SelectedSubscriptions...)
+	}
+	if len(m.cfg.ExcludedSubscriptions) > 0 {
+		cloned.ExcludedSubscriptions = append([]string(nil), m.cfg.ExcludedSubscriptions...)
+	}
+	if len(m.cfg.ExcludedNodes) > 0 {
+		cloned.ExcludedNodes = append([]string(nil), m.cfg.ExcludedNodes...)
 	}
 	cloned.SetFilePath(m.cfg.FilePath())
 	return &cloned

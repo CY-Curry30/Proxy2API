@@ -43,6 +43,16 @@ func WithStateStore(store *state.Store) Option {
 	return func(m *Manager) { m.stateStore = store }
 }
 
+// WithFetchCoordinator shares remote subscription responses with other
+// project runtimes in the same process.
+func WithFetchCoordinator(coordinator *FetchCoordinator) Option {
+	return func(m *Manager) { m.fetchCoordinator = coordinator }
+}
+
+func WithFetchOwner(owner string) Option {
+	return func(m *Manager) { m.fetchOwner = owner }
+}
+
 // Manager handles periodic subscription refresh.
 type Manager struct {
 	mu sync.RWMutex
@@ -52,17 +62,23 @@ type Manager struct {
 	logger     Logger
 	httpClient *http.Client // Custom HTTP client with connection pooling
 
-	status        monitor.SubscriptionStatus
-	ctx           context.Context
-	cancel        context.CancelFunc
-	refreshMu     sync.Mutex // prevents concurrent refreshes
-	loopMu        sync.Mutex
-	loopWG        sync.WaitGroup
-	stopped       bool
-	manualRefresh chan struct{}
-	items         map[string]monitor.SubscriptionInfo
-	nodeCache     map[string][]config.NodeConfig
-	stateStore    *state.Store
+	status            monitor.SubscriptionStatus
+	ctx               context.Context
+	cancel            context.CancelFunc
+	refreshMu         sync.Mutex // prevents concurrent refreshes
+	loopMu            sync.Mutex
+	loopWG            sync.WaitGroup
+	stopped           bool
+	manualRefresh     chan struct{}
+	items             map[string]monitor.SubscriptionInfo
+	nodeCache         map[string][]config.NodeConfig
+	stateStore        *state.Store
+	fetchCoordinator  *FetchCoordinator
+	fetchOwner        string
+	unsubscribeFetch  func()
+	fetchCallbackMu   sync.Mutex
+	fetchCallbackWG   sync.WaitGroup
+	fetchCallbacksOff bool
 
 	// Track nodes.txt content hash to detect modifications
 	lastSubHash      string    // Hash of nodes.txt content after last subscription refresh
@@ -127,7 +143,7 @@ func (m *Manager) restorePersistentState() {
 	}
 	stored, found, err := m.stateStore.LoadSubscriptionState()
 	if err != nil {
-		m.logger.Warnf("failed to restore subscription state: %v", err)
+		m.logger.Warnf("恢复订阅状态失败: %v", err)
 		return
 	}
 	if !found {
@@ -232,7 +248,7 @@ func (m *Manager) persistState(critical bool) {
 	value := m.persistentState()
 	if critical {
 		if err := m.stateStore.SaveSubscriptionStateNow(value); err != nil {
-			m.logger.Warnf("failed to persist subscription state: %v", err)
+			m.logger.Warnf("保存订阅状态失败: %v", err)
 		}
 		return
 	}
@@ -257,13 +273,13 @@ func (m *Manager) loadNodeCache() {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			m.logger.Warnf("failed to read subscription cache: %v", err)
+			m.logger.Warnf("读取订阅缓存失败: %v", err)
 		}
 		return
 	}
 	var cached map[string][]config.NodeConfig
 	if err := json.Unmarshal(data, &cached); err != nil {
-		m.logger.Warnf("failed to decode subscription cache: %v", err)
+		m.logger.Warnf("解析订阅缓存失败: %v", err)
 		return
 	}
 	configured := make(map[string]struct{}, len(m.baseCfg.Subscriptions))
@@ -329,11 +345,11 @@ func (m *Manager) saveNodeCache(cache map[string][]config.NodeConfig) {
 	}
 	data, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
-		m.logger.Warnf("failed to encode subscription cache: %v", err)
+		m.logger.Warnf("编码订阅缓存失败: %v", err)
 		return
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		m.logger.Warnf("failed to write subscription cache: %v", err)
+		m.logger.Warnf("写入订阅缓存失败: %v", err)
 	}
 }
 
@@ -388,6 +404,15 @@ func (m *Manager) reconcileSubscriptionStateLocked(urls []string) {
 // Start begins the periodic refresh loop without fetching immediately. Manual
 // refresh remains available through RefreshNow regardless of the auto flag.
 func (m *Manager) Start() {
+	if m.fetchCoordinator != nil && m.fetchOwner != "" && m.unsubscribeFetch == nil {
+		m.unsubscribeFetch = m.fetchCoordinator.Subscribe(m.fetchOwner, func(rawURL string) {
+			if !m.beginFetchCallback() {
+				return
+			}
+			defer m.fetchCallbackWG.Done()
+			m.applySharedFetch(rawURL)
+		})
+	}
 	if len(m.baseCfg.Subscriptions) == 0 {
 		m.logger.Infof("no subscriptions configured, refresh disabled")
 		m.persistState(false)
@@ -423,16 +448,35 @@ func (m *Manager) Stop() {
 	}
 	m.loopWG.Wait()
 	m.loopMu.Unlock()
+	if m.unsubscribeFetch != nil {
+		m.unsubscribeFetch()
+		m.unsubscribeFetch = nil
+	}
+	m.fetchCallbackMu.Lock()
+	m.fetchCallbacksOff = true
+	m.fetchCallbackMu.Unlock()
 	// RefreshNow and synchronous configuration refreshes do not run inside the
-	// timer goroutine, so drain the shared refresh gate as well.
+	// timer goroutine. Shared-result callbacks are also drained before the box
+	// manager and state store can be closed by the owning project runtime.
 	m.refreshMu.Lock()
 	m.refreshMu.Unlock()
+	m.fetchCallbackWG.Wait()
 
 	// Close idle connections
 	if m.httpClient != nil {
 		m.httpClient.CloseIdleConnections()
 	}
 	m.persistState(true)
+}
+
+func (m *Manager) beginFetchCallback() bool {
+	m.fetchCallbackMu.Lock()
+	defer m.fetchCallbackMu.Unlock()
+	if m.fetchCallbacksOff {
+		return false
+	}
+	m.fetchCallbackWG.Add(1)
+	return true
 }
 
 // UpdateConfig hot-reloads subscription URLs and refresh settings without restart.
@@ -487,7 +531,7 @@ func (m *Manager) updateConfig(urls []string, enabled bool, interval time.Durati
 
 	// Persist to config.yaml
 	if err := m.baseCfg.SaveSettings(); err != nil {
-		m.logger.Errorf("failed to save subscription config: %v", err)
+		m.logger.Errorf("保存订阅配置失败: %v", err)
 	}
 
 	// Restart the refresh loop with new settings
@@ -573,9 +617,9 @@ func (m *Manager) UpdateConfigAndRefreshSelected(urls []string, enabled bool, in
 func (m *Manager) updateConfigAndRefresh(urls []string, enabled bool, interval time.Duration, refreshURLs []string) error {
 	m.updateConfig(urls, enabled, interval, false)
 	if len(refreshURLs) > 0 {
-		m.doRefreshSelected(refreshURLs)
+		m.doRefreshSelectedWithForce(refreshURLs, true)
 	} else {
-		m.doRefresh()
+		m.doRefresh(true)
 	}
 	if status := m.Status(); status.LastError != "" {
 		return fmt.Errorf("刷新失败: %s", status.LastError)
@@ -626,7 +670,7 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 	monitorMgr := m.boxMgr.MonitorManager()
 	if monitorMgr != nil && monitorMgr.HasSubscriptionNodes(rawURL) {
 		monitorMgr.SetSubscriptionEnabled(rawURL, enabled)
-		if enabled {
+		if enabled && m.boxMgr.AutomaticHealthChecksEnabled() {
 			go monitorMgr.ProbeAllNow(m.baseCfg.ProbeTimeoutOrDefault())
 		}
 	} else if enabled {
@@ -649,9 +693,9 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 
 // RefreshNow triggers an immediate refresh.
 func (m *Manager) RefreshNow() error {
-	m.doRefresh()
+	m.doRefresh(true)
 	if status := m.Status(); status.LastError != "" {
-		return fmt.Errorf("refresh failed: %s", status.LastError)
+		return fmt.Errorf("刷新失败: %s", status.LastError)
 	}
 	return nil
 }
@@ -741,7 +785,7 @@ func (m *Manager) refreshLoop(interval time.Duration) {
 			timer.Reset(interval)
 		case <-manualRefresh:
 			// Always honor manual/immediate refresh regardless of enabled flag
-			m.doRefresh()
+			m.doRefresh(true)
 			if autoEnabled {
 				timer.Reset(interval)
 				m.mu.Lock()
@@ -753,14 +797,20 @@ func (m *Manager) refreshLoop(interval time.Duration) {
 	}
 }
 
-// doRefresh performs a single refresh operation.
-func (m *Manager) doRefresh() {
-	m.doRefreshSelected(nil)
+// doRefresh performs a single refresh operation. The optional argument is
+// true for an explicit/manual refresh and false for a timer tick.
+func (m *Manager) doRefresh(force ...bool) {
+	forceFetch := len(force) > 0 && force[0]
+	m.doRefreshSelectedWithForce(nil, forceFetch)
 }
 
 // doRefreshSelected refreshes only the supplied URLs. A nil list preserves the
 // existing full-refresh behavior used by timers and manual refresh requests.
 func (m *Manager) doRefreshSelected(refreshURLs []string) {
+	m.doRefreshSelectedWithForce(refreshURLs, false)
+}
+
+func (m *Manager) doRefreshSelectedWithForce(refreshURLs []string, forceFetch bool) {
 	// Serialize refreshes so a configuration update that arrives during an
 	// automatic refresh still gets its own completed pass.
 	m.refreshMu.Lock()
@@ -791,13 +841,13 @@ func (m *Manager) doRefreshSelected(refreshURLs []string) {
 	var err error
 	if refreshURLs == nil {
 		// Timed and manual refreshes still fetch every active subscription.
-		nodes, err = m.fetchAllSubscriptions()
+		nodes, err = m.fetchAllSubscriptions(forceFetch)
 	} else {
 		m.logger.Infof("refreshing %d selected subscription(s)", len(refreshURLs))
-		nodes, err = m.fetchSubscriptions(refreshURLs)
+		nodes, err = m.fetchSubscriptions(refreshURLs, forceFetch)
 	}
 	if err != nil {
-		m.logger.Errorf("fetch subscriptions failed: %v", err)
+		m.logger.Errorf("获取订阅失败: %v", err)
 		m.mu.Lock()
 		m.status.LastError = err.Error()
 		m.status.LastRefresh = time.Now()
@@ -811,9 +861,9 @@ func (m *Manager) doRefreshSelected(refreshURLs []string) {
 	// Write subscription nodes to nodes.txt
 	nodesFilePath := m.getNodesFilePath()
 	if err := m.writeNodesToFile(nodesFilePath, nodes); err != nil {
-		m.logger.Errorf("failed to write nodes.txt: %v", err)
+		m.logger.Errorf("写入 nodes.txt 失败: %v", err)
 		m.mu.Lock()
-		m.status.LastError = fmt.Sprintf("write nodes.txt: %v", err)
+		m.status.LastError = fmt.Sprintf("写入 nodes.txt 失败: %v", err)
 		m.status.LastRefresh = time.Now()
 		m.mu.Unlock()
 		return
@@ -859,7 +909,7 @@ func (m *Manager) doRefreshSelected(refreshURLs []string) {
 
 	// Trigger BoxManager reload with port preservation
 	if err := m.boxMgr.ReloadWithPortMap(newCfg, portMap); err != nil {
-		m.logger.Errorf("reload failed: %v", err)
+		m.logger.Errorf("重新加载失败: %v", err)
 		m.mu.Lock()
 		m.status.LastError = err.Error()
 		m.status.LastRefresh = time.Now()
@@ -885,7 +935,7 @@ func (m *Manager) restoreNodeCache(snapshot map[string][]config.NodeConfig) {
 	m.mu.Unlock()
 	m.saveNodeCache(cacheSnapshot)
 	if err := m.writeNodesToFile(m.getNodesFilePath(), nodes); err != nil {
-		m.logger.Warnf("failed to restore subscription compatibility files after refresh rollback: %v", err)
+		m.logger.Warnf("刷新回滚后恢复订阅兼容文件失败: %v", err)
 	}
 }
 
@@ -1016,7 +1066,167 @@ func parseSubscriptionUserInfo(header string, info *monitor.SubscriptionInfo) {
 	}
 }
 
-func (m *Manager) fetchSubscription(ctx context.Context, rawURL string, timeout time.Duration) subscriptionFetchResult {
+func (m *Manager) fetchSubscription(ctx context.Context, rawURL string, timeout time.Duration, forceFetch bool) subscriptionFetchResult {
+	if m.fetchCoordinator != nil {
+		m.mu.RLock()
+		maxAge := m.baseCfg.SubscriptionRefresh.Interval
+		m.mu.RUnlock()
+		if maxAge <= 0 {
+			maxAge = time.Hour
+		}
+		return m.fetchCoordinator.Fetch(ctx, m.fetchOwner, rawURL, maxAge, forceFetch, func(fetchCtx context.Context) subscriptionFetchResult {
+			return m.fetchSubscriptionDirect(fetchCtx, rawURL, timeout)
+		})
+	}
+	return m.fetchSubscriptionDirect(ctx, rawURL, timeout)
+}
+
+// applySharedFetch imports a response obtained by another project, updates
+// this project's local cache, and reloads its runtime without another network
+// request. The project's own status and state store remain independent.
+func (m *Manager) applySharedFetch(rawURL string) {
+	if m.fetchCoordinator == nil {
+		return
+	}
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	// Read the cache only after taking the project refresh gate. If two global
+	// updates arrive close together, every queued callback then imports the
+	// latest response instead of allowing an older response to win last.
+	result, ok := m.fetchCoordinator.Get(rawURL)
+	if !ok || result.err != nil {
+		return
+	}
+	m.mu.RLock()
+	configured := false
+	for _, configuredURL := range m.baseCfg.ActiveSubscriptions() {
+		if configuredURL == rawURL {
+			configured = true
+			break
+		}
+	}
+	m.mu.RUnlock()
+	if !configured {
+		return
+	}
+	if m.boxMgr == nil {
+		return
+	}
+	m.mu.RLock()
+	alreadyApplied := m.sharedFetchAlreadyAppliedLocked(result)
+	m.mu.RUnlock()
+	if alreadyApplied {
+		return
+	}
+
+	m.mu.RLock()
+	previousCache := cloneSubscriptionNodeCache(m.nodeCache)
+	previousItems := cloneSubscriptionItems(m.items)
+	m.mu.RUnlock()
+
+	// Match fetchSubscriptions: an expired or exhausted subscription must drop
+	// its old nodes, while an active response replaces only this URL's cache.
+	m.mu.Lock()
+	if result.info.Status == "active" {
+		m.nodeCache[rawURL] = append([]config.NodeConfig(nil), result.nodes...)
+	} else if result.info.Status == "expired" || result.info.Status == "quota_exhausted" {
+		delete(m.nodeCache, rawURL)
+	} else {
+		m.mu.Unlock()
+		return
+	}
+	m.items[rawURL] = result.info
+	nodes := m.cachedNodesForConfigLocked()
+	cacheSnapshot := cloneSubscriptionNodeCache(m.nodeCache)
+	m.status.IsRefreshing = true
+	m.mu.Unlock()
+	m.saveNodeCache(cacheSnapshot)
+	if err := m.writeNodesToFile(m.getNodesFilePath(), nodes); err != nil {
+		m.logger.Warnf("写入共享订阅缓存失败: %v", err)
+		m.restoreSharedFetchState(previousCache, previousItems, err)
+		return
+	}
+
+	newHash := m.computeNodesHash(nodes)
+	portMap := m.boxMgr.CurrentPortMap()
+	if err := m.boxMgr.ReloadWithPortMap(m.createNewConfig(nodes), portMap); err != nil {
+		m.logger.Warnf("应用共享订阅刷新结果失败: %v", err)
+		m.restoreSharedFetchState(previousCache, previousItems, err)
+		return
+	}
+	if info, err := os.Stat(m.getNodesFilePath()); err == nil {
+		m.mu.Lock()
+		m.lastNodesModTime = info.ModTime()
+		m.mu.Unlock()
+	}
+	m.mu.Lock()
+	m.lastSubHash = newHash
+	m.status.IsRefreshing = false
+	m.status.LastRefresh = time.Now()
+	m.status.NodeCount = countEnabledNodes(nodes)
+	m.status.LastError = ""
+	m.status.NodesModified = false
+	m.status.RefreshCount++
+	m.mu.Unlock()
+	m.persistState(true)
+}
+
+func cloneSubscriptionItems(source map[string]monitor.SubscriptionInfo) map[string]monitor.SubscriptionInfo {
+	cloned := make(map[string]monitor.SubscriptionInfo, len(source))
+	for rawURL, info := range source {
+		cloned[rawURL] = info
+	}
+	return cloned
+}
+
+func (m *Manager) sharedFetchAlreadyAppliedLocked(result subscriptionFetchResult) bool {
+	current, ok := m.items[result.url]
+	if !ok || current.Status != result.info.Status || !current.LastRefresh.Equal(result.info.LastRefresh) {
+		return false
+	}
+	switch result.info.Status {
+	case "active":
+		return equalSubscriptionNodes(m.nodeCache[result.url], result.nodes)
+	case "expired", "quota_exhausted":
+		return len(m.nodeCache[result.url]) == 0
+	default:
+		return false
+	}
+}
+
+func equalSubscriptionNodes(left, right []config.NodeConfig) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Manager) restoreSharedFetchState(cache map[string][]config.NodeConfig, items map[string]monitor.SubscriptionInfo, cause error) {
+	m.mu.Lock()
+	m.nodeCache = cloneSubscriptionNodeCache(cache)
+	m.items = cloneSubscriptionItems(items)
+	nodes := m.cachedNodesForConfigLocked()
+	cacheSnapshot := cloneSubscriptionNodeCache(m.nodeCache)
+	m.status.IsRefreshing = false
+	m.status.LastRefresh = time.Now()
+	m.status.NodeCount = countEnabledNodes(nodes)
+	m.status.LastError = cause.Error()
+	m.status.RefreshCount++
+	m.mu.Unlock()
+	m.saveNodeCache(cacheSnapshot)
+	if err := m.writeNodesToFile(m.getNodesFilePath(), nodes); err != nil {
+		m.logger.Warnf("恢复共享订阅状态失败: %v", err)
+	}
+	m.persistState(true)
+}
+
+func (m *Manager) fetchSubscriptionDirect(ctx context.Context, rawURL string, timeout time.Duration) subscriptionFetchResult {
 	info := newSubscriptionInfo(rawURL)
 	info.LastRefresh = time.Now()
 	result := subscriptionFetchResult{url: rawURL, info: info}
@@ -1033,18 +1243,18 @@ func (m *Manager) fetchSubscription(ctx context.Context, rawURL string, timeout 
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		result.err = err
+		result.err = fmt.Errorf("创建订阅请求失败: %w", err)
 		result.info.Status = "error"
-		result.info.LastError = err.Error()
+		result.info.LastError = result.err.Error()
 		return result
 	}
 	config.ApplySubscriptionRequestHeaders(req)
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		result.err = err
+		result.err = fmt.Errorf("获取订阅失败: %w", err)
 		result.info.Status = "error"
-		result.info.LastError = err.Error()
+		result.info.LastError = result.err.Error()
 		return result
 	}
 	defer resp.Body.Close()
@@ -1066,14 +1276,15 @@ func (m *Manager) fetchSubscription(ctx context.Context, rawURL string, timeout 
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBodySize+1))
 	if err != nil {
+		readErr := fmt.Errorf("读取订阅响应失败: %w", err)
 		if inactiveStatus != "" {
 			result.info.Status = inactiveStatus
-			result.info.LastError = err.Error()
+			result.info.LastError = readErr.Error()
 			return result
 		}
-		result.err = err
+		result.err = readErr
 		result.info.Status = "error"
-		result.info.LastError = err.Error()
+		result.info.LastError = result.err.Error()
 		return result
 	}
 	if len(body) > maxSubscriptionBodySize {
@@ -1144,6 +1355,9 @@ func (m *Manager) cachedNodesForConfigLocked() []config.NodeConfig {
 				node.Source = config.NodeSourceSubscription
 				node.SubscriptionURL = rawURL
 				node.Disabled = !enabled
+				if m.baseCfg.NodeExcluded(node) {
+					continue
+				}
 				key := node.NodeKey()
 				if _, duplicate := seen[key]; duplicate {
 					continue
@@ -1168,14 +1382,14 @@ func countEnabledNodes(nodes []config.NodeConfig) int {
 
 // fetchAllSubscriptions fetches every configured URL while retaining a separate
 // cache and lifecycle state for each subscription.
-func (m *Manager) fetchAllSubscriptions() ([]config.NodeConfig, error) {
-	return m.fetchSubscriptions(nil)
+func (m *Manager) fetchAllSubscriptions(forceFetch bool) ([]config.NodeConfig, error) {
+	return m.fetchSubscriptions(nil, forceFetch)
 }
 
 // fetchSubscriptions fetches the requested active URLs. A nil request means
 // all active subscriptions; non-nil requests are used for incremental config
 // updates so existing remote subscriptions are not contacted again.
-func (m *Manager) fetchSubscriptions(requestedURLs []string) ([]config.NodeConfig, error) {
+func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([]config.NodeConfig, error) {
 	m.mu.RLock()
 	urls := m.baseCfg.ActiveSubscriptions()
 	timeout := m.baseCfg.SubscriptionRefresh.Timeout
@@ -1226,7 +1440,7 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string) ([]config.NodeConfi
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[index] = m.fetchSubscription(ctx, subscriptionURL, timeout)
+			results[index] = m.fetchSubscription(ctx, subscriptionURL, timeout, forceFetch)
 		}(i, rawURL)
 	}
 	wg.Wait()
@@ -1242,7 +1456,7 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string) ([]config.NodeConfi
 				result.nodes = append([]config.NodeConfig(nil), cached...)
 				result.info.NodeCount = len(cached)
 				result.info.Included = true
-				m.logger.Warnf("subscription refresh failed for %s; retaining %d cached nodes: %v", config.RedactURL(result.url), len(cached), result.err)
+				m.logger.Warnf("订阅 %s 刷新失败；保留 %d 个缓存节点: %v", config.RedactURL(result.url), len(cached), result.err)
 			}
 		} else if result.info.Status == "active" {
 			m.nodeCache[result.url] = append([]config.NodeConfig(nil), result.nodes...)
@@ -1341,9 +1555,9 @@ func (defaultLogger) Infof(format string, args ...any) {
 }
 
 func (defaultLogger) Warnf(format string, args ...any) {
-	log.Printf("[subscription] WARN: "+format, args...)
+	log.Printf("[订阅] 警告: "+format, args...)
 }
 
 func (defaultLogger) Errorf(format string, args ...any) {
-	log.Printf("[subscription] ERROR: "+format, args...)
+	log.Printf("[订阅] 错误: "+format, args...)
 }

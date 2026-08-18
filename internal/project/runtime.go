@@ -36,26 +36,39 @@ type Runtime struct {
 	ports        *PortRegistry
 	parentCtx    context.Context
 
-	lifecycleMu sync.Mutex
-	mu          sync.RWMutex
-	status      RuntimeStatus
-	lastError   string
-	startedAt   time.Time
-	cfg         *config.Config
-	stateStore  *state.Store
-	boxMgr      *boxmgr.Manager
-	subMgr      *subscription.Manager
-	cancel      context.CancelFunc
-	logBuffer   *monitor.LogBuffer
-	logger      *runtimeLogger
+	lifecycleMu      sync.Mutex
+	mu               sync.RWMutex
+	status           RuntimeStatus
+	lastError        string
+	startedAt        time.Time
+	cfg              *config.Config
+	stateStore       *state.Store
+	boxMgr           *boxmgr.Manager
+	subMgr           *subscription.Manager
+	cancel           context.CancelFunc
+	trafficDone      chan struct{}
+	logBuffer        *monitor.LogBuffer
+	logger           *runtimeLogger
+	fetchCoordinator *subscription.FetchCoordinator
+	probeCoordinator *monitor.ProbeCoordinator
 }
 
-func NewRuntime(parent context.Context, id, configPath, sharedPath string, sharedCfg *config.Config, sharedMu *sync.RWMutex, clashAPIPort uint16, ports *PortRegistry) *Runtime {
+type RuntimeOption func(*Runtime)
+
+func WithFetchCoordinator(coordinator *subscription.FetchCoordinator) RuntimeOption {
+	return func(r *Runtime) { r.fetchCoordinator = coordinator }
+}
+
+func WithProbeCoordinator(coordinator *monitor.ProbeCoordinator) RuntimeOption {
+	return func(r *Runtime) { r.probeCoordinator = coordinator }
+}
+
+func NewRuntime(parent context.Context, id, configPath, sharedPath string, sharedCfg *config.Config, sharedMu *sync.RWMutex, clashAPIPort uint16, ports *PortRegistry, opts ...RuntimeOption) *Runtime {
 	if parent == nil {
 		parent = context.Background()
 	}
 	buffer := monitor.NewLogBuffer(64 * 1024)
-	return &Runtime{
+	runtime := &Runtime{
 		id:           id,
 		configPath:   configPath,
 		sharedPath:   sharedPath,
@@ -68,6 +81,12 @@ func NewRuntime(parent context.Context, id, configPath, sharedPath string, share
 		logBuffer:    buffer,
 		logger:       newRuntimeLogger(id, buffer),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(runtime)
+		}
+	}
+	return runtime
 }
 
 func (r *Runtime) Start() error {
@@ -91,7 +110,7 @@ func (r *Runtime) Start() error {
 	}
 	if err != nil {
 		r.setStatus(StatusFailed, err.Error())
-		return fmt.Errorf("load project %q config: %w", r.id, err)
+		return fmt.Errorf("加载项目 %q 的配置失败: %w", r.id, err)
 	}
 	cfg.ClashAPIPort = r.clashAPIPort
 	if err := r.ports.Reserve(r.id, cfg); err != nil {
@@ -101,10 +120,10 @@ func (r *Runtime) Start() error {
 	store, err := state.Open(cfg.FilePath())
 	if err != nil {
 		r.setStatus(StatusFailed, err.Error())
-		return fmt.Errorf("open project %q state: %w", r.id, err)
+		return fmt.Errorf("打开项目 %q 的状态库失败: %w", r.id, err)
 	}
 	ctx, cancel := context.WithCancel(r.parentCtx)
-	monitorCfg := monitorConfigForProject(cfg, store)
+	monitorCfg := monitorConfigForProject(cfg, store, r.probeCoordinator, r.id)
 	boxMgr := boxmgr.New(
 		cfg,
 		monitorCfg,
@@ -119,11 +138,16 @@ func (r *Runtime) Start() error {
 		_ = boxMgr.Close()
 		_ = store.Close()
 		r.setStatus(StatusFailed, err.Error())
-		return fmt.Errorf("start project %q: %w", r.id, err)
+		return fmt.Errorf("启动项目 %q 失败: %w", r.id, err)
 	}
 
-	subMgr := subscription.New(cfg, boxMgr, subscription.WithStateStore(store))
+	subMgr := subscription.New(cfg, boxMgr,
+		subscription.WithStateStore(store),
+		subscription.WithFetchCoordinator(r.fetchCoordinator),
+		subscription.WithFetchOwner(r.id),
+	)
 	subMgr.Start()
+	trafficDone := make(chan struct{})
 
 	r.mu.Lock()
 	r.cfg = cfg
@@ -131,11 +155,16 @@ func (r *Runtime) Start() error {
 	r.boxMgr = boxMgr
 	r.subMgr = subMgr
 	r.cancel = cancel
+	r.trafficDone = trafficDone
 	r.status = StatusRunning
 	r.lastError = ""
 	r.startedAt = time.Now()
 	r.mu.Unlock()
-	r.logger.Infof("project runtime started")
+	go func() {
+		defer close(trafficDone)
+		collectTraffic(ctx, monitorCfg.TrafficAPI, store)
+	}()
+	r.logger.Infof("项目运行时已启动")
 	return nil
 }
 
@@ -152,7 +181,7 @@ func (r *Runtime) Restart() error {
 	return r.Start()
 }
 
-func monitorConfigForProject(cfg *config.Config, store *state.Store) monitor.Config {
+func monitorConfigForProject(cfg *config.Config, store *state.Store, probeCoordinator *monitor.ProbeCoordinator, probeOwner string) monitor.Config {
 	proxyUsername := cfg.Listener.Username
 	proxyPassword := cfg.Listener.Password
 	if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
@@ -169,6 +198,8 @@ func monitorConfigForProject(cfg *config.Config, store *state.Store) monitor.Con
 		ProxyPassword:    proxyPassword,
 		ExternalIP:       cfg.ExternalIP,
 		ProbeConcurrency: cfg.ProbeConcurrencyOrDefault(),
+		ProbeCoordinator: probeCoordinator,
+		ProbeOwner:       probeOwner,
 		StickyNode:       cfg.Sticky.FixedNode,
 		SkipCertVerify:   cfg.SkipCertVerify,
 		TrafficAPI:       fmt.Sprintf("http://127.0.0.1:%d/traffic", cfg.ClashAPIPort),
@@ -189,10 +220,14 @@ func (r *Runtime) Stop() error {
 	boxMgr := r.boxMgr
 	store := r.stateStore
 	cancel := r.cancel
+	trafficDone := r.trafficDone
 	r.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
+	}
+	if trafficDone != nil {
+		<-trafficDone
 	}
 	if subMgr != nil {
 		subMgr.Stop()
@@ -212,6 +247,7 @@ func (r *Runtime) Stop() error {
 	r.boxMgr = nil
 	r.subMgr = nil
 	r.cancel = nil
+	r.trafficDone = nil
 	r.startedAt = time.Time{}
 	if closeErr != nil {
 		r.status = StatusFailed
@@ -229,7 +265,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	boxMgr := r.boxMgr
 	r.mu.RUnlock()
 	if boxMgr == nil {
-		return fmt.Errorf("project %q is not running", r.id)
+		return fmt.Errorf("项目 %q 未运行", r.id)
 	}
 	if err := boxMgr.TriggerReload(ctx); err != nil {
 		r.setLastError(err)
@@ -273,6 +309,27 @@ func (r *Runtime) Config() *config.Config {
 	return cfg
 }
 
+func (r *Runtime) setSubscriptionReferences(selected, excluded []string) {
+	r.mu.RLock()
+	cfg := r.cfg
+	boxMgr := r.boxMgr
+	r.mu.RUnlock()
+	apply := func(target *config.Config) {
+		if target == nil {
+			return
+		}
+		target.SelectedSubscriptions = append([]string(nil), selected...)
+		target.ExcludedSubscriptions = append([]string(nil), excluded...)
+	}
+	apply(cfg)
+	if boxMgr != nil {
+		live := boxMgr.CurrentConfig()
+		if live != cfg {
+			apply(live)
+		}
+	}
+}
+
 func (r *Runtime) MonitorManager() *monitor.Manager {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -310,6 +367,8 @@ func newRuntimeLogger(projectID string, buffer io.Writer) *runtimeLogger {
 	return &runtimeLogger{logger: log.New(io.MultiWriter(log.Writer(), buffer), "[project:"+projectID+"] ", log.LstdFlags|log.Lshortfile)}
 }
 
-func (l *runtimeLogger) Infof(format string, args ...any)  { l.logger.Printf("INFO "+format, args...) }
-func (l *runtimeLogger) Warnf(format string, args ...any)  { l.logger.Printf("WARN "+format, args...) }
-func (l *runtimeLogger) Errorf(format string, args ...any) { l.logger.Printf("ERROR "+format, args...) }
+func (l *runtimeLogger) Infof(format string, args ...any) { l.logger.Printf("信息 "+format, args...) }
+func (l *runtimeLogger) Warnf(format string, args ...any) { l.logger.Printf("警告 "+format, args...) }
+func (l *runtimeLogger) Errorf(format string, args ...any) {
+	l.logger.Printf("错误 "+format, args...)
+}

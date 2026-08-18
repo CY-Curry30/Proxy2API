@@ -17,7 +17,7 @@ import (
 // Run builds the runtime components from config and blocks until shutdown.
 func Run(ctx context.Context, cfg *config.Config) error {
 	if cfg == nil {
-		return fmt.Errorf("config is nil")
+		return fmt.Errorf("配置不能为空")
 	}
 	workspace, err := config.LoadWorkspace(cfg.FilePath(), cfg)
 	if err != nil {
@@ -31,7 +31,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 func RunWorkspace(ctx context.Context, workspace *config.Workspace) error {
 	registry, err := project.NewRegistry(ctx, workspace)
 	if err != nil {
-		return fmt.Errorf("initialize project registry: %w", err)
+		return fmt.Errorf("初始化项目注册表失败: %w", err)
 	}
 	defer registry.Close()
 
@@ -55,9 +55,9 @@ func RunWorkspace(ctx context.Context, workspace *config.Workspace) error {
 
 	select {
 	case <-ctx.Done():
-		fmt.Println("Context cancelled, initiating graceful shutdown...")
+		fmt.Println("上下文已取消，开始平滑关闭...")
 	case sig := <-sigCh:
-		fmt.Printf("Received %s, initiating graceful shutdown...\n", sig)
+		fmt.Printf("收到信号 %s，开始平滑关闭...\n", sig)
 	}
 
 	// Create shutdown context with timeout
@@ -65,18 +65,18 @@ func RunWorkspace(ctx context.Context, workspace *config.Workspace) error {
 	defer shutdownCancel()
 
 	// Graceful shutdown sequence
-	fmt.Println("Stopping project runtimes...")
+	fmt.Println("正在停止项目运行时...")
 	if err := registry.Close(); err != nil {
-		fmt.Printf("Error closing project runtimes: %v\n", err)
+		fmt.Printf("关闭项目运行时失败: %v\n", err)
 	}
 
 	// Wait for connections to drain
-	fmt.Println("Waiting for connections to drain...")
+	fmt.Println("正在等待现有连接排空...")
 	select {
 	case <-time.After(2 * time.Second):
-		fmt.Println("Graceful shutdown completed")
+		fmt.Println("平滑关闭已完成")
 	case <-shutdownCtx.Done():
-		fmt.Println("Shutdown timeout exceeded, forcing exit")
+		fmt.Println("关闭操作超时，正在强制退出")
 	}
 
 	return nil

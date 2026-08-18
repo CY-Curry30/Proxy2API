@@ -14,28 +14,31 @@ import (
 
 	"Proxy2API/internal/config"
 	"Proxy2API/internal/monitor"
+	"Proxy2API/internal/subscription"
 )
 
-var ErrProjectNotFound = errors.New("project not found")
+var ErrProjectNotFound = errors.New("项目不存在")
 
 // Registry owns the global project catalog while each Runtime owns its mutable
 // proxy resources.
 type Registry struct {
-	mu         sync.RWMutex
-	catalogMu  sync.Mutex
-	workspace  *config.Workspace
-	parentCtx  context.Context
-	sharedPath string
-	sharedCfg  *config.Config
-	sharedMu   *sync.RWMutex
-	ports      *PortRegistry
-	runtimes   map[string]*Runtime
-	catalog    *CatalogRuntime
+	mu               sync.RWMutex
+	catalogMu        sync.Mutex
+	workspace        *config.Workspace
+	parentCtx        context.Context
+	sharedPath       string
+	sharedCfg        *config.Config
+	sharedMu         *sync.RWMutex
+	fetchCoordinator *subscription.FetchCoordinator
+	probeCoordinator *monitor.ProbeCoordinator
+	ports            *PortRegistry
+	runtimes         map[string]*Runtime
+	catalog          *CatalogRuntime
 }
 
 func NewRegistry(parent context.Context, workspace *config.Workspace) (*Registry, error) {
 	if workspace == nil {
-		return nil, errors.New("project registry requires a workspace")
+		return nil, errors.New("项目注册表缺少工作区")
 	}
 	if parent == nil {
 		parent = context.Background()
@@ -45,32 +48,36 @@ func NewRegistry(parent context.Context, workspace *config.Workspace) (*Registry
 	}
 	sharedPath := strings.TrimSpace(workspace.SharedConfigPath())
 	if sharedPath == "" {
-		return nil, errors.New("project registry requires a shared source config")
+		return nil, errors.New("项目注册表缺少共享源配置")
 	}
 	if err := migrateSharedSources(workspace); err != nil {
 		return nil, err
 	}
 	sharedCfg, err := config.LoadShared(sharedPath)
 	if err != nil {
-		return nil, fmt.Errorf("load shared source config: %w", err)
+		return nil, fmt.Errorf("加载共享源配置失败: %w", err)
 	}
 	r := &Registry{
-		workspace:  workspace,
-		parentCtx:  parent,
-		sharedPath: sharedPath,
-		sharedCfg:  sharedCfg,
-		sharedMu:   &sync.RWMutex{},
-		ports:      NewPortRegistry(workspace.Management.Listen),
-		runtimes:   make(map[string]*Runtime, len(workspace.Projects)),
+		workspace:        workspace,
+		parentCtx:        parent,
+		sharedPath:       sharedPath,
+		sharedCfg:        sharedCfg,
+		sharedMu:         &sync.RWMutex{},
+		fetchCoordinator: subscription.NewFetchCoordinator(),
+		probeCoordinator: monitor.NewProbeCoordinator(),
+		ports:            NewPortRegistry(workspace.Management.Listen),
+		runtimes:         make(map[string]*Runtime, len(workspace.Projects)),
 	}
-	r.catalog = NewCatalogRuntime(parent, sharedCfg, r.sharedMu, r.ports, r.reloadSharedConfigFromDisk)
+	r.catalog = NewCatalogRuntime(parent, sharedCfg, r.sharedMu, r.ports, r.reloadSharedConfigFromDisk,
+		WithCatalogProbeCoordinator(r.probeCoordinator),
+	)
 	catalogChanged := false
 	for _, id := range workspace.SortedProjectIDs() {
 		spec := workspace.Projects[id]
 		if spec.ClashAPIPort == 0 {
 			port, err := r.ports.NextAvailable(9092)
 			if err != nil {
-				return nil, fmt.Errorf("allocate traffic API for project %q: %w", id, err)
+				return nil, fmt.Errorf("为项目 %q 分配流量 API 端口失败: %w", id, err)
 			}
 			spec.ClashAPIPort = port
 			workspace.Projects[id] = spec
@@ -86,10 +93,13 @@ func NewRegistry(parent context.Context, workspace *config.Workspace) (*Registry
 		if cfg, err := config.LoadProjectWithShared(path, sharedCfg); err == nil {
 			cfg.ClashAPIPort = spec.ClashAPIPort
 			if err := r.ports.Reserve(id, cfg); err != nil {
-				log.Printf("[project:%s] configured ports are not reservable: %v", id, err)
+				log.Printf("[项目:%s] 配置的端口无法保留: %v", id, err)
 			}
 		}
-		r.runtimes[id] = NewRuntime(parent, id, path, sharedPath, sharedCfg, r.sharedMu, spec.ClashAPIPort, r.ports)
+		r.runtimes[id] = NewRuntime(parent, id, path, sharedPath, sharedCfg, r.sharedMu, spec.ClashAPIPort, r.ports,
+			WithFetchCoordinator(r.fetchCoordinator),
+			WithProbeCoordinator(r.probeCoordinator),
+		)
 	}
 	if catalogChanged && workspace.Persisted() {
 		if err := workspace.Save(); err != nil {
@@ -98,7 +108,7 @@ func NewRegistry(parent context.Context, workspace *config.Workspace) (*Registry
 	}
 	if len(workspace.Projects) == 0 {
 		if err := r.catalog.Start(); err != nil {
-			log.Printf("[shared-catalog] startup failed: %v", err)
+			log.Printf("[共享目录] 启动失败: %v", err)
 		}
 	}
 	return r, nil
@@ -110,7 +120,7 @@ func migrateSharedSources(workspace *config.Workspace) error {
 	_, sharedErr := os.Stat(sharedPath)
 	sharedExists := sharedErr == nil
 	if sharedErr != nil && !os.IsNotExist(sharedErr) {
-		return fmt.Errorf("inspect shared source config: %w", sharedErr)
+		return fmt.Errorf("检查共享源配置失败: %w", sharedErr)
 	}
 
 	var shared *config.Config
@@ -118,12 +128,12 @@ func migrateSharedSources(workspace *config.Workspace) error {
 		var err error
 		shared, err = config.LoadShared(sharedPath)
 		if err != nil {
-			return fmt.Errorf("load shared source config: %w", err)
+			return fmt.Errorf("加载共享源配置失败: %w", err)
 		}
 	} else {
 		legacy, err := config.Load(legacyPath)
 		if err != nil {
-			return fmt.Errorf("load legacy source config: %w", err)
+			return fmt.Errorf("加载旧版源配置失败: %w", err)
 		}
 		shared = config.NewSharedConfig(sharedPath, legacy)
 	}
@@ -151,7 +161,7 @@ func migrateSharedSources(workspace *config.Workspace) error {
 		}
 		projectCfg, err := config.LoadReadOnly(oldPath)
 		if err != nil {
-			return fmt.Errorf("load project %q during shared config migration: %w", id, err)
+			return fmt.Errorf("迁移共享配置时加载项目 %q 失败: %w", id, err)
 		}
 		for _, rawURL := range projectCfg.Subscriptions {
 			if _, exists := knownURLs[rawURL]; exists {
@@ -195,14 +205,14 @@ func migrateSharedSources(workspace *config.Workspace) error {
 		}
 		if rewriteProjectConfigs || filepath.Clean(oldPath) != filepath.Clean(targetPath) || !fileExists(targetPath) {
 			if err := config.WriteRuntimeProjectConfig(targetPath, projectCfg); err != nil {
-				return fmt.Errorf("write migrated project %q config: %w", id, err)
+				return fmt.Errorf("写入已迁移项目 %q 的配置失败: %w", id, err)
 			}
 			changed = true
 		}
 		spec := workspace.Projects[id]
 		newRef, relErr := filepath.Rel(workspace.RootDir(), targetPath)
 		if relErr != nil {
-			return fmt.Errorf("resolve migrated project %q path: %w", id, relErr)
+			return fmt.Errorf("解析已迁移项目 %q 的路径失败: %w", id, relErr)
 		}
 		if spec.Config != newRef {
 			spec.Config = newRef
@@ -213,13 +223,13 @@ func migrateSharedSources(workspace *config.Workspace) error {
 
 	if changed {
 		if err := config.WriteSharedConfig(sharedPath, shared); err != nil {
-			return fmt.Errorf("write shared source config: %w", err)
+			return fmt.Errorf("写入共享源配置失败: %w", err)
 		}
 	}
 	workspace.SharedSourcesMigrated = true
 	if changed || workspace.Persisted() {
 		if err := workspace.Save(); err != nil {
-			return fmt.Errorf("save shared config migration marker: %w", err)
+			return fmt.Errorf("保存共享配置迁移标记失败: %w", err)
 		}
 	}
 	return nil
@@ -265,10 +275,10 @@ func (r *Registry) UpdateSystemSettings(ctx context.Context, settings monitor.Sy
 		}
 	}
 	if strings.TrimSpace(settings.Management.Listen) == "" {
-		return errors.New("management listen address cannot be empty")
+		return errors.New("管理服务监听地址不能为空")
 	}
 	if settings.Log.Output != "stdout" && settings.Log.Output != "file" {
-		return errors.New("log output must be stdout or file")
+		return errors.New("日志输出必须是 stdout 或 file")
 	}
 	r.mu.Lock()
 	previousManagement := r.workspace.Management
@@ -318,7 +328,7 @@ func (r *Registry) StartAutostartProjects() {
 			continue
 		}
 		if err := r.StartProject(r.parentCtx, id); err != nil {
-			log.Printf("[project:%s] startup failed: %v", id, err)
+			log.Printf("[项目:%s] 启动失败: %v", id, err)
 		}
 	}
 }
@@ -500,7 +510,9 @@ func runtimeSettings(cfg *config.Config) monitor.ProjectRuntimeSettings {
 		SubscriptionRefresh: monitor.ProjectSubscriptionSettings{
 			Enabled: cfg.SubscriptionRefresh.Enabled, Interval: cfg.SubscriptionRefresh.Interval.String(),
 		},
-		SelectedSubscriptions: cfg.SelectedSubscriptions,
+		SelectedSubscriptions: append([]string(nil), cfg.SelectedSubscriptions...),
+		ExcludedSubscriptions: append([]string(nil), cfg.ExcludedSubscriptions...),
+		ExcludedNodes:         append([]string(nil), cfg.ExcludedNodes...),
 	}
 }
 
@@ -515,14 +527,14 @@ func (r *Registry) Project(id string) (monitor.ProjectBinding, error) {
 	status, lastError, _ := runtime.Status()
 	if status != StatusRunning {
 		if lastError != "" {
-			return monitor.ProjectBinding{}, fmt.Errorf("project %q is %s: %s", id, status, lastError)
+			return monitor.ProjectBinding{}, fmt.Errorf("项目 %q 当前状态为 %s: %s", id, status, lastError)
 		}
-		return monitor.ProjectBinding{}, fmt.Errorf("project %q is %s", id, status)
+		return monitor.ProjectBinding{}, fmt.Errorf("项目 %q 当前状态为 %s", id, status)
 	}
 	cfg := runtime.Config()
 	mgr := runtime.MonitorManager()
 	if cfg == nil || mgr == nil {
-		return monitor.ProjectBinding{}, fmt.Errorf("project %q runtime is not ready", id)
+		return monitor.ProjectBinding{}, fmt.Errorf("项目 %q 的运行时尚未就绪", id)
 	}
 	return monitor.ProjectBinding{
 		ID:                    id,
@@ -533,22 +545,24 @@ func (r *Registry) Project(id string) (monitor.ProjectBinding, error) {
 		Monitor:               mgr,
 		NodeManager:           runtime.NodeManager(),
 		SubscriptionRefresher: runtime.SubscriptionRefresher(),
+		TrafficHistory:        runtime,
 		LogBuffer:             runtime.LogBuffer(),
 	}, nil
 }
 
 func (r *Registry) SharedCatalog() (monitor.ProjectBinding, error) {
 	r.mu.RLock()
-	projectCount := len(r.workspace.Projects)
 	catalog := r.catalog
 	r.mu.RUnlock()
-	if projectCount != 0 {
-		return monitor.ProjectBinding{}, errors.New("共享目录模式仅在没有项目时可用")
-	}
 	if catalog == nil {
 		return monitor.ProjectBinding{}, errors.New("共享目录未初始化")
 	}
-	return catalog.Binding()
+	binding, err := catalog.Binding()
+	if err != nil {
+		return monitor.ProjectBinding{}, err
+	}
+	binding.TrafficHistory = r
+	return binding, nil
 }
 
 func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCreateRequest) (monitor.ProjectSummary, error) {
@@ -566,32 +580,17 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 		mode = "multi-port"
 	}
 	if mode != "pool" && mode != "multi-port" && mode != "hybrid" {
-		return monitor.ProjectSummary{}, fmt.Errorf("unsupported mode %q", mode)
+		return monitor.ProjectSummary{}, fmt.Errorf("不支持的运行模式 %q", mode)
 	}
 
 	r.mu.Lock()
 	if _, exists := r.workspace.Projects[id]; exists {
 		r.mu.Unlock()
-		return monitor.ProjectSummary{}, fmt.Errorf("project %q already exists", id)
+		return monitor.ProjectSummary{}, fmt.Errorf("项目 %q 已存在", id)
 	}
 	firstProject := len(r.workspace.Projects) == 0
 	previousDefault := r.workspace.DefaultProject
 	r.mu.Unlock()
-	restoreCatalog := false
-	defer func() {
-		if restoreCatalog && r.catalog != nil {
-			if err := r.catalog.Start(); err != nil {
-				log.Printf("[shared-catalog] restore after project creation failure: %v", err)
-			}
-		}
-	}()
-	if firstProject && r.catalog != nil {
-		if err := r.catalog.Stop(); err != nil {
-			return monitor.ProjectSummary{}, fmt.Errorf("stop shared catalog: %w", err)
-		}
-		restoreCatalog = true
-	}
-
 	listenerPort := request.ListenerPort
 	if listenerPort == 0 {
 		var err error
@@ -653,7 +652,7 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 		return monitor.ProjectSummary{}, err
 	}
 	if _, err := os.Stat(projectPath); err == nil {
-		return monitor.ProjectSummary{}, fmt.Errorf("project directory already contains %s", projectPath)
+		return monitor.ProjectSummary{}, fmt.Errorf("项目目录中已存在 %s", projectPath)
 	} else if !os.IsNotExist(err) {
 		return monitor.ProjectSummary{}, err
 	}
@@ -676,7 +675,10 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 		Config:       configRef,
 		ClashAPIPort: clashAPIPort,
 	}
-	runtime := NewRuntime(r.parentCtx, id, projectPath, r.sharedPath, r.sharedCfg, r.sharedMu, clashAPIPort, r.ports)
+	runtime := NewRuntime(r.parentCtx, id, projectPath, r.sharedPath, r.sharedCfg, r.sharedMu, clashAPIPort, r.ports,
+		WithFetchCoordinator(r.fetchCoordinator),
+		WithProbeCoordinator(r.probeCoordinator),
+	)
 	r.mu.Lock()
 	r.workspace.Projects[id] = spec
 	if firstProject {
@@ -692,7 +694,6 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 	}
 	r.mu.Unlock()
 	reserved = false
-	restoreCatalog = false
 
 	if enabled && autostart {
 		if ctx != nil {
@@ -703,7 +704,7 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 			}
 		}
 		if err := runtime.Start(); err != nil {
-			log.Printf("[project:%s] created but failed to start: %v", id, err)
+			log.Printf("[项目:%s] 已创建但启动失败: %v", id, err)
 		}
 	}
 	return projectSummary(id, spec, runtime), nil
@@ -764,7 +765,7 @@ func (r *Registry) UpdateProject(ctx context.Context, id string, request monitor
 	if request.Name != nil {
 		name := strings.TrimSpace(*request.Name)
 		if name == "" {
-			return monitor.ProjectSummary{}, errors.New("project name cannot be empty")
+			return monitor.ProjectSummary{}, errors.New("项目名称不能为空")
 		}
 		spec.Name = name
 	}
@@ -785,7 +786,7 @@ func (r *Registry) UpdateProject(ctx context.Context, id string, request monitor
 			runtime.sharedMu.RUnlock()
 		}
 		if err != nil {
-			return monitor.ProjectSummary{}, fmt.Errorf("load project settings: %w", err)
+			return monitor.ProjectSummary{}, fmt.Errorf("加载项目设置失败: %w", err)
 		}
 		previousCopy := *cfg
 		previousCfg = &previousCopy
@@ -800,7 +801,7 @@ func (r *Registry) UpdateProject(ctx context.Context, id string, request monitor
 		nextCfg = cfg
 		if err := nextCfg.SaveSettings(); err != nil {
 			rollbackErr := r.ports.Reserve(id, previousCfg)
-			return monitor.ProjectSummary{}, errors.Join(fmt.Errorf("save project settings: %w", err), rollbackErr)
+			return monitor.ProjectSummary{}, errors.Join(fmt.Errorf("保存项目设置失败: %w", err), rollbackErr)
 		}
 	}
 
@@ -841,45 +842,45 @@ func (r *Registry) UpdateProject(ctx context.Context, id string, request monitor
 
 func applyRuntimeSettings(cfg *config.Config, settings monitor.ProjectRuntimeSettings) error {
 	if cfg == nil {
-		return errors.New("project config is nil")
+		return errors.New("项目配置不能为空")
 	}
 	mode := strings.TrimSpace(settings.Mode)
 	if mode == "multi_port" {
 		mode = "multi-port"
 	}
 	if mode != "pool" && mode != "multi-port" && mode != "hybrid" {
-		return fmt.Errorf("unsupported mode %q", settings.Mode)
+		return fmt.Errorf("不支持的运行模式 %q", settings.Mode)
 	}
 	if (mode == "pool" || mode == "hybrid") && settings.Listener.Port == 0 {
-		return errors.New("listener port is required in pool and hybrid modes")
+		return errors.New("pool 和 hybrid 模式必须设置监听端口")
 	}
 	if (mode == "multi-port" || mode == "hybrid") && settings.MultiPort.BasePort == 0 {
-		return errors.New("multi-port base port is required in multi-port and hybrid modes")
+		return errors.New("multi-port 和 hybrid 模式必须设置多端口起始端口")
 	}
 	blacklist, err := time.ParseDuration(strings.TrimSpace(settings.Pool.BlacklistDuration))
 	if err != nil || blacklist <= 0 {
-		return errors.New("blacklist duration must be a positive duration")
+		return errors.New("拉黑时长必须是正数")
 	}
 	probeInterval, err := time.ParseDuration(strings.TrimSpace(settings.Probe.Interval))
 	if err != nil || probeInterval <= 0 {
-		return errors.New("probe interval must be a positive duration")
+		return errors.New("探测间隔必须是正数")
 	}
 	probeTimeout, err := time.ParseDuration(strings.TrimSpace(settings.Probe.Timeout))
 	if err != nil {
-		return errors.New("probe timeout format is invalid")
+		return errors.New("探测超时格式无效")
 	}
 	if err := config.ValidateProbeTimeout(probeTimeout); err != nil {
 		return err
 	}
 	subInterval, err := time.ParseDuration(strings.TrimSpace(settings.SubscriptionRefresh.Interval))
 	if err != nil || subInterval < 5*time.Minute {
-		return errors.New("subscription refresh interval cannot be less than 5 minutes")
+		return errors.New("订阅刷新间隔不能小于 5 分钟")
 	}
 	if settings.Probe.Concurrency <= 0 || settings.Probe.Concurrency > 1024 {
-		return errors.New("probe concurrency must be between 1 and 1024")
+		return errors.New("探测并发数必须在 1 到 1024 之间")
 	}
 	if settings.Pool.FailureThreshold <= 0 || settings.Pool.RetryAttempts <= 0 {
-		return errors.New("pool thresholds must be positive")
+		return errors.New("节点池阈值必须是正数")
 	}
 	cfg.Mode = mode
 	cfg.ExternalIP = strings.TrimSpace(settings.ExternalIP)
@@ -907,6 +908,12 @@ func applyRuntimeSettings(cfg *config.Config, settings monitor.ProjectRuntimeSet
 	cfg.SubscriptionRefresh.Interval = subInterval
 	if settings.SelectedSubscriptions != nil {
 		cfg.SelectedSubscriptions = append([]string(nil), settings.SelectedSubscriptions...)
+	}
+	if settings.ExcludedSubscriptions != nil {
+		cfg.ExcludedSubscriptions = append([]string(nil), settings.ExcludedSubscriptions...)
+	}
+	if settings.ExcludedNodes != nil {
+		cfg.ExcludedNodes = append([]string(nil), settings.ExcludedNodes...)
 	}
 	return nil
 }
@@ -937,23 +944,23 @@ func (r *Registry) DeleteProjectWithData(ctx context.Context, id string, deleteD
 		}
 		actualConfigPath, err := filepath.Abs(runtime.configPath)
 		if err != nil {
-			return result, fmt.Errorf("resolve project config path: %w", err)
+			return result, fmt.Errorf("解析项目配置路径失败: %w", err)
 		}
 		expectedConfigPath, err = filepath.Abs(expectedConfigPath)
 		if err != nil {
-			return result, fmt.Errorf("resolve managed project path: %w", err)
+			return result, fmt.Errorf("解析受管项目路径失败: %w", err)
 		}
 		if filepath.Clean(actualConfigPath) != filepath.Clean(expectedConfigPath) {
-			return result, fmt.Errorf("refusing to delete project data outside managed path %q", expectedConfigPath)
+			return result, fmt.Errorf("拒绝删除受管路径 %q 之外的项目数据", expectedConfigPath)
 		}
 		dataDir = filepath.Dir(expectedConfigPath)
 		rootDir, err := filepath.Abs(r.workspace.RootDir())
 		if err != nil {
-			return result, fmt.Errorf("resolve workspace root: %w", err)
+			return result, fmt.Errorf("解析工作区根目录失败: %w", err)
 		}
 		rel, err := filepath.Rel(rootDir, dataDir)
 		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return result, fmt.Errorf("refusing to delete unsafe project directory %q", dataDir)
+			return result, fmt.Errorf("拒绝删除不安全的项目目录 %q", dataDir)
 		}
 	}
 	if ctx != nil {
@@ -996,7 +1003,7 @@ func (r *Registry) DeleteProjectWithData(ctx context.Context, id string, deleteD
 	if deleteData {
 		if err := os.RemoveAll(dataDir); err != nil {
 			result.DataRetained = true
-			result.Warning = fmt.Sprintf("project removed from catalog, but local data could not be deleted: %v", err)
+			result.Warning = fmt.Sprintf("项目已从目录移除，但无法删除本地数据: %v", err)
 			return result, nil
 		}
 		result.DataDeleted = true
@@ -1025,7 +1032,7 @@ func (r *Registry) StartProject(ctx context.Context, id string) error {
 		return fmt.Errorf("%w: %s", ErrProjectNotFound, id)
 	}
 	if !spec.Enabled {
-		return fmt.Errorf("project %q is disabled", id)
+		return fmt.Errorf("项目 %q 已禁用", id)
 	}
 	if ctx != nil {
 		select {
@@ -1064,6 +1071,25 @@ func (r *Registry) ReloadProject(ctx context.Context, id string) error {
 	return runtime.Reload(ctx)
 }
 
+// ReloadProjectSources rebuilds one running project from its persisted source
+// selection and the latest shared catalog.
+func (r *Registry) ReloadProjectSources(ctx context.Context, id string) error {
+	r.mu.RLock()
+	runtime, ok := r.runtimes[id]
+	r.mu.RUnlock()
+	if !ok || runtime == nil {
+		return fmt.Errorf("%w: %s", ErrProjectNotFound, id)
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+	return runtime.Restart()
+}
+
 // ReloadSharedSources restarts every running project so it picks up the latest
 // standalone shared node and subscription definitions. Project state remains
 // isolated in each project's own state database.
@@ -1074,14 +1100,13 @@ func (r *Registry) ReloadSharedSources(ctx context.Context) error {
 	r.mu.RLock()
 	runtimes := make(map[string]*Runtime, len(r.runtimes))
 	catalog := r.catalog
-	noProjects := len(r.workspace.Projects) == 0
 	for id, runtime := range r.runtimes {
 		runtimes[id] = runtime
 	}
 	r.mu.RUnlock()
-	if noProjects && catalog != nil {
-		if err := catalog.ReloadFromShared(); err != nil {
-			return fmt.Errorf("reload shared catalog: %w", err)
+	if catalog != nil {
+		if err := catalog.ReloadIfRunning(); err != nil {
+			return fmt.Errorf("重新加载共享目录失败: %w", err)
 		}
 	}
 
@@ -1104,14 +1129,118 @@ func (r *Registry) ReloadSharedSources(ctx context.Context) error {
 			continue
 		}
 		if err := runtimes[id].Restart(); err != nil {
-			reloadErrors = append(reloadErrors, fmt.Errorf("reload project %q shared sources: %w", id, err))
+			reloadErrors = append(reloadErrors, fmt.Errorf("重新加载项目 %q 的共享源失败: %w", id, err))
 		}
 	}
 	return errors.Join(reloadErrors...)
 }
 
+type subscriptionReferenceUpdate struct {
+	runtime *Runtime
+	before  *config.Config
+	after   *config.Config
+}
+
+func rewriteSubscriptionReference(values []string, oldURL, newURL string) ([]string, bool) {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	changed := false
+	for _, rawURL := range values {
+		candidate := rawURL
+		if rawURL == oldURL {
+			changed = true
+			candidate = newURL
+		}
+		if candidate == "" {
+			continue
+		}
+		if _, duplicate := seen[candidate]; duplicate {
+			changed = true
+			continue
+		}
+		seen[candidate] = struct{}{}
+		result = append(result, candidate)
+	}
+	return result, changed
+}
+
+// RewriteSharedSubscriptionReferences keeps every project's selection filters
+// aligned when a shared subscription is renamed or deleted. An empty newURL
+// removes the stale reference.
+func (r *Registry) RewriteSharedSubscriptionReferences(oldURL, newURL string) error {
+	oldURL = strings.TrimSpace(oldURL)
+	newURL = strings.TrimSpace(newURL)
+	if oldURL == "" || oldURL == newURL {
+		return nil
+	}
+
+	r.catalogMu.Lock()
+	defer r.catalogMu.Unlock()
+	r.mu.RLock()
+	ids := make([]string, 0, len(r.runtimes))
+	runtimes := make(map[string]*Runtime, len(r.runtimes))
+	for id, runtime := range r.runtimes {
+		ids = append(ids, id)
+		runtimes[id] = runtime
+	}
+	r.mu.RUnlock()
+	sort.Strings(ids)
+
+	updates := make([]subscriptionReferenceUpdate, 0, len(ids))
+	for _, id := range ids {
+		runtime := runtimes[id]
+		cfg, err := config.LoadSettingsReadOnly(runtime.configPath)
+		if err != nil {
+			return fmt.Errorf("加载项目 %q 的订阅关联失败: %w", id, err)
+		}
+		before := *cfg
+		before.SelectedSubscriptions = append([]string(nil), cfg.SelectedSubscriptions...)
+		before.ExcludedSubscriptions = append([]string(nil), cfg.ExcludedSubscriptions...)
+		selected, selectedChanged := rewriteSubscriptionReference(cfg.SelectedSubscriptions, oldURL, newURL)
+		excluded, excludedChanged := rewriteSubscriptionReference(cfg.ExcludedSubscriptions, oldURL, newURL)
+		if newURL == "" && len(cfg.SelectedSubscriptions) > 0 && len(selected) == 0 {
+			if r.sharedMu != nil {
+				r.sharedMu.RLock()
+			}
+			for _, configuredURL := range r.sharedCfg.Subscriptions {
+				if !containsString(excluded, configuredURL) {
+					excluded = append(excluded, configuredURL)
+					excludedChanged = true
+				}
+			}
+			if r.sharedMu != nil {
+				r.sharedMu.RUnlock()
+			}
+		}
+		if !selectedChanged && !excludedChanged {
+			continue
+		}
+		cfg.SelectedSubscriptions = selected
+		cfg.ExcludedSubscriptions = excluded
+		updates = append(updates, subscriptionReferenceUpdate{runtime: runtime, before: &before, after: cfg})
+	}
+
+	saved := make([]subscriptionReferenceUpdate, 0, len(updates))
+	for _, update := range updates {
+		if err := update.after.SaveSettings(); err != nil {
+			rollbackErrors := []error{fmt.Errorf("保存项目订阅关联失败: %w", err)}
+			for index := len(saved) - 1; index >= 0; index-- {
+				if rollbackErr := saved[index].before.SaveSettings(); rollbackErr != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("回滚项目订阅关联失败: %w", rollbackErr))
+				}
+			}
+			return errors.Join(rollbackErrors...)
+		}
+		saved = append(saved, update)
+	}
+	for _, update := range updates {
+		update.runtime.setSubscriptionReferences(update.after.SelectedSubscriptions, update.after.ExcludedSubscriptions)
+	}
+	return nil
+}
+
 // reloadSharedConfigFromDisk refreshes the shared catalog in place so all
-// project runtimes and the projectless catalog keep the same pointer while
+// project runtimes and the global catalog keep the same pointer while
 // subscription refreshes update nodes.txt.
 func (r *Registry) reloadSharedConfigFromDisk() error {
 	if r.sharedMu != nil {

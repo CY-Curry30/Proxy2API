@@ -43,7 +43,7 @@ func NewPortRegistry(managementListen string) *PortRegistry {
 // that none conflict with another project or the management server.
 func (r *PortRegistry) Reserve(projectID string, cfg *config.Config) error {
 	if cfg == nil {
-		return fmt.Errorf("project %q has no config", projectID)
+		return fmt.Errorf("项目 %q 没有配置", projectID)
 	}
 	desired, err := declaredPorts(cfg)
 	if err != nil {
@@ -54,7 +54,7 @@ func (r *PortRegistry) Reserve(projectID string, cfg *config.Config) error {
 	defer r.mu.Unlock()
 	for port, purpose := range desired {
 		if owner, exists := r.owners[port]; exists && owner.Project != projectID {
-			return fmt.Errorf("port %d (%s) conflicts with project %q (%s)", port, purpose, owner.Project, owner.Purpose)
+			return fmt.Errorf("端口 %d（%s）与项目 %q（%s）冲突", port, purpose, owner.Project, owner.Purpose)
 		}
 	}
 	for port, owner := range r.owners {
@@ -75,7 +75,7 @@ func declaredPorts(cfg *config.Config) (map[uint16]string, error) {
 			return nil
 		}
 		if previous, exists := ports[port]; exists {
-			return fmt.Errorf("port %d is used by both %s and %s in the same project", port, previous, purpose)
+			return fmt.Errorf("同一项目中的 %s 和 %s 同时使用了端口 %d", previous, purpose, port)
 		}
 		ports[port] = purpose
 		return nil
@@ -118,12 +118,12 @@ func declaredPorts(cfg *config.Config) (map[uint16]string, error) {
 
 func (r *PortRegistry) Claim(projectID string, port uint16, purpose string) error {
 	if port == 0 {
-		return errors.New("cannot claim port 0")
+		return errors.New("不能占用端口 0")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if owner, exists := r.owners[port]; exists && owner.Project != projectID {
-		return fmt.Errorf("port %d (%s) conflicts with project %q (%s)", port, purpose, owner.Project, owner.Purpose)
+		return fmt.Errorf("端口 %d（%s）与项目 %q（%s）冲突", port, purpose, owner.Project, owner.Purpose)
 	}
 	r.owners[port] = portOwner{Project: projectID, Purpose: purpose}
 	return nil
@@ -147,7 +147,7 @@ func (r *PortRegistry) NextAvailable(start uint16) (uint16, error) {
 	defer r.mu.Unlock()
 	port := r.nextAvailableLocked(start, nil)
 	if port == 0 {
-		return 0, fmt.Errorf("no available port at or above %d", start)
+		return 0, fmt.Errorf("从 %d 开始没有可用端口", start)
 	}
 	return port, nil
 }

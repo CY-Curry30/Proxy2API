@@ -16,15 +16,16 @@ import (
 
 const sharedCatalogID = "__shared_catalog__"
 
-// CatalogRuntime makes the shared node/subscription catalog operable when no
-// project exists. It has no persistent node-state store and does not run
-// automatic probes or automatic subscription refreshes.
+// CatalogRuntime makes the shared node/subscription catalog independently
+// operable. It has no persistent node-state store and does not run automatic
+// probes or automatic subscription refreshes.
 type CatalogRuntime struct {
-	parentCtx  context.Context
-	sharedCfg  *config.Config
-	sharedMu   *sync.RWMutex
-	ports      *PortRegistry
-	syncShared func() error
+	parentCtx        context.Context
+	sharedCfg        *config.Config
+	sharedMu         *sync.RWMutex
+	ports            *PortRegistry
+	syncShared       func() error
+	probeCoordinator *monitor.ProbeCoordinator
 
 	lifecycleMu sync.Mutex
 	mu          sync.RWMutex
@@ -35,11 +36,23 @@ type CatalogRuntime struct {
 	cancel      context.CancelFunc
 }
 
-func NewCatalogRuntime(parent context.Context, shared *config.Config, sharedMu *sync.RWMutex, ports *PortRegistry, syncShared func() error) *CatalogRuntime {
+type CatalogOption func(*CatalogRuntime)
+
+func WithCatalogProbeCoordinator(coordinator *monitor.ProbeCoordinator) CatalogOption {
+	return func(r *CatalogRuntime) { r.probeCoordinator = coordinator }
+}
+
+func NewCatalogRuntime(parent context.Context, shared *config.Config, sharedMu *sync.RWMutex, ports *PortRegistry, syncShared func() error, opts ...CatalogOption) *CatalogRuntime {
 	if parent == nil {
 		parent = context.Background()
 	}
-	return &CatalogRuntime{parentCtx: parent, sharedCfg: shared, sharedMu: sharedMu, ports: ports, syncShared: syncShared}
+	runtime := &CatalogRuntime{parentCtx: parent, sharedCfg: shared, sharedMu: sharedMu, ports: ports, syncShared: syncShared}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(runtime)
+		}
+	}
+	return runtime
 }
 
 func (r *CatalogRuntime) Start() error {
@@ -84,6 +97,8 @@ func (r *CatalogRuntime) Start() error {
 		ProbeInterval:    cfg.ProbeIntervalOrDefault(),
 		ProbeTimeout:     cfg.ProbeTimeoutOrDefault(),
 		ProbeConcurrency: cfg.ProbeConcurrencyOrDefault(),
+		ProbeCoordinator: r.probeCoordinator,
+		ProbeOwner:       sharedCatalogID,
 		SkipCertVerify:   cfg.SkipCertVerify,
 	}
 	boxMgr := boxmgr.New(
@@ -94,7 +109,7 @@ func (r *CatalogRuntime) Start() error {
 	)
 	if err := boxMgr.Start(ctx); err != nil {
 		_ = boxMgr.Close()
-		log.Printf("[shared-catalog] probe runtime unavailable, keeping CRUD services online: %v", err)
+		log.Printf("[共享目录] 探测运行时不可用，增删改查服务仍保持在线: %v", err)
 		fallback := *cfg
 		fallback.Nodes = nil
 		boxMgr = boxmgr.New(
@@ -110,7 +125,10 @@ func (r *CatalogRuntime) Start() error {
 		}
 		cfg = &fallback
 	}
-	subMgr := subscription.New(r.sharedCfg, boxMgr)
+	// Use the catalog clone so its refresh flag is always false. The shared
+	// config pointer remains the source owner for CRUD, but project fetches must
+	// never drive the catalog's runtime state.
+	subMgr := subscription.New(cfg, boxMgr)
 	subMgr.Start()
 	view := monitor.SubscriptionRefresher(subMgr)
 	if r.syncShared != nil {
@@ -159,6 +177,7 @@ func (r *CatalogRuntime) ReloadFromShared() error {
 	r.mu.RLock()
 	boxMgr := r.boxMgr
 	cfg := r.cfg
+	subMgr := r.subMgr
 	r.mu.RUnlock()
 	if boxMgr == nil || cfg == nil {
 		return r.Start()
@@ -167,10 +186,25 @@ func (r *CatalogRuntime) ReloadFromShared() error {
 	if err := boxMgr.ReloadWithPortMap(next, boxMgr.CurrentPortMap()); err != nil {
 		return err
 	}
+	if subMgr != nil {
+		subMgr.UpdateConfig(next.Subscriptions, false, next.SubscriptionRefresh.Interval)
+	}
 	r.mu.Lock()
 	r.cfg = next
 	r.mu.Unlock()
 	return nil
+}
+
+// ReloadIfRunning updates an already-open catalog without turning a shared
+// config change into an implicit catalog startup.
+func (r *CatalogRuntime) ReloadIfRunning() error {
+	r.mu.RLock()
+	running := r.boxMgr != nil
+	r.mu.RUnlock()
+	if !running {
+		return nil
+	}
+	return r.ReloadFromShared()
 }
 
 func (r *CatalogRuntime) Binding() (monitor.ProjectBinding, error) {
@@ -186,7 +220,7 @@ func (r *CatalogRuntime) Binding() (monitor.ProjectBinding, error) {
 	}
 	return monitor.ProjectBinding{
 		ID:                    sharedCatalogID,
-		Name:                  "共享目录（无项目）",
+		Name:                  "全局目录",
 		CatalogOnly:           true,
 		Config:                boxMgr.CurrentConfig(),
 		SharedConfig:          r.sharedCfg,
