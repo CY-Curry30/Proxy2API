@@ -781,7 +781,7 @@ func (r *Registry) UpdateProject(ctx context.Context, id string, request monitor
 		if runtime.sharedMu != nil {
 			runtime.sharedMu.RLock()
 		}
-		cfg, err := config.LoadProjectWithShared(runtime.configPath, runtime.sharedCfg)
+		cfg, err := config.LoadProjectSettingsWithShared(runtime.configPath, runtime.sharedCfg)
 		if runtime.sharedMu != nil {
 			runtime.sharedMu.RUnlock()
 		}

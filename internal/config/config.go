@@ -485,11 +485,23 @@ func LoadProjectReadOnlyWithShared(path string, shared *Config) (*Config, error)
 	return loadProjectWithShared(path, shared, false)
 }
 
+// LoadProjectSettingsWithShared reads project settings and overlays the shared
+// source catalog without opening the runtime recovery database. It is intended
+// for control-plane updates while the project's runtime owns that database.
+func LoadProjectSettingsWithShared(path string, shared *Config) (*Config, error) {
+	return loadProjectWithSharedOptions(path, shared, true, false)
+}
+
 func load(path string, restorePersistedPorts bool) (*Config, error) {
+	return loadWithOptions(path, restorePersistedPorts, true)
+}
+
+func loadWithOptions(path string, restorePersistedPorts, recoverRuntimeState bool) (*Config, error) {
 	cfg, err := decodeConfig(path)
 	if err != nil {
 		return nil, err
 	}
+	cfg.skipRuntimeRecovery = !recoverRuntimeState
 	if err := cfg.normalize(); err != nil {
 		return nil, err
 	}
@@ -571,6 +583,10 @@ func loadProject(path, sharedPath string, persistPorts bool) (*Config, error) {
 }
 
 func loadProjectWithShared(path string, shared *Config, persistPorts bool) (*Config, error) {
+	return loadProjectWithSharedOptions(path, shared, persistPorts, true)
+}
+
+func loadProjectWithSharedOptions(path string, shared *Config, persistPorts, recoverRuntimeState bool) (*Config, error) {
 	if shared == nil {
 		return nil, errors.New("共享源配置不能为空")
 	}
@@ -584,14 +600,15 @@ func loadProjectWithShared(path string, shared *Config, persistPorts bool) (*Con
 	}
 	if filepath.Clean(projectAbs) == filepath.Clean(sharedAbs) {
 		if persistPorts {
-			return Load(projectAbs)
+			return loadWithOptions(projectAbs, true, recoverRuntimeState)
 		}
-		return LoadReadOnly(projectAbs)
+		return loadWithOptions(projectAbs, false, recoverRuntimeState)
 	}
 	project, err := decodeConfig(projectAbs)
 	if err != nil {
 		return nil, err
 	}
+	project.skipRuntimeRecovery = !recoverRuntimeState
 	project.sourcesShared = true
 	project.Subscriptions = append([]string(nil), shared.Subscriptions...)
 	project.DisabledSubscriptions = append([]string(nil), shared.DisabledSubscriptions...)
