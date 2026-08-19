@@ -3062,6 +3062,10 @@
         const statusCopyAttrs = copyableError
           ? ` oncontextmenu="copyStatusError(event, '${escapeAttrJs(statusTitle)}')"`
           : '';
+        const nodeDisplayName = n.name || n.tag;
+        const nodeNameTitle = n.subscription_name
+          ? `${nodeDisplayName}\n订阅来源：${n.subscription_name}`
+          : nodeDisplayName;
 
         return `<tr>
           <td><span class="badge ${badge}${copyableError ? ' badge-copyable' : ''}" title="${escapeHtml(statusTitle)}"${statusCopyAttrs}>${statusText}</span></td>
@@ -3069,7 +3073,7 @@
           <td class="tt-mono">${escapeHtml(n.ip || '-')}</td>
           <td>
             <div class="node-name-line">
-              <div class="cell-trunc" style="font-weight: 500" title="${escapeHtml(n.name || n.tag)}">${escapeHtml(n.name || n.tag)}</div>
+              <div class="cell-trunc" style="font-weight: 500" title="${escapeHtml(nodeNameTitle)}">${escapeHtml(nodeDisplayName)}</div>
               ${entryPortBadges ? `<span class="entry-port-badges">${entryPortBadges}</span>` : ''}
             </div>
             <div class="cell-trunc" style="font-size: 11px; color: var(--text-muted)" title="${escapeHtml(n.tag)}">${escapeHtml(n.tag)}</div>

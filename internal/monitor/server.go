@@ -860,7 +860,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	stickyEnabled := s.cfgSrc != nil && s.cfgSrc.Sticky.Enabled
 	s.cfgMu.RUnlock()
 	payload := map[string]any{
-		"nodes":          allNodes,
+		"nodes":          s.snapshotNodeViews(allNodes),
 		"total_nodes":    totalNodes,
 		"sticky_node":    s.mgr.StickyNode(),
 		"sticky_enabled": stickyEnabled,
@@ -2692,7 +2692,12 @@ type configNodeView struct {
 	SubscriptionName string `json:"subscription_name,omitempty"`
 }
 
-func (s *Server) configNodeViews(nodes []config.NodeConfig) []configNodeView {
+type snapshotNodeView struct {
+	Snapshot
+	SubscriptionName string `json:"subscription_name,omitempty"`
+}
+
+func (s *Server) subscriptionDisplayNames() map[string]string {
 	subscriptionNames := make(map[string]string)
 	if s.subRefresher != nil {
 		for _, subscription := range s.subRefresher.Subscriptions() {
@@ -2702,6 +2707,27 @@ func (s *Server) configNodeViews(nodes []config.NodeConfig) []configNodeView {
 			}
 		}
 	}
+	return subscriptionNames
+}
+
+func (s *Server) snapshotNodeViews(nodes []Snapshot) []snapshotNodeView {
+	subscriptionNames := s.subscriptionDisplayNames()
+	views := make([]snapshotNodeView, 0, len(nodes))
+	for _, node := range nodes {
+		view := snapshotNodeView{Snapshot: node}
+		if node.Source == string(config.NodeSourceSubscription) {
+			view.SubscriptionName = subscriptionNames[strings.TrimSpace(node.SubscriptionURL)]
+			if view.SubscriptionName == "" {
+				view.SubscriptionName = subscriptionNameFromURL(node.SubscriptionURL)
+			}
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
+func (s *Server) configNodeViews(nodes []config.NodeConfig) []configNodeView {
+	subscriptionNames := s.subscriptionDisplayNames()
 
 	views := make([]configNodeView, 0, len(nodes))
 	for _, node := range nodes {
