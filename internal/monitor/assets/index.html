@@ -846,9 +846,9 @@
             <div class="stat-sub">Active & Ready</div>
           </div>
           <div class="stat-panel">
-            <div class="stat-title">活跃连接数</div>
+            <div class="stat-title" id="activeConnectionsTitle">活跃连接数</div>
             <div class="stat-value" style="color: var(--primary);" id="activeConnections">0</div>
-            <div class="stat-sub">当前建立会话</div>
+            <div class="stat-sub" id="activeConnectionsSub">当前建立会话</div>
           </div>
           <div class="stat-panel">
             <div class="stat-title">异常/拉黑</div>
@@ -856,14 +856,14 @@
             <div class="stat-sub">不可用节点</div>
           </div>
           <div class="stat-panel">
-            <div class="stat-title">↑ 上行速率</div>
+            <div class="stat-title" id="liveUpTitle">↑ 上行速率</div>
             <div class="stat-value" style="color: #3b82f6; font-size: 22px;" id="liveUpSpeed">0 B/s</div>
-            <div class="stat-sub" style="color: var(--text-muted);">实时上传</div>
+            <div class="stat-sub" id="liveUpSub" style="color: var(--text-muted);">实时上传</div>
           </div>
           <div class="stat-panel">
-            <div class="stat-title">↓ 下行速率</div>
+            <div class="stat-title" id="liveDownTitle">↓ 下行速率</div>
             <div class="stat-value" style="color: #10b981; font-size: 22px;" id="liveDownSpeed">0 B/s</div>
-            <div class="stat-sub" style="color: var(--text-muted);">实时下载</div>
+            <div class="stat-sub" id="liveDownSub" style="color: var(--text-muted);">实时下载</div>
           </div>
         </div>
 
@@ -874,7 +874,7 @@
             <div class="region-map-metrics" id="regionMapMetrics" aria-label="国家、延迟、可用统计"></div>
           </div>
           <div class="chart-panel">
-            <div class="chart-title">实时流量带宽 (Real-time Traffic)</div>
+            <div class="chart-title" id="trafficChartTitle">实时流量带宽 (Real-time Traffic)</div>
             <div class="chart-container" id="trafficChart"></div>
           </div>
           <div class="chart-panel traffic-calendar-panel">
@@ -1139,6 +1139,13 @@
               <div class="settings-form-grid" style="padding:16px;">
                 <div class="form-group"><label>监听地址</label><input type="text" id="settingMgmtListen" class="setting-input" placeholder="0.0.0.0:8080" /></div>
                 <div class="form-group"><label>访问密码</label><input type="password" id="settingMgmtPassword" class="setting-input" /></div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">界面刷新</div></div>
+              <div class="settings-form-grid" style="padding:16px;">
+                <div class="form-group"><label>自动刷新间隔（秒）</label><input type="number" id="settingUIRefreshSeconds" class="setting-input" min="2" max="300" step="1" /></div>
               </div>
             </div>
 
@@ -1416,8 +1423,18 @@
       return nativeFetch(input, init);
     };
 
+    const UI_REFRESH_STORAGE_KEY = 'proxy2apiRefreshSeconds';
+    const UI_REFRESH_DEFAULT_SECONDS = 10;
+    const UI_REFRESH_MIN_SECONDS = 2;
+    const UI_REFRESH_MAX_SECONDS = 300;
+    const storedUIRefreshSeconds = Number.parseInt(localStorage.getItem(UI_REFRESH_STORAGE_KEY), 10);
+    let uiRefreshSeconds = Number.isInteger(storedUIRefreshSeconds) && storedUIRefreshSeconds >= UI_REFRESH_MIN_SECONDS && storedUIRefreshSeconds <= UI_REFRESH_MAX_SECONDS
+      ? storedUIRefreshSeconds
+      : UI_REFRESH_DEFAULT_SECONDS;
     let isAutoRefresh = true;
     let autoRefreshInterval = null;
+    let lastGlobalDashboardRenderAt = 0;
+    let lastTrafficRenderAt = 0;
     let allNodesCache = [];
     let sweepWasActive = false;
     let sweepProgressPollTimer = null;
@@ -1465,9 +1482,12 @@
     let trafficCalendarLastLoadedAt = 0;
     let trafficCalendarLastScope = '';
     let trafficSource = null;
+    let globalDashboardSource = null;
     let trafficDataUp = [];
     let trafficDataDown = [];
     let trafficTime = [];
+    let healthTime = [];
+    let projectHealthData = new Map();
 
     // Resize observer for charts
     window.addEventListener('resize', () => {
@@ -1923,9 +1943,17 @@
         trafficSource.close();
         trafficSource = null;
       }
+      if (globalDashboardSource) {
+        globalDashboardSource.close();
+        globalDashboardSource = null;
+      }
       trafficDataUp = [];
       trafficDataDown = [];
       trafficTime = [];
+      healthTime = [];
+      projectHealthData = new Map();
+      lastGlobalDashboardRenderAt = 0;
+      lastTrafficRenderAt = 0;
       trafficCalendarLoadToken++;
       trafficCalendarPayload = null;
       trafficCalendarLastLoadedAt = 0;
@@ -2368,8 +2396,22 @@
       document.getElementById('autoRefreshBtn').textContent = isAutoRefresh ? '⏹ 关闭自动刷新' : '▶ 开启自动刷新';
       if(isAutoRefresh) startAutoRefresh(); else stopAutoRefresh();
     }
-    function startAutoRefresh() { if(!autoRefreshInterval) autoRefreshInterval = setInterval(()=> { if(!document.hidden && document.getElementById('dashboardTab').classList.contains('active')) refresh(); }, 10000); }
+    function startAutoRefresh() {
+      stopAutoRefresh();
+      autoRefreshInterval = setInterval(()=> {
+        if(!document.hidden && document.getElementById('dashboardTab').classList.contains('active')) refresh();
+      }, uiRefreshSeconds * 1000);
+    }
     function stopAutoRefresh() { clearInterval(autoRefreshInterval); autoRefreshInterval = null; }
+
+    function applyUIRefreshSeconds(seconds) {
+      uiRefreshSeconds = seconds;
+      localStorage.setItem(UI_REFRESH_STORAGE_KEY, String(seconds));
+      lastGlobalDashboardRenderAt = 0;
+      lastTrafficRenderAt = 0;
+      trafficCalendarLastLoadedAt = 0;
+      if (isAutoRefresh) startAutoRefresh();
+    }
 
     function getQualityWidth(ms) {
       if(ms < 0) return 0; if(ms > 1000) return 100;
@@ -2546,11 +2588,35 @@
     function updateDashboardStats(data) {
       document.getElementById('totalNodes').textContent = data.total_nodes || allNodesCache.length;
       document.getElementById('healthyNodes').textContent = allNodesCache.filter(n => !n.blacklisted && n.initial_check_done && n.available).length;
-      document.getElementById('activeConnections').textContent = allNodesCache.reduce((s, n) => s + (n.active_connections||0), 0);
       document.getElementById('blacklistedNodes').textContent = allNodesCache.filter(n => n.blacklisted || (!n.available && n.initial_check_done)).length;
+      applyDashboardScopeLabels();
+      if (currentProjectID) {
+        document.getElementById('activeConnections').textContent = allNodesCache.reduce((s, n) => s + (n.active_connections||0), 0);
+      }
       
       if(document.getElementById('dashboardTab').classList.contains('active')) {
         updateDashboardCharts();
+      }
+    }
+
+    function applyDashboardScopeLabels() {
+      const globalView = !currentProjectID;
+      const scopeChanged = (document.getElementById('activeConnectionsTitle').textContent === '项目数') !== globalView;
+      document.getElementById('activeConnectionsTitle').textContent = globalView ? '项目数' : '活跃连接数';
+      document.getElementById('activeConnectionsSub').textContent = globalView ? '运行中 / 总项目' : '当前建立会话';
+      document.getElementById('liveUpTitle').textContent = globalView ? 'CPU 使用率' : '↑ 上行速率';
+      document.getElementById('liveUpSub').textContent = globalView ? '服务所在机器' : '实时上传';
+      document.getElementById('liveDownTitle').textContent = globalView ? '内存使用率' : '↓ 下行速率';
+      document.getElementById('liveDownSub').textContent = globalView ? '服务所在机器' : '实时下载';
+      document.getElementById('trafficChartTitle').textContent = globalView
+        ? '项目节点健康率 (Project Node Health)'
+        : '实时流量带宽 (Real-time Traffic)';
+      if (scopeChanged) {
+        document.getElementById('liveUpSpeed').textContent = globalView ? '-' : '0 B/s';
+        document.getElementById('liveDownSpeed').textContent = globalView ? '-' : '0 B/s';
+        if (globalView) {
+          document.getElementById('activeConnections').textContent = `0/${projectsCache.length}`;
+        }
       }
     }
 
@@ -2757,6 +2823,11 @@
       const monthNumber = parts[1];
       const dayCount = new Date(year, monthNumber, 0).getDate();
       const byDate = new Map((payload?.days || []).map(day => [day.date, day]));
+      const projectDays = (payload?.projects || []).map(project => ({
+        id: project.project_id,
+        name: project.project_name || project.project_id,
+        byDate: new Map((project.days || []).map(day => [day.date, day]))
+      }));
       const values = [];
       for (let day = 1; day <= dayCount; day++) {
         const date = `${month}-${String(day).padStart(2, '0')}`;
@@ -2774,13 +2845,23 @@
         backgroundColor: 'transparent',
         tooltip: {
           trigger: 'item',
-          renderMode: 'richText',
+          renderMode: 'html',
+          appendToBody: true,
+          enterable: true,
+          extraCssText: 'max-height:60vh;overflow-y:auto;',
           backgroundColor: getCssVar('--bg-panel'),
           borderColor: getCssVar('--border'),
           textStyle: {color: getCssVar('--text-main')},
           formatter: params => {
             const value = params.value || [];
-            return `${value[0] || ''}\n总流量：${formatBytes(value[1])}\n上行：${formatBytes(value[2])}\n下行：${formatBytes(value[3])}`;
+            const date = value[0] || '';
+            const summary = `${escapeHtml(date)}<br/>总流量：${formatBytes(value[1])}<br/>上行：${formatBytes(value[2])}<br/>下行：${formatBytes(value[3])}`;
+            if (!projectDays.length) return summary;
+            const details = projectDays.map(project => {
+              const day = project.byDate.get(date) || {};
+              return `<div style="margin-top:6px"><strong>${escapeHtml(project.name)}</strong><br/>↑ ${formatBytes(Number(day.upload_bytes) || 0)} · ↓ ${formatBytes(Number(day.download_bytes) || 0)}</div>`;
+            }).join('');
+            return `${summary}<div style="margin-top:8px;padding-top:6px;border-top:1px solid ${getCssVar('--border')}">${details}</div>`;
           }
         },
         visualMap: {
@@ -2854,7 +2935,7 @@
 
       const scope = currentProjectID || '__global__';
       const cacheKey = `${scope}|${month}`;
-      if (!force && trafficCalendarPayload && trafficCalendarLastScope === cacheKey && Date.now() - trafficCalendarLastLoadedAt < 60000) {
+      if (!force && trafficCalendarPayload && trafficCalendarLastScope === cacheKey && Date.now() - trafficCalendarLastLoadedAt < uiRefreshSeconds * 1000) {
         renderTrafficCalendar(trafficCalendarPayload);
         return;
       }
@@ -2882,29 +2963,135 @@
       renderRegionAvailability();
       loadTrafficCalendar();
 
-      if (!allNodesCache || allNodesCache.length === 0) return;
-
-      // Traffic Chart
-      if(!trafficChartInst) {
-        trafficChartInst = initEchart('trafficChart');
-        trafficChartInst.setOption({
-          backgroundColor: 'transparent',
-          tooltip: { trigger: 'axis', backgroundColor: getCssVar('--bg-panel'), borderColor: getCssVar('--border'), textStyle: { color: getCssVar('--text-main') },
-            formatter: function(p) {
-              return p[0].axisValue + '<br/>' + p.map(s => s.marker + s.seriesName + ': ' + formatBytes(s.value) + '/s').join('<br/>');
-            }
-          },
-          legend: { top: 'bottom', textStyle: { color: getCssVar('--text-muted') } },
-          grid: { left: '4%', right: '4%', bottom: '15%', top: '15%', containLabel: true },
-          xAxis: { type: 'category', boundaryGap: false, data: trafficTime, axisLine: { lineStyle: { color: getCssVar('--border') } }, axisLabel: { color: getCssVar('--text-muted') } },
-          yAxis: { type: 'value', splitLine: { lineStyle: { color: getCssVar('--border'), type: 'dashed' } }, axisLabel: { color: getCssVar('--text-muted'), formatter: (v) => formatBytes(v) + '/s' } },
-          series: [
-            { name: 'Up', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 2, color: '#3b82f6' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(59,130,246,0.5)'}, {offset: 1, color: 'rgba(59,130,246,0)'}]) }, data: trafficDataUp },
-            { name: 'Down', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 2, color: '#10b981' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(16,185,129,0.5)'}, {offset: 1, color: 'rgba(16,185,129,0)'}]) }, data: trafficDataDown }
-          ]
-        });
-        connectTrafficSSE(); // connect SSE on init
+      if (!currentProjectID) {
+        renderProjectHealthChart();
+        connectGlobalDashboardSSE();
+        return;
       }
+      renderTrafficBandwidthChart();
+      connectTrafficSSE();
+    }
+
+    function renderTrafficBandwidthChart() {
+      if (!trafficChartInst) trafficChartInst = initEchart('trafficChart');
+      if (!trafficChartInst) return;
+      trafficChartInst.setOption({
+        backgroundColor: 'transparent',
+        tooltip: { trigger: 'axis', backgroundColor: getCssVar('--bg-panel'), borderColor: getCssVar('--border'), textStyle: { color: getCssVar('--text-main') },
+          formatter: function(p) {
+            return p[0].axisValue + '<br/>' + p.map(s => s.marker + s.seriesName + ': ' + formatBytes(s.value) + '/s').join('<br/>');
+          }
+        },
+        legend: { top: 'bottom', textStyle: { color: getCssVar('--text-muted') } },
+        grid: { left: '4%', right: '4%', bottom: '15%', top: '15%', containLabel: true },
+        xAxis: { type: 'category', boundaryGap: false, data: trafficTime, axisLine: { lineStyle: { color: getCssVar('--border') } }, axisLabel: { color: getCssVar('--text-muted') } },
+        yAxis: { type: 'value', splitLine: { lineStyle: { color: getCssVar('--border'), type: 'dashed' } }, axisLabel: { color: getCssVar('--text-muted'), formatter: (v) => formatBytes(v) + '/s' } },
+        graphic: [],
+        series: [
+          { name: 'Up', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 2, color: '#3b82f6' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(59,130,246,0.5)'}, {offset: 1, color: 'rgba(59,130,246,0)'}]) }, data: trafficDataUp },
+          { name: 'Down', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 2, color: '#10b981' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(16,185,129,0.5)'}, {offset: 1, color: 'rgba(16,185,129,0)'}]) }, data: trafficDataDown }
+        ]
+      }, true);
+    }
+
+    function renderProjectHealthChart() {
+      if (!trafficChartInst) trafficChartInst = initEchart('trafficChart');
+      if (!trafficChartInst) return;
+      const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#8b5cf6', '#84cc16', '#ec4899'];
+      const series = Array.from(projectHealthData.values()).map((project, index) => ({
+        name: project.name,
+        type: 'line',
+        smooth: true,
+        connectNulls: false,
+        symbol: 'none',
+        lineStyle: {width: 2, color: palette[index % palette.length]},
+        itemStyle: {color: palette[index % palette.length]},
+        data: project.data
+      }));
+      trafficChartInst.setOption({
+        backgroundColor: 'transparent',
+        tooltip: {
+          trigger: 'axis',
+          backgroundColor: getCssVar('--bg-panel'),
+          borderColor: getCssVar('--border'),
+          textStyle: {color: getCssVar('--text-main')},
+          formatter: params => {
+            if (!params.length) return '';
+            return `${params[0].axisValue}<br/>${params.map(item => {
+              const detail = item.data || {};
+              return `${item.marker}${escapeHtml(item.seriesName)}：${Number(item.value).toFixed(1)}% (${Number(detail.healthy_nodes) || 0}/${Number(detail.monitored_nodes) || 0})`;
+            }).join('<br/>')}`;
+          }
+        },
+        legend: {type: 'scroll', top: 'bottom', textStyle: {color: getCssVar('--text-muted')}},
+        grid: {left: '4%', right: '4%', bottom: '18%', top: '12%', containLabel: true},
+        xAxis: {type: 'category', boundaryGap: false, data: healthTime, axisLine: {lineStyle: {color: getCssVar('--border')}}, axisLabel: {color: getCssVar('--text-muted')}},
+        yAxis: {type: 'value', min: 0, max: 100, splitLine: {lineStyle: {color: getCssVar('--border'), type: 'dashed'}}, axisLabel: {color: getCssVar('--text-muted'), formatter: value => `${value}%`}},
+        graphic: series.length ? [] : [{type: 'text', left: 'center', top: 'middle', silent: true, style: {text: '暂无项目', fill: getCssVar('--text-muted'), font: '12px sans-serif'}}],
+        series
+      }, true);
+    }
+
+    function connectGlobalDashboardSSE() {
+      if (currentProjectID || globalDashboardSource) return;
+      globalDashboardSource = new EventSource('/api/dashboard/global');
+      globalDashboardSource.onmessage = function(event) {
+        if (currentProjectID) return;
+        try {
+          const data = JSON.parse(event.data);
+          const receivedAt = Date.now();
+          if (lastGlobalDashboardRenderAt && receivedAt - lastGlobalDashboardRenderAt < uiRefreshSeconds * 1000) return;
+          lastGlobalDashboardRenderAt = receivedAt;
+          const projects = Array.isArray(data.projects) ? data.projects : [];
+          document.getElementById('activeConnections').textContent = `${Number(data.running_projects) || 0}/${Number(data.total_projects) || 0}`;
+          if (data.system_error) {
+            document.getElementById('liveUpSpeed').textContent = '-';
+            document.getElementById('liveDownSpeed').textContent = '-';
+            document.getElementById('liveUpSub').textContent = data.system_error;
+            document.getElementById('liveDownSub').textContent = data.system_error;
+          } else {
+            const system = data.system || {};
+            document.getElementById('liveUpSpeed').textContent = `${(Number(system.cpu_percent) || 0).toFixed(1)}%`;
+            document.getElementById('liveDownSpeed').textContent = `${(Number(system.memory_percent) || 0).toFixed(1)}%`;
+            document.getElementById('liveUpSub').textContent = '服务所在机器';
+            document.getElementById('liveDownSub').textContent = '服务所在机器';
+          }
+
+          const timestamp = new Date().toLocaleTimeString([], {hour12: false});
+          healthTime.push(timestamp);
+          const incoming = new Map(projects.map(project => [project.id, project]));
+          for (const project of projects) {
+            if (!projectHealthData.has(project.id)) {
+              projectHealthData.set(project.id, {name: project.name || project.id, data: Array(healthTime.length - 1).fill(null)});
+            }
+          }
+          for (const [projectID, project] of projectHealthData) {
+            const sample = incoming.get(projectID);
+            if (!sample) {
+              projectHealthData.delete(projectID);
+              continue;
+            }
+            project.name = sample.name || projectID;
+            project.data.push({
+              value: Number(sample.health_rate) || 0,
+              healthy_nodes: Number(sample.healthy_nodes) || 0,
+              monitored_nodes: Number(sample.monitored_nodes) || 0
+            });
+          }
+          if (healthTime.length > 60) {
+            healthTime.shift();
+            projectHealthData.forEach(project => project.data.shift());
+          }
+          renderProjectHealthChart();
+        } catch (error) {
+          console.warn('处理全局监控数据失败', error);
+        }
+      };
+      globalDashboardSource.onerror = function() {
+        globalDashboardSource.close();
+        globalDashboardSource = null;
+        if (!currentProjectID) setTimeout(connectGlobalDashboardSSE, 5000);
+      };
     }
 
     function formatBytes(bytes, decimals = 2) {
@@ -2920,11 +3107,15 @@
     }
 
     function connectTrafficSSE() {
-      if (!currentProjectID || trafficSource) return;
+      const project = currentProject();
+      if (!currentProjectID || !project || project.status !== 'running' || trafficSource) return;
       trafficSource = new EventSource(projectAPIPath('/api/traffic'));
       trafficSource.onmessage = function(e) {
         try {
           const d = JSON.parse(e.data);
+          const receivedAt = Date.now();
+          if (lastTrafficRenderAt && receivedAt - lastTrafficRenderAt < uiRefreshSeconds * 1000) return;
+          lastTrafficRenderAt = receivedAt;
           const up = d.up || 0;
           const down = d.down || 0;
           const now = new Date().toLocaleTimeString([], {hour12: false});
@@ -4049,6 +4240,7 @@
         const logCfg = system.log || {};
         document.getElementById('settingMgmtListen').value = management.listen || '';
         document.getElementById('settingMgmtPassword').value = management.password || '';
+        document.getElementById('settingUIRefreshSeconds').value = uiRefreshSeconds;
         document.getElementById('settingLogOutput').value = logCfg.output || 'stdout';
         document.getElementById('settingLogMaxSize').value = logCfg.max_size || 50;
         document.getElementById('settingLogMaxBackups').value = logCfg.max_backups || 3;
@@ -4083,7 +4275,13 @@
       const originalText = saveBtn.textContent;
       const currentCoreSnapshot = _buildCoreSnapshot();
       const coreChanged = currentCoreSnapshot !== _savedCoreSnapshot;
-      if (!coreChanged) {
+      const refreshSeconds = Number(document.getElementById('settingUIRefreshSeconds').value);
+      if (!Number.isInteger(refreshSeconds) || refreshSeconds < UI_REFRESH_MIN_SECONDS || refreshSeconds > UI_REFRESH_MAX_SECONDS) {
+        showToast(`自动刷新间隔必须是 ${UI_REFRESH_MIN_SECONDS}–${UI_REFRESH_MAX_SECONDS} 秒之间的整数`, 'error');
+        return;
+      }
+      const refreshChanged = refreshSeconds !== uiRefreshSeconds;
+      if (!coreChanged && !refreshChanged) {
         showToast('配置未变更'); return;
       }
       saveBtn.disabled = true; saveBtn.textContent = '保存中...'; saveBtn.style.opacity = '0.6';
@@ -4101,11 +4299,16 @@
         }
       };
       try {
-        const response = await nativeFetch('/api/system/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || '保存失败');
-        _savedCoreSnapshot = currentCoreSnapshot;
-        showToast(data.need_restart ? '已保存，重启服务后生效' : '系统设置已保存');
+        let needRestart = false;
+        if (coreChanged) {
+          const response = await nativeFetch('/api/system/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || '保存失败');
+          needRestart = !!data.need_restart;
+          _savedCoreSnapshot = currentCoreSnapshot;
+        }
+        if (refreshChanged) applyUIRefreshSeconds(refreshSeconds);
+        showToast(needRestart ? '已保存，界面刷新间隔已生效；服务配置重启后生效' : '系统设置已保存');
       } catch (error) {
         showToast(error.message, 'error');
       }

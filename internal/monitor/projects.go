@@ -11,23 +11,26 @@ import (
 
 // ProjectSummary is the control-plane view of one isolated runtime.
 type ProjectSummary struct {
-	ID                string                 `json:"id"`
-	Name              string                 `json:"name"`
-	Enabled           bool                   `json:"enabled"`
-	Autostart         bool                   `json:"autostart"`
-	Status            string                 `json:"status"`
-	LastError         string                 `json:"last_error,omitempty"`
-	StartedAt         time.Time              `json:"started_at,omitempty"`
-	ConfigPath        string                 `json:"config_path"`
-	Mode              string                 `json:"mode,omitempty"`
-	ListenerAddress   string                 `json:"listener_address,omitempty"`
-	ListenerPort      uint16                 `json:"listener_port,omitempty"`
-	MultiPortAddress  string                 `json:"multi_port_address,omitempty"`
-	MultiPortBase     uint16                 `json:"multi_port_base,omitempty"`
-	ClashAPIPort      uint16                 `json:"clash_api_port,omitempty"`
-	NodeCount         int                    `json:"node_count"`
-	SubscriptionCount int                    `json:"subscription_count"`
-	Settings          ProjectRuntimeSettings `json:"settings"`
+	ID                 string                 `json:"id"`
+	Name               string                 `json:"name"`
+	Enabled            bool                   `json:"enabled"`
+	Autostart          bool                   `json:"autostart"`
+	Status             string                 `json:"status"`
+	LastError          string                 `json:"last_error,omitempty"`
+	StartedAt          time.Time              `json:"started_at,omitempty"`
+	ConfigPath         string                 `json:"config_path"`
+	Mode               string                 `json:"mode,omitempty"`
+	ListenerAddress    string                 `json:"listener_address,omitempty"`
+	ListenerPort       uint16                 `json:"listener_port,omitempty"`
+	MultiPortAddress   string                 `json:"multi_port_address,omitempty"`
+	MultiPortBase      uint16                 `json:"multi_port_base,omitempty"`
+	ClashAPIPort       uint16                 `json:"clash_api_port,omitempty"`
+	NodeCount          int                    `json:"node_count"`
+	MonitoredNodeCount int                    `json:"monitored_node_count"`
+	HealthyNodeCount   int                    `json:"healthy_node_count"`
+	HealthRate         float64                `json:"health_rate"`
+	SubscriptionCount  int                    `json:"subscription_count"`
+	Settings           ProjectRuntimeSettings `json:"settings"`
 }
 
 type ProjectRuntimeSettings struct {
@@ -131,6 +134,15 @@ type ProjectDeleteResult struct {
 	Warning      string `json:"warning,omitempty"`
 }
 
+type ProjectHealthSummary struct {
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	Status         string  `json:"status"`
+	HealthyNodes   int     `json:"healthy_nodes"`
+	MonitoredNodes int     `json:"monitored_nodes"`
+	HealthRate     float64 `json:"health_rate"`
+}
+
 type TrafficHistory interface {
 	LoadTrafficMonth(month string) (state.TrafficMonth, error)
 }
@@ -162,6 +174,7 @@ type ProjectBinding struct {
 type ProjectController interface {
 	DefaultProjectID() string
 	ListProjects() []ProjectSummary
+	ProjectHealthSummaries() []ProjectHealthSummary
 	ProjectPortHints() ProjectPortHints
 	Project(id string) (ProjectBinding, error)
 	SharedCatalog() (ProjectBinding, error)

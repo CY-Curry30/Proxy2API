@@ -363,6 +363,50 @@ func (r *Registry) ListProjects() []monitor.ProjectSummary {
 	return result
 }
 
+func (r *Registry) ProjectHealthSummaries() []monitor.ProjectHealthSummary {
+	r.mu.RLock()
+	ids := make([]string, 0, len(r.workspace.Projects))
+	specs := make(map[string]config.ProjectSpec, len(r.workspace.Projects))
+	runtimes := make(map[string]*Runtime, len(r.workspace.Projects))
+	for id, spec := range r.workspace.Projects {
+		ids = append(ids, id)
+		specs[id] = spec
+		runtimes[id] = r.runtimes[id]
+	}
+	r.mu.RUnlock()
+	sort.Strings(ids)
+
+	result := make([]monitor.ProjectHealthSummary, 0, len(ids))
+	for _, id := range ids {
+		name := strings.TrimSpace(specs[id].Name)
+		if name == "" {
+			name = id
+		}
+		health := monitor.ProjectHealthSummary{ID: id, Name: name, Status: string(StatusStopped)}
+		runtime := runtimes[id]
+		if runtime == nil {
+			result = append(result, health)
+			continue
+		}
+		status, _, _ := runtime.Status()
+		health.Status = string(status)
+		if mgr := runtime.MonitorManager(); mgr != nil {
+			snapshots := mgr.SnapshotVisible()
+			health.MonitoredNodes = len(snapshots)
+			for _, snapshot := range snapshots {
+				if snapshot.InitialCheckDone && snapshot.Available && !snapshot.Blacklisted {
+					health.HealthyNodes++
+				}
+			}
+			if health.MonitoredNodes > 0 {
+				health.HealthRate = float64(health.HealthyNodes) / float64(health.MonitoredNodes) * 100
+			}
+		}
+		result = append(result, health)
+	}
+	return result
+}
+
 func (r *Registry) ProjectPortHints() monitor.ProjectPortHints {
 	owners, recommended := r.ports.CreationHints()
 
@@ -477,6 +521,19 @@ func projectSummary(id string, spec config.ProjectSpec, runtime *Runtime) monito
 		summary.Settings = runtimeSettings(cfg)
 	} else if mgr := runtime.MonitorManager(); mgr != nil {
 		summary.NodeCount = len(mgr.Snapshot())
+	}
+	summary.MonitoredNodeCount = summary.NodeCount
+	if mgr := runtime.MonitorManager(); mgr != nil {
+		snapshots := mgr.SnapshotVisible()
+		summary.MonitoredNodeCount = len(snapshots)
+		for _, snapshot := range snapshots {
+			if snapshot.InitialCheckDone && snapshot.Available && !snapshot.Blacklisted {
+				summary.HealthyNodeCount++
+			}
+		}
+	}
+	if summary.MonitoredNodeCount > 0 {
+		summary.HealthRate = float64(summary.HealthyNodeCount) / float64(summary.MonitoredNodeCount) * 100
 	}
 	return summary
 }

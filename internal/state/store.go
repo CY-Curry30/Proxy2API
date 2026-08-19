@@ -112,7 +112,17 @@ type TrafficDay struct {
 }
 
 type TrafficMonth struct {
-	Month         string       `json:"month"`
+	Month         string                `json:"month"`
+	Days          []TrafficDay          `json:"days"`
+	Projects      []ProjectTrafficMonth `json:"projects,omitempty"`
+	UploadBytes   int64                 `json:"upload_bytes"`
+	DownloadBytes int64                 `json:"download_bytes"`
+	TotalBytes    int64                 `json:"total_bytes"`
+}
+
+type ProjectTrafficMonth struct {
+	ProjectID     string       `json:"project_id"`
+	ProjectName   string       `json:"project_name"`
 	Days          []TrafficDay `json:"days"`
 	UploadBytes   int64        `json:"upload_bytes"`
 	DownloadBytes int64        `json:"download_bytes"`

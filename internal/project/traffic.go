@@ -19,6 +19,12 @@ type trafficSample struct {
 	DownloadRate int64 `json:"down"`
 }
 
+type projectTrafficMonth struct {
+	id    string
+	name  string
+	month state.TrafficMonth
+}
+
 func (r *Runtime) LoadTrafficMonth(month string) (state.TrafficMonth, error) {
 	r.mu.RLock()
 	store := r.stateStore
@@ -34,21 +40,47 @@ func (r *Registry) LoadTrafficMonth(month string) (state.TrafficMonth, error) {
 	if _, err := time.Parse("2006-01", month); err != nil {
 		return state.TrafficMonth{}, fmt.Errorf("月份必须使用 YYYY-MM 格式")
 	}
+	type projectTrafficSource struct {
+		id      string
+		name    string
+		runtime *Runtime
+	}
 	r.mu.RLock()
-	runtimes := make([]*Runtime, 0, len(r.runtimes))
-	for _, runtime := range r.runtimes {
-		runtimes = append(runtimes, runtime)
+	projects := make([]projectTrafficSource, 0, len(r.runtimes))
+	for id, runtime := range r.runtimes {
+		name := r.workspace.Projects[id].Name
+		if name == "" {
+			name = id
+		}
+		projects = append(projects, projectTrafficSource{id: id, name: name, runtime: runtime})
 	}
 	r.mu.RUnlock()
+	sort.Slice(projects, func(i, j int) bool { return projects[i].id < projects[j].id })
 
-	days := make(map[string]state.TrafficDay)
-	result := state.TrafficMonth{Month: month, Days: []state.TrafficDay{}}
-	for _, runtime := range runtimes {
-		projectMonth, err := runtime.LoadTrafficMonth(month)
+	loaded := make([]projectTrafficMonth, 0, len(projects))
+	for _, project := range projects {
+		projectMonth, err := project.runtime.LoadTrafficMonth(month)
 		if err != nil {
-			return state.TrafficMonth{}, fmt.Errorf("读取项目 %q 的流量历史失败: %w", runtime.id, err)
+			return state.TrafficMonth{}, fmt.Errorf("读取项目 %q 的流量历史失败: %w", project.id, err)
 		}
-		for _, projectDay := range projectMonth.Days {
+		loaded = append(loaded, projectTrafficMonth{id: project.id, name: project.name, month: projectMonth})
+	}
+	return aggregateProjectTrafficMonths(month, loaded), nil
+}
+
+func aggregateProjectTrafficMonths(month string, projects []projectTrafficMonth) state.TrafficMonth {
+	days := make(map[string]state.TrafficDay)
+	result := state.TrafficMonth{Month: month, Days: []state.TrafficDay{}, Projects: []state.ProjectTrafficMonth{}}
+	for _, project := range projects {
+		result.Projects = append(result.Projects, state.ProjectTrafficMonth{
+			ProjectID:     project.id,
+			ProjectName:   project.name,
+			Days:          append([]state.TrafficDay(nil), project.month.Days...),
+			UploadBytes:   project.month.UploadBytes,
+			DownloadBytes: project.month.DownloadBytes,
+			TotalBytes:    project.month.TotalBytes,
+		})
+		for _, projectDay := range project.month.Days {
 			day := days[projectDay.Date]
 			day.Date = projectDay.Date
 			day.UploadBytes += projectDay.UploadBytes
@@ -67,7 +99,7 @@ func (r *Registry) LoadTrafficMonth(month string) (state.TrafficMonth, error) {
 	}
 	result.TotalBytes = result.UploadBytes + result.DownloadBytes
 	sort.Slice(result.Days, func(i, j int) bool { return result.Days[i].Date < result.Days[j].Date })
-	return result, nil
+	return result
 }
 
 func collectTraffic(ctx context.Context, trafficAPI string, store *state.Store) {

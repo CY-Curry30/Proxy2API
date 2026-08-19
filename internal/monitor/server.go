@@ -136,6 +136,7 @@ type Server struct {
 	projectID   string
 	catalogOnly bool
 	logBuffer   *LogBuffer
+	systemUsage *systemUsageSampler
 
 	// Session management
 	sessionMu  sync.RWMutex
@@ -167,6 +168,8 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 		logger = log.Default()
 	}
 
+	systemSampler := &systemUsageSampler{}
+	_, _ = systemSampler.sample()
 	s := &Server{
 		cfg:              cfg,
 		cfgMu:            &sync.RWMutex{},
@@ -181,6 +184,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 		projectProbeGate: make(map[string]*atomic.Bool),
 		projectProbeStop: make(map[string]*probeCancelState),
 		projectConfigMap: make(map[string]*sync.RWMutex),
+		systemUsage:      systemSampler,
 	}
 
 	// Start session cleanup goroutine
@@ -191,6 +195,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/auth", s.handleAuth)
 	mux.HandleFunc("/api/projects", s.withAuth(s.handleProjects))
 	mux.HandleFunc("/api/projects/", s.withAuth(s.handleProjectRoute))
+	mux.HandleFunc("/api/dashboard/global", s.withAuth(s.handleGlobalDashboard))
 	mux.HandleFunc("/api/system/settings", s.withAuth(s.handleSystemSettings))
 	mux.HandleFunc("/api/settings", s.withAuth(s.withDefaultProject((*Server).handleSettings)))
 	mux.HandleFunc("/api/nodes", s.withAuth(s.withDefaultProject((*Server).handleNodes)))
@@ -503,6 +508,87 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, created)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+type globalDashboardSnapshot struct {
+	System          systemUsage            `json:"system"`
+	SystemError     string                 `json:"system_error,omitempty"`
+	RunningProjects int                    `json:"running_projects"`
+	TotalProjects   int                    `json:"total_projects"`
+	Projects        []ProjectHealthSummary `json:"projects"`
+}
+
+func (s *Server) currentGlobalDashboardSnapshot() globalDashboardSnapshot {
+	projects := s.projects.ProjectHealthSummaries()
+	result := globalDashboardSnapshot{
+		TotalProjects: len(projects),
+		Projects:      projects,
+	}
+	for _, project := range projects {
+		if project.Status == "running" {
+			result.RunningProjects++
+		}
+	}
+	if s.systemUsage == nil {
+		result.SystemError = "系统资源监控未初始化"
+		return result
+	}
+	usage, err := s.systemUsage.sample()
+	if err != nil {
+		result.SystemError = err.Error()
+		return result
+	}
+	result.System = usage
+	return result
+}
+
+func (s *Server) handleGlobalDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.projects == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		writeJSON(w, map[string]any{"error": "项目管理未启用"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"error": "当前连接不支持实时监控"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	send := func() bool {
+		data, err := json.Marshal(s.currentGlobalDashboardSnapshot())
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !send() {
+		return
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if !send() {
+				return
+			}
+		}
 	}
 }
 
