@@ -838,7 +838,7 @@
           <div class="stat-panel">
             <div class="stat-title">总节点数</div>
             <div class="stat-value" id="totalNodes">0</div>
-            <div class="stat-sub"><span id="subscriptionStatus"></span> <span id="subscriptionTrend"></span></div>
+            <div class="stat-sub" id="subscriptionStatus"></div>
           </div>
           <div class="stat-panel">
             <div class="stat-title">健康在线</div>
@@ -1143,13 +1143,6 @@
             </div>
 
             <div class="panel" style="margin-bottom: 16px;">
-              <div class="panel-header"><div class="panel-title">界面刷新</div></div>
-              <div class="settings-form-grid" style="padding:16px;">
-                <div class="form-group"><label>自动刷新间隔（秒）</label><input type="number" id="settingUIRefreshSeconds" class="setting-input" min="2" max="300" step="1" /></div>
-              </div>
-            </div>
-
-            <div class="panel" style="margin-bottom: 16px;">
               <div class="panel-header"><div class="panel-title">日志配置</div></div>
               <div style="padding: 16px;">
                 <div class="settings-form-grid">
@@ -1423,17 +1416,11 @@
       return nativeFetch(input, init);
     };
 
-    const UI_REFRESH_STORAGE_KEY = 'proxy2apiRefreshSeconds';
-    const UI_REFRESH_DEFAULT_SECONDS = 10;
-    const UI_REFRESH_MIN_SECONDS = 2;
-    const UI_REFRESH_MAX_SECONDS = 300;
-    const storedUIRefreshSeconds = Number.parseInt(localStorage.getItem(UI_REFRESH_STORAGE_KEY), 10);
-    let uiRefreshSeconds = Number.isInteger(storedUIRefreshSeconds) && storedUIRefreshSeconds >= UI_REFRESH_MIN_SECONDS && storedUIRefreshSeconds <= UI_REFRESH_MAX_SECONDS
-      ? storedUIRefreshSeconds
-      : UI_REFRESH_DEFAULT_SECONDS;
+    const DASHBOARD_REFRESH_MS = 2000;
+    const TRAFFIC_CALENDAR_REFRESH_MS = 60 * 60 * 1000;
+    const TRAFFIC_RENDER_MS = 2000;
     let isAutoRefresh = true;
     let autoRefreshInterval = null;
-    let lastGlobalDashboardRenderAt = 0;
     let lastTrafficRenderAt = 0;
     let allNodesCache = [];
     let sweepWasActive = false;
@@ -1486,8 +1473,7 @@
     let trafficDataUp = [];
     let trafficDataDown = [];
     let trafficTime = [];
-    let healthTime = [];
-    let projectHealthData = new Map();
+    let projectTrafficData = null;
 
     // Resize observer for charts
     window.addEventListener('resize', () => {
@@ -1950,9 +1936,7 @@
       trafficDataUp = [];
       trafficDataDown = [];
       trafficTime = [];
-      healthTime = [];
-      projectHealthData = new Map();
-      lastGlobalDashboardRenderAt = 0;
+      projectTrafficData = null;
       lastTrafficRenderAt = 0;
       trafficCalendarLoadToken++;
       trafficCalendarPayload = null;
@@ -1960,6 +1944,7 @@
       trafficCalendarLastScope = '';
 	  stopLogPolling();
 	  document.getElementById('subscriptionWarning').style.display = 'none';
+	  document.getElementById('subscriptionStatus').textContent = '[Sub: -]';
 	  document.getElementById('subscriptionTotalCount').textContent = '0';
 	  document.getElementById('subscriptionActiveNodes').textContent = '0';
 	  document.getElementById('subscriptionNextRefresh').textContent = '-';
@@ -2015,6 +2000,8 @@
         await refresh();
         connectTrafficSSE();
 		if (activeTab && activeTab.id === 'debugTab') loadDebugData();
+      } else if (project) {
+        await fetchSubscriptionStatus();
       } else if (isSharedCatalogMode()) {
         await refresh();
       }
@@ -2394,24 +2381,15 @@
     function toggleAutoRefresh() {
       isAutoRefresh = !isAutoRefresh;
       document.getElementById('autoRefreshBtn').textContent = isAutoRefresh ? '⏹ 关闭自动刷新' : '▶ 开启自动刷新';
-      if(isAutoRefresh) startAutoRefresh(); else stopAutoRefresh();
+      if (isAutoRefresh) startAutoRefresh(); else stopAutoRefresh();
     }
     function startAutoRefresh() {
       stopAutoRefresh();
       autoRefreshInterval = setInterval(()=> {
         if(!document.hidden && document.getElementById('dashboardTab').classList.contains('active')) refresh();
-      }, uiRefreshSeconds * 1000);
+      }, DASHBOARD_REFRESH_MS);
     }
     function stopAutoRefresh() { clearInterval(autoRefreshInterval); autoRefreshInterval = null; }
-
-    function applyUIRefreshSeconds(seconds) {
-      uiRefreshSeconds = seconds;
-      localStorage.setItem(UI_REFRESH_STORAGE_KEY, String(seconds));
-      lastGlobalDashboardRenderAt = 0;
-      lastTrafficRenderAt = 0;
-      trafficCalendarLastLoadedAt = 0;
-      if (isAutoRefresh) startAutoRefresh();
-    }
 
     function getQualityWidth(ms) {
       if(ms < 0) return 0; if(ms > 1000) return 100;
@@ -2586,7 +2564,8 @@
     }
 
     function updateDashboardStats(data) {
-      document.getElementById('totalNodes').textContent = data.total_nodes || allNodesCache.length;
+      const totalNodes = Number(data.total_nodes);
+      document.getElementById('totalNodes').textContent = Number.isFinite(totalNodes) && totalNodes > 0 ? totalNodes : allNodesCache.length;
       document.getElementById('healthyNodes').textContent = allNodesCache.filter(n => !n.blacklisted && n.initial_check_done && n.available).length;
       document.getElementById('blacklistedNodes').textContent = allNodesCache.filter(n => n.blacklisted || (!n.available && n.initial_check_done)).length;
       applyDashboardScopeLabels();
@@ -2609,7 +2588,7 @@
       document.getElementById('liveDownTitle').textContent = globalView ? '内存使用率' : '↓ 下行速率';
       document.getElementById('liveDownSub').textContent = globalView ? '服务所在机器' : '实时下载';
       document.getElementById('trafficChartTitle').textContent = globalView
-        ? '项目节点健康率 (Project Node Health)'
+        ? '项目总流量 (Project Total Traffic)'
         : '实时流量带宽 (Real-time Traffic)';
       if (scopeChanged) {
         document.getElementById('liveUpSpeed').textContent = globalView ? '-' : '0 B/s';
@@ -2929,14 +2908,20 @@
       const month = monthInput.value;
       const project = currentProject();
       if (project && project.status !== 'running') {
+        projectTrafficData = null;
         renderTrafficCalendar(null, '项目未运行');
         return;
       }
 
       const scope = currentProjectID || '__global__';
       const cacheKey = `${scope}|${month}`;
-      if (!force && trafficCalendarPayload && trafficCalendarLastScope === cacheKey && Date.now() - trafficCalendarLastLoadedAt < uiRefreshSeconds * 1000) {
-        renderTrafficCalendar(trafficCalendarPayload);
+      if (!force && trafficCalendarPayload && trafficCalendarLastScope === cacheKey && Date.now() - trafficCalendarLastLoadedAt < TRAFFIC_CALENDAR_REFRESH_MS) {
+        projectTrafficData = !currentProjectID ? trafficCalendarPayload : null;
+        // Keep the one-hour history charts stable between data fetches. A
+        // missing chart instance still needs to be recreated after a theme or
+        // viewport re-render.
+        if (!trafficCalendarChartInst) renderTrafficCalendar(trafficCalendarPayload);
+        if (!currentProjectID && !trafficChartInst) renderProjectTrafficChart(projectTrafficData);
         return;
       }
 
@@ -2951,11 +2936,15 @@
         trafficCalendarPayload = data;
         trafficCalendarLastLoadedAt = Date.now();
         trafficCalendarLastScope = cacheKey;
+        projectTrafficData = !currentProjectID ? data : null;
         renderTrafficCalendar(data);
+        if (!currentProjectID) renderProjectTrafficChart(projectTrafficData);
       } catch (error) {
         if (token !== trafficCalendarLoadToken) return;
         trafficCalendarPayload = null;
+        projectTrafficData = null;
         renderTrafficCalendar(null, error.message || '流量历史加载失败');
+        if (!currentProjectID) renderProjectTrafficChart(null);
       }
     }
 
@@ -2964,7 +2953,6 @@
       loadTrafficCalendar();
 
       if (!currentProjectID) {
-        renderProjectHealthChart();
         connectGlobalDashboardSSE();
         return;
       }
@@ -2994,20 +2982,33 @@
       }, true);
     }
 
-    function renderProjectHealthChart() {
+    function renderProjectTrafficChart(payload) {
       if (!trafficChartInst) trafficChartInst = initEchart('trafficChart');
       if (!trafficChartInst) return;
       const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#8b5cf6', '#84cc16', '#ec4899'];
-      const series = Array.from(projectHealthData.values()).map((project, index) => ({
-        name: project.name,
-        type: 'line',
-        smooth: true,
-        connectNulls: false,
-        symbol: 'none',
-        lineStyle: {width: 2, color: palette[index % palette.length]},
-        itemStyle: {color: palette[index % palette.length]},
-        data: project.data
-      }));
+      const projects = Array.isArray(payload?.projects) ? payload.projects : [];
+      const month = String(payload?.month || localMonthValue());
+      const parts = month.split('-').map(Number);
+      const dayCount = parts.length === 2 && parts.every(Number.isFinite) ? new Date(parts[0], parts[1], 0).getDate() : 0;
+      const days = dayCount > 0
+        ? Array.from({length: dayCount}, (_, index) => `${month}-${String(index + 1).padStart(2, '0')}`)
+        : Array.from(new Set(projects.flatMap(project => (project.days || []).map(day => day.date)))).sort();
+      const series = projects.map((project, index) => {
+        const byDate = new Map((project.days || []).map(day => [day.date, day]));
+        return {
+          name: project.project_name || project.project_id,
+          type: 'line',
+          smooth: true,
+          connectNulls: true,
+          symbol: 'none',
+          lineStyle: {width: 2, color: palette[index % palette.length]},
+          itemStyle: {color: palette[index % palette.length]},
+          data: days.map(date => {
+            const day = byDate.get(date);
+            return {value: Number(day?.total_bytes) || 0, date};
+          })
+        };
+      });
       trafficChartInst.setOption({
         backgroundColor: 'transparent',
         tooltip: {
@@ -3019,14 +3020,14 @@
             if (!params.length) return '';
             return `${params[0].axisValue}<br/>${params.map(item => {
               const detail = item.data || {};
-              return `${item.marker}${escapeHtml(item.seriesName)}：${Number(item.value).toFixed(1)}% (${Number(detail.healthy_nodes) || 0}/${Number(detail.monitored_nodes) || 0})`;
+              return `${item.marker}${escapeHtml(item.seriesName)}：${formatBytes(Number(detail.value) || 0)}`;
             }).join('<br/>')}`;
           }
         },
         legend: {type: 'scroll', top: 'bottom', textStyle: {color: getCssVar('--text-muted')}},
         grid: {left: '4%', right: '4%', bottom: '18%', top: '12%', containLabel: true},
-        xAxis: {type: 'category', boundaryGap: false, data: healthTime, axisLine: {lineStyle: {color: getCssVar('--border')}}, axisLabel: {color: getCssVar('--text-muted')}},
-        yAxis: {type: 'value', min: 0, max: 100, splitLine: {lineStyle: {color: getCssVar('--border'), type: 'dashed'}}, axisLabel: {color: getCssVar('--text-muted'), formatter: value => `${value}%`}},
+        xAxis: {type: 'category', boundaryGap: false, data: days, axisLine: {lineStyle: {color: getCssVar('--border')}}, axisLabel: {color: getCssVar('--text-muted')}},
+        yAxis: {type: 'value', splitLine: {lineStyle: {color: getCssVar('--border'), type: 'dashed'}}, axisLabel: {color: getCssVar('--text-muted'), formatter: value => formatBytes(value)}},
         graphic: series.length ? [] : [{type: 'text', left: 'center', top: 'middle', silent: true, style: {text: '暂无项目', fill: getCssVar('--text-muted'), font: '12px sans-serif'}}],
         series
       }, true);
@@ -3039,10 +3040,6 @@
         if (currentProjectID) return;
         try {
           const data = JSON.parse(event.data);
-          const receivedAt = Date.now();
-          if (lastGlobalDashboardRenderAt && receivedAt - lastGlobalDashboardRenderAt < uiRefreshSeconds * 1000) return;
-          lastGlobalDashboardRenderAt = receivedAt;
-          const projects = Array.isArray(data.projects) ? data.projects : [];
           document.getElementById('activeConnections').textContent = `${Number(data.running_projects) || 0}/${Number(data.total_projects) || 0}`;
           if (data.system_error) {
             document.getElementById('liveUpSpeed').textContent = '-';
@@ -3057,32 +3054,9 @@
             document.getElementById('liveDownSub').textContent = '服务所在机器';
           }
 
-          const timestamp = new Date().toLocaleTimeString([], {hour12: false});
-          healthTime.push(timestamp);
-          const incoming = new Map(projects.map(project => [project.id, project]));
-          for (const project of projects) {
-            if (!projectHealthData.has(project.id)) {
-              projectHealthData.set(project.id, {name: project.name || project.id, data: Array(healthTime.length - 1).fill(null)});
-            }
-          }
-          for (const [projectID, project] of projectHealthData) {
-            const sample = incoming.get(projectID);
-            if (!sample) {
-              projectHealthData.delete(projectID);
-              continue;
-            }
-            project.name = sample.name || projectID;
-            project.data.push({
-              value: Number(sample.health_rate) || 0,
-              healthy_nodes: Number(sample.healthy_nodes) || 0,
-              monitored_nodes: Number(sample.monitored_nodes) || 0
-            });
-          }
-          if (healthTime.length > 60) {
-            healthTime.shift();
-            projectHealthData.forEach(project => project.data.shift());
-          }
-          renderProjectHealthChart();
+          document.getElementById('totalNodes').textContent = Number(data.total_nodes) || 0;
+          document.getElementById('healthyNodes').textContent = Number(data.healthy_nodes) || 0;
+          document.getElementById('blacklistedNodes').textContent = Number(data.unhealthy_nodes) || 0;
         } catch (error) {
           console.warn('处理全局监控数据失败', error);
         }
@@ -3114,7 +3088,7 @@
         try {
           const d = JSON.parse(e.data);
           const receivedAt = Date.now();
-          if (lastTrafficRenderAt && receivedAt - lastTrafficRenderAt < uiRefreshSeconds * 1000) return;
+          if (lastTrafficRenderAt && receivedAt - lastTrafficRenderAt < TRAFFIC_RENDER_MS) return;
           lastTrafficRenderAt = receivedAt;
           const up = d.up || 0;
           const down = d.down || 0;
@@ -3532,9 +3506,18 @@
       }
     }
 
+    function updateDashboardSubscriptionCount(items, globalView = !currentProjectID) {
+      const list = Array.isArray(items) ? items : [];
+      const count = globalView
+        ? list.length
+        : list.filter(item => item && item.enabled !== false).length;
+      document.getElementById('subscriptionStatus').textContent = `[Sub: ${count}]`;
+    }
+
     function applyCurrentSubscriptionPayload(data) {
       const globalView = !currentProjectID;
       subscriptionsCache = globalView ? (data.global_items || data.items || []) : (data.items || []);
+      updateDashboardSubscriptionCount(subscriptionsCache, globalView);
       document.getElementById('subscriptionTotalCount').textContent = subscriptionsCache.length;
       document.getElementById('subscriptionActiveNodes').textContent = data.node_count || 0;
       document.getElementById('subscriptionNextRefresh').textContent = globalView ? '-' : (data.enabled ? formatDateTime(data.next_refresh) : '-');
@@ -3756,19 +3739,31 @@
     }
 
     async function fetchSubscriptionStatus() {
-      if (!currentProject()) {
-        document.getElementById('refreshSubBtn').style.display = 'none';
-        return;
-      }
       try {
-        const res = await fetch('/api/subscription/status');
-        if(!res.ok) return;
-        const d = await res.json();
+        const globalView = !currentProjectID;
+        const subscriptionsResponse = await fetch(globalScopePath('/api/subscriptions'));
+        if (!subscriptionsResponse.ok) return;
+        const subscriptionsData = await subscriptionsResponse.json();
+        const items = globalView
+          ? (subscriptionsData.global_items || subscriptionsData.items || [])
+          : (subscriptionsData.items || []);
+        updateDashboardSubscriptionCount(items, globalView);
         const btn = document.getElementById('refreshSubBtn');
-        if(!d.enabled) { btn.style.display='none'; return; }
-        btn.style.display='inline-flex';
-        document.getElementById('subscriptionStatus').textContent = `[Sub: ${d.node_count}]`;
-        document.getElementById('subscriptionTrend').textContent = d.is_refreshing ? '更新中...' : (d.last_error ? '错误' : '正常');
+        if (globalView) {
+          btn.style.display = 'none';
+          return;
+        }
+        const statusResponse = await fetch('/api/subscription/status');
+        if (!statusResponse.ok) {
+          btn.style.display = 'none';
+          return;
+        }
+        const status = await statusResponse.json();
+        if (!status.enabled) {
+          btn.style.display = 'none';
+          return;
+        }
+        btn.style.display = 'inline-flex';
       } catch(e){}
     }
     
@@ -4035,6 +4030,7 @@
     let debugTrafficDownTotal = 0;
     let debugTrafficSource = null;
     let debugTrafficLastTs = null;
+    let debugTrafficLastRenderAt = 0;
 
     function connectDebugTraffic() {
       if (!currentProjectID || debugTrafficSource) return;
@@ -4053,9 +4049,12 @@
             }
           }
           debugTrafficLastTs = now;
-          document.getElementById('debugTotalUpload').textContent = formatBytes(debugTrafficUpTotal);
-          document.getElementById('debugTotalDownload').textContent = formatBytes(debugTrafficDownTotal);
-          document.getElementById('debugTotalTraffic').textContent = formatBytes(debugTrafficUpTotal + debugTrafficDownTotal);
+          if (!debugTrafficLastRenderAt || now - debugTrafficLastRenderAt >= TRAFFIC_RENDER_MS) {
+            debugTrafficLastRenderAt = now;
+            document.getElementById('debugTotalUpload').textContent = formatBytes(debugTrafficUpTotal);
+            document.getElementById('debugTotalDownload').textContent = formatBytes(debugTrafficDownTotal);
+            document.getElementById('debugTotalTraffic').textContent = formatBytes(debugTrafficUpTotal + debugTrafficDownTotal);
+          }
         } catch(err){}
       };
       debugTrafficSource.onerror = function() {
@@ -4073,6 +4072,7 @@
         debugTrafficSource = null;
       }
       debugTrafficLastTs = null;
+      debugTrafficLastRenderAt = 0;
     }
 
     // Debug
@@ -4240,7 +4240,6 @@
         const logCfg = system.log || {};
         document.getElementById('settingMgmtListen').value = management.listen || '';
         document.getElementById('settingMgmtPassword').value = management.password || '';
-        document.getElementById('settingUIRefreshSeconds').value = uiRefreshSeconds;
         document.getElementById('settingLogOutput').value = logCfg.output || 'stdout';
         document.getElementById('settingLogMaxSize').value = logCfg.max_size || 50;
         document.getElementById('settingLogMaxBackups').value = logCfg.max_backups || 3;
@@ -4275,13 +4274,7 @@
       const originalText = saveBtn.textContent;
       const currentCoreSnapshot = _buildCoreSnapshot();
       const coreChanged = currentCoreSnapshot !== _savedCoreSnapshot;
-      const refreshSeconds = Number(document.getElementById('settingUIRefreshSeconds').value);
-      if (!Number.isInteger(refreshSeconds) || refreshSeconds < UI_REFRESH_MIN_SECONDS || refreshSeconds > UI_REFRESH_MAX_SECONDS) {
-        showToast(`自动刷新间隔必须是 ${UI_REFRESH_MIN_SECONDS}–${UI_REFRESH_MAX_SECONDS} 秒之间的整数`, 'error');
-        return;
-      }
-      const refreshChanged = refreshSeconds !== uiRefreshSeconds;
-      if (!coreChanged && !refreshChanged) {
+      if (!coreChanged) {
         showToast('配置未变更'); return;
       }
       saveBtn.disabled = true; saveBtn.textContent = '保存中...'; saveBtn.style.opacity = '0.6';
@@ -4307,8 +4300,7 @@
           needRestart = !!data.need_restart;
           _savedCoreSnapshot = currentCoreSnapshot;
         }
-        if (refreshChanged) applyUIRefreshSeconds(refreshSeconds);
-        showToast(needRestart ? '已保存，界面刷新间隔已生效；服务配置重启后生效' : '系统设置已保存');
+        showToast(needRestart ? '系统设置已保存，服务配置重启后生效' : '系统设置已保存');
       } catch (error) {
         showToast(error.message, 'error');
       }
@@ -4450,6 +4442,8 @@
         } else if (project && project.status === 'running') {
           await refresh();
           connectTrafficSSE();
+        } else if (project) {
+          await fetchSubscriptionStatus();
         }
         startAutoRefresh();
       } catch (error) {

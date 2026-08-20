@@ -516,6 +516,9 @@ type globalDashboardSnapshot struct {
 	SystemError     string                 `json:"system_error,omitempty"`
 	RunningProjects int                    `json:"running_projects"`
 	TotalProjects   int                    `json:"total_projects"`
+	TotalNodes      int                    `json:"total_nodes"`
+	HealthyNodes    int                    `json:"healthy_nodes"`
+	UnhealthyNodes  int                    `json:"unhealthy_nodes"`
 	Projects        []ProjectHealthSummary `json:"projects"`
 }
 
@@ -528,6 +531,21 @@ func (s *Server) currentGlobalDashboardSnapshot() globalDashboardSnapshot {
 	for _, project := range projects {
 		if project.Status == "running" {
 			result.RunningProjects++
+		}
+	}
+	// Global node status belongs to the shared catalog. Project summaries can
+	// contain the same shared subscription nodes for every project, so summing
+	// them here multiplies the global count by the number of projects.
+	if binding, err := s.projects.SharedCatalog(); err == nil && binding.Monitor != nil {
+		nodes := binding.Monitor.SnapshotVisible()
+		result.TotalNodes = len(nodes)
+		for _, node := range nodes {
+			if node.InitialCheckDone && node.Available && !node.Blacklisted {
+				result.HealthyNodes++
+			}
+			if node.Blacklisted || (node.InitialCheckDone && !node.Available) {
+				result.UnhealthyNodes++
+			}
 		}
 	}
 	if s.systemUsage == nil {
@@ -916,6 +934,9 @@ func (s *Server) Start(ctx context.Context) {
 func (s *Server) Shutdown(ctx context.Context) {
 	if s == nil || s.srv == nil {
 		return
+	}
+	if s.systemUsage != nil {
+		s.systemUsage.close()
 	}
 	_ = s.srv.Shutdown(ctx)
 }

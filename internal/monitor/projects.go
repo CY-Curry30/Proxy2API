@@ -138,6 +138,7 @@ type ProjectHealthSummary struct {
 	ID             string  `json:"id"`
 	Name           string  `json:"name"`
 	Status         string  `json:"status"`
+	NodeCount      int     `json:"node_count"`
 	HealthyNodes   int     `json:"healthy_nodes"`
 	MonitoredNodes int     `json:"monitored_nodes"`
 	HealthRate     float64 `json:"health_rate"`

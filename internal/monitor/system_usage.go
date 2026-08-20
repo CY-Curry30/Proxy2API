@@ -17,18 +17,41 @@ type systemUsageSampler struct {
 	initialized   bool
 	previousIdle  uint64
 	previousTotal uint64
+	cpuReader     cpuPercentReader
+}
+
+type cpuPercentReader interface {
+	read() (percent float64, valid bool, err error)
+}
+
+type cpuPercentReaderCloser interface {
+	close()
 }
 
 func (s *systemUsageSampler) sample() (systemUsage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.cpuReader == nil {
+		s.cpuReader = newCPUPercentReader()
+	}
 	idle, total, memoryUsed, memoryTotal, err := readSystemUsageCounters()
 	if err != nil {
 		return systemUsage{}, err
 	}
 
 	cpuPercent := calculateCPUPercent(s.previousIdle, s.previousTotal, idle, total, s.initialized)
+	if s.cpuReader != nil {
+		pdhPercent, valid, readErr := s.cpuReader.read()
+		if readErr != nil {
+			if closer, ok := s.cpuReader.(cpuPercentReaderCloser); ok {
+				closer.close()
+			}
+			s.cpuReader = nil
+		} else if valid {
+			cpuPercent = pdhPercent
+		}
+	}
 	s.previousIdle = idle
 	s.previousTotal = total
 	s.initialized = true
@@ -39,6 +62,15 @@ func (s *systemUsageSampler) sample() (systemUsage, error) {
 		MemoryUsedBytes:  memoryUsed,
 		MemoryTotalBytes: memoryTotal,
 	}, nil
+}
+
+func (s *systemUsageSampler) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if closer, ok := s.cpuReader.(cpuPercentReaderCloser); ok {
+		closer.close()
+	}
+	s.cpuReader = nil
 }
 
 func calculateCPUPercent(previousIdle, previousTotal, idle, total uint64, initialized bool) float64 {

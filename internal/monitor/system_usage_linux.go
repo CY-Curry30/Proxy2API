@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+func newCPUPercentReader() cpuPercentReader { return nil }
+
 func readSystemUsageCounters() (idle, total, memoryUsed, memoryTotal uint64, err error) {
 	stat, err := os.Open("/proc/stat")
 	if err != nil {

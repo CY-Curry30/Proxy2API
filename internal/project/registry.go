@@ -390,8 +390,29 @@ func (r *Registry) ProjectHealthSummaries() []monitor.ProjectHealthSummary {
 		}
 		status, _, _ := runtime.Status()
 		health.Status = string(status)
+		cfg := runtime.Config()
+		if cfg == nil {
+			// Keep the global dashboard useful for stopped projects as well.
+			// Their runtime has no live config, so read the project file without
+			// mutating runtime state or the persisted configuration.
+			if runtime.sharedMu != nil {
+				runtime.sharedMu.RLock()
+			}
+			if loaded, err := config.LoadProjectReadOnlyWithShared(runtime.configPath, runtime.sharedCfg); err == nil {
+				cfg = loaded
+			}
+			if runtime.sharedMu != nil {
+				runtime.sharedMu.RUnlock()
+			}
+		}
+		if cfg != nil {
+			health.NodeCount = len(cfg.Nodes)
+		}
 		if mgr := runtime.MonitorManager(); mgr != nil {
 			snapshots := mgr.SnapshotVisible()
+			// Prefer the live inventory so restored subscription nodes and manual
+			// nodes are both reflected in the global total.
+			health.NodeCount = len(snapshots)
 			health.MonitoredNodes = len(snapshots)
 			for _, snapshot := range snapshots {
 				if snapshot.InitialCheckDone && snapshot.Available && !snapshot.Blacklisted {
