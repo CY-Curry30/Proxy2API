@@ -522,7 +522,12 @@ type globalDashboardSnapshot struct {
 	Projects        []ProjectHealthSummary `json:"projects"`
 }
 
-func (s *Server) currentGlobalDashboardSnapshot() globalDashboardSnapshot {
+const (
+	globalDashboardTelemetryInterval = 1 * time.Second
+	globalDashboardSummaryInterval   = 10 * time.Second
+)
+
+func (s *Server) currentGlobalDashboardSummary() globalDashboardSnapshot {
 	projects := s.projects.ProjectHealthSummaries()
 	result := globalDashboardSnapshot{
 		TotalProjects: len(projects),
@@ -548,16 +553,27 @@ func (s *Server) currentGlobalDashboardSnapshot() globalDashboardSnapshot {
 			}
 		}
 	}
+	return result
+}
+
+func (s *Server) updateGlobalSystemUsage(result *globalDashboardSnapshot) {
+	result.System = systemUsage{}
+	result.SystemError = ""
 	if s.systemUsage == nil {
 		result.SystemError = "系统资源监控未初始化"
-		return result
+		return
 	}
 	usage, err := s.systemUsage.sample()
 	if err != nil {
 		result.SystemError = err.Error()
-		return result
+		return
 	}
 	result.System = usage
+}
+
+func (s *Server) currentGlobalDashboardSnapshot() globalDashboardSnapshot {
+	result := s.currentGlobalDashboardSummary()
+	s.updateGlobalSystemUsage(&result)
 	return result
 }
 
@@ -581,8 +597,21 @@ func (s *Server) handleGlobalDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	send := func() bool {
-		data, err := json.Marshal(s.currentGlobalDashboardSnapshot())
+	snapshot := s.currentGlobalDashboardSnapshot()
+	send := func(includeSummary bool) bool {
+		payload := map[string]any{"system": snapshot.System}
+		if snapshot.SystemError != "" {
+			payload["system_error"] = snapshot.SystemError
+		}
+		if includeSummary {
+			payload["running_projects"] = snapshot.RunningProjects
+			payload["total_projects"] = snapshot.TotalProjects
+			payload["total_nodes"] = snapshot.TotalNodes
+			payload["healthy_nodes"] = snapshot.HealthyNodes
+			payload["unhealthy_nodes"] = snapshot.UnhealthyNodes
+			payload["projects"] = snapshot.Projects
+		}
+		data, err := json.Marshal(payload)
 		if err != nil {
 			return false
 		}
@@ -592,18 +621,26 @@ func (s *Server) handleGlobalDashboard(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		return true
 	}
-	if !send() {
+	if !send(true) {
 		return
 	}
 
-	ticker := time.NewTicker(2 * time.Second)
+	lastSummaryUpdate := time.Now()
+	ticker := time.NewTicker(globalDashboardTelemetryInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
-			if !send() {
+		case tickedAt := <-ticker.C:
+			includeSummary := false
+			if tickedAt.Sub(lastSummaryUpdate) >= globalDashboardSummaryInterval {
+				snapshot = s.currentGlobalDashboardSummary()
+				lastSummaryUpdate = tickedAt
+				includeSummary = true
+			}
+			s.updateGlobalSystemUsage(&snapshot)
+			if !send(includeSummary) {
 				return
 			}
 		}
@@ -3236,7 +3273,8 @@ func (s *Server) handleTrafficCalendar(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTraffic streams real-time traffic from sing-box Clash API as SSE.
-// Clash API /traffic returns newline-delimited JSON; we convert to SSE for browser EventSource.
+// Clash API /traffic returns newline-delimited JSON; each sample is augmented
+// with the current project connection count for the fast dashboard telemetry.
 func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	// Connect to sing-box Clash API
 	trafficAPI := s.cfg.TrafficAPI
@@ -3268,30 +3306,26 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read NDJSON lines from Clash API and forward as SSE
-	buf := make([]byte, 4096)
+	decoder := json.NewDecoder(resp.Body)
 	for {
-		select {
-		case <-r.Context().Done():
-			return
-		default:
-		}
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			// Each chunk may contain one or more JSON lines; forward as-is in SSE data frames
-			lines := strings.Split(strings.TrimSpace(string(buf[:n])), "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-				fmt.Fprintf(w, "data: %s\n\n", line)
-			}
-			flusher.Flush()
-		}
-		if readErr != nil {
+		var sample map[string]any
+		if err := decoder.Decode(&sample); err != nil {
 			return
 		}
+		if sample == nil {
+			continue
+		}
+		if s.mgr != nil {
+			sample["active_connections"] = s.mgr.ActiveConnections()
+		}
+		data, err := json.Marshal(sample)
+		if err != nil {
+			return
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return
+		}
+		flusher.Flush()
 	}
 }
 

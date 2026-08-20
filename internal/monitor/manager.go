@@ -873,6 +873,18 @@ func (m *Manager) SnapshotVisible() []Snapshot {
 	return visible
 }
 
+// ActiveConnections returns the live project connection count without
+// building and sorting a full node snapshot on every telemetry update.
+func (m *Manager) ActiveConnections() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var total int64
+	for _, node := range m.nodes {
+		total += int64(node.active.Load())
+	}
+	return total
+}
+
 // SnapshotFiltered returns a sorted copy of current node states.
 // If onlyAvailable is true, only returns nodes that have completed their initial
 // health check and are currently available. This ensures the export function and

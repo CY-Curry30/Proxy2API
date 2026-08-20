@@ -1416,9 +1416,10 @@
       return nativeFetch(input, init);
     };
 
-    const DASHBOARD_REFRESH_MS = 2000;
+    const DASHBOARD_REFRESH_MS = 10 * 1000;
     const TRAFFIC_CALENDAR_REFRESH_MS = 60 * 60 * 1000;
-    const TRAFFIC_RENDER_MS = 2000;
+    const TRAFFIC_RENDER_MS = 1000;
+    const TRAFFIC_RENDER_JITTER_MS = 100;
     let isAutoRefresh = true;
     let autoRefreshInterval = null;
     let lastTrafficRenderAt = 0;
@@ -3040,7 +3041,6 @@
         if (currentProjectID) return;
         try {
           const data = JSON.parse(event.data);
-          document.getElementById('activeConnections').textContent = `${Number(data.running_projects) || 0}/${Number(data.total_projects) || 0}`;
           if (data.system_error) {
             document.getElementById('liveUpSpeed').textContent = '-';
             document.getElementById('liveDownSpeed').textContent = '-';
@@ -3054,9 +3054,12 @@
             document.getElementById('liveDownSub').textContent = '服务所在机器';
           }
 
-          document.getElementById('totalNodes').textContent = Number(data.total_nodes) || 0;
-          document.getElementById('healthyNodes').textContent = Number(data.healthy_nodes) || 0;
-          document.getElementById('blacklistedNodes').textContent = Number(data.unhealthy_nodes) || 0;
+          if (Object.prototype.hasOwnProperty.call(data, 'total_projects')) {
+            document.getElementById('activeConnections').textContent = `${Number(data.running_projects) || 0}/${Number(data.total_projects) || 0}`;
+            document.getElementById('totalNodes').textContent = Number(data.total_nodes) || 0;
+            document.getElementById('healthyNodes').textContent = Number(data.healthy_nodes) || 0;
+            document.getElementById('blacklistedNodes').textContent = Number(data.unhealthy_nodes) || 0;
+          }
         } catch (error) {
           console.warn('处理全局监控数据失败', error);
         }
@@ -3088,7 +3091,7 @@
         try {
           const d = JSON.parse(e.data);
           const receivedAt = Date.now();
-          if (lastTrafficRenderAt && receivedAt - lastTrafficRenderAt < TRAFFIC_RENDER_MS) return;
+          if (lastTrafficRenderAt && receivedAt - lastTrafficRenderAt < TRAFFIC_RENDER_MS - TRAFFIC_RENDER_JITTER_MS) return;
           lastTrafficRenderAt = receivedAt;
           const up = d.up || 0;
           const down = d.down || 0;
@@ -3100,6 +3103,10 @@
           if (trafficTime.length > 60) { trafficTime.shift(); trafficDataUp.shift(); trafficDataDown.shift(); }
           
           // Update live speed stat panels
+          const activeConnections = Number(d.active_connections);
+          if (Number.isFinite(activeConnections)) {
+            document.getElementById('activeConnections').textContent = Math.max(0, activeConnections);
+          }
           document.getElementById('liveUpSpeed').textContent = formatBytes(up) + '/s';
           document.getElementById('liveDownSpeed').textContent = formatBytes(down) + '/s';
           
@@ -4049,7 +4056,7 @@
             }
           }
           debugTrafficLastTs = now;
-          if (!debugTrafficLastRenderAt || now - debugTrafficLastRenderAt >= TRAFFIC_RENDER_MS) {
+          if (!debugTrafficLastRenderAt || now - debugTrafficLastRenderAt >= TRAFFIC_RENDER_MS - TRAFFIC_RENDER_JITTER_MS) {
             debugTrafficLastRenderAt = now;
             document.getElementById('debugTotalUpload').textContent = formatBytes(debugTrafficUpTotal);
             document.getElementById('debugTotalDownload').textContent = formatBytes(debugTrafficDownTotal);

@@ -86,15 +86,17 @@ func newPDHCPUReader() (*pdhCPUReader, error) {
 }
 
 func (r *pdhCPUReader) read() (float64, bool, error) {
+	// The dashboard samples once per second. Allow a small scheduling tolerance
+	// so a tick arriving just under one second still uses Processor Utility,
+	// while additional clients cannot force repeated sub-second PDH samples.
+	if time.Since(r.lastCollectedAt) < 900*time.Millisecond {
+		return 0, false, nil
+	}
 	status, _, _ := pdhCollectQueryData.Call(r.query)
 	if status != 0 {
 		return 0, false, fmt.Errorf("PDH CPU sample failed: 0x%x", status)
 	}
 	collectedAt := time.Now()
-	if collectedAt.Sub(r.lastCollectedAt) < time.Second {
-		r.lastCollectedAt = collectedAt
-		return 0, false, nil
-	}
 	r.lastCollectedAt = collectedAt
 	var value pdhFormattedCounterValue
 	status, _, _ = pdhGetFormattedValue.Call(
@@ -111,6 +113,8 @@ func (r *pdhCPUReader) read() (float64, bool, error) {
 	}
 	if value.value < 0 {
 		value.value = 0
+	} else if value.value > 100 {
+		value.value = 100
 	}
 	return value.value, true, nil
 }
