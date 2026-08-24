@@ -858,6 +858,8 @@ func (c *Config) normalize() error {
 		// configured. When the same stable endpoint is present in the subscription
 		// cache, keep the subscription-owned definition instead of the stale inline
 		// copy so the UI and runtime report the real source.
+		//
+		// 修改后：手动节点永远保留，订阅节点被手动节点覆盖。
 		c.Nodes = dedupeNodesPreferSubscription(c.Nodes)
 	}
 
@@ -1643,6 +1645,8 @@ func dedupeNodesByKey(nodes []NodeConfig) ([]NodeConfig, int) {
 // allowing a fetched subscription definition to take ownership of a matching
 // inline/file definition. This prevents previously imported subscription nodes
 // from being rendered as manual after a subscription is added.
+//
+// 修改后：手动节点（inline）永远优先保留，订阅节点被手动节点覆盖，保持纯净标签。
 func dedupeNodesPreferSubscription(nodes []NodeConfig) []NodeConfig {
 	if len(nodes) < 2 {
 		return nodes
@@ -1660,7 +1664,8 @@ func dedupeNodesPreferSubscription(nodes []NodeConfig) []NodeConfig {
 			key = node.URI
 		}
 		if previous, ok := seen[key]; ok {
-			if node.Source == NodeSourceSubscription && out[previous].Source != NodeSourceSubscription {
+			// 修改：手动节点永远保留，订阅节点被手动节点覆盖
+			if node.Source == NodeSourceSubscription && out[previous].Source == NodeSourceInline {
 				out[previous] = node
 			}
 			continue
