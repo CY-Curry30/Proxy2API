@@ -2833,6 +2833,10 @@ func (p nodePayload) toConfig() config.NodeConfig {
 // subscription URL or persisting it with the node definition.
 type configNodeView struct {
 	config.NodeConfig
+	// ID is the stable runtime identity used by project-level excluded_nodes.
+	// NodeConfig intentionally keeps StateKey internal, so expose this
+	// display-only value for the project editor instead of leaking runtime fields.
+	ID               string `json:"id"`
 	SubscriptionName string `json:"subscription_name,omitempty"`
 }
 
@@ -2875,7 +2879,7 @@ func (s *Server) configNodeViews(nodes []config.NodeConfig) []configNodeView {
 
 	views := make([]configNodeView, 0, len(nodes))
 	for _, node := range nodes {
-		view := configNodeView{NodeConfig: node}
+		view := configNodeView{NodeConfig: node, ID: node.StateID()}
 		if node.Source == config.NodeSourceSubscription {
 			view.SubscriptionName = subscriptionNames[strings.TrimSpace(node.SubscriptionURL)]
 			if view.SubscriptionName == "" {

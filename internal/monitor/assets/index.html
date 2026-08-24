@@ -1328,6 +1328,16 @@
             <!-- Populated dynamically -->
           </div>
           <em style="font-size:11px;color:var(--text-muted);">勾选的订阅会为该项目加载节点；在项目页面新添加的订阅会自动关联当前项目。</em>
+          <div id="projectNonSubscriptionNodesSection" style="display:none;">
+            <div class="form-section-title" id="projectNonSubscriptionNodesTitle">非订阅节点（0个）</div>
+            <div class="checkbox-grid">
+              <div class="checkbox-row">
+                <input type="checkbox" id="projectNonSubscriptionNodes" />
+                <label for="projectNonSubscriptionNodes" id="projectNonSubscriptionNodesLabel">加载全部非订阅节点</label>
+              </div>
+            </div>
+            <em style="font-size:11px;color:var(--text-muted);">勾选后，该项目会加载全部手动添加的节点。</em>
+          </div>
           <div class="form-section-grid">
             <div class="checkbox-row"><input type="checkbox" id="projectEnabled" checked /><label for="projectEnabled">启用项目</label></div>
             <div class="checkbox-row"><input type="checkbox" id="projectAutostart" checked /><label for="projectAutostart">服务启动时自动运行</label></div>
@@ -1387,6 +1397,8 @@
     let projectPortHintsCache = {occupied: [], recommended: {}};
     let editingProjectID = '';
     let deletingProjectID = '';
+    let projectNonSubscriptionNodeIDs = [];
+    let projectExcludedNodeIDs = new Set();
     const nativeFetch = window.fetch.bind(window);
 
     function projectAPIPath(path) {
@@ -2041,6 +2053,13 @@
         if (cb.checked) selectedSubscriptions.push(cb.value);
         else excludedSubscriptions.push(cb.value);
       });
+      const excludedNodes = new Set(projectExcludedNodeIDs);
+      const nonSubscriptionCheckbox = document.getElementById('projectNonSubscriptionNodes');
+      if (nonSubscriptionCheckbox?.checked !== false) {
+        projectNonSubscriptionNodeIDs.forEach(id => excludedNodes.delete(id));
+      } else {
+        projectNonSubscriptionNodeIDs.forEach(id => excludedNodes.add(id));
+      }
       return {
         mode: document.getElementById('projectMode').value,
         external_ip: document.getElementById('projectExternalIP').value.trim(),
@@ -2071,7 +2090,8 @@
         probe: schedules.probe,
         subscription_refresh: schedules.subscription_refresh,
         selected_subscriptions: selectedSubscriptions,
-        excluded_subscriptions: excludedSubscriptions
+        excluded_subscriptions: excludedSubscriptions,
+        excluded_nodes: [...excludedNodes]
       };
     }
 
@@ -2123,6 +2143,8 @@
     async function populateSubscriptionCheckboxes(settings) {
       const grid = document.getElementById('projectSubscriptionCheckboxes');
       if (!grid) return;
+      projectExcludedNodeIDs = new Set((settings && settings.excluded_nodes) || []);
+      projectNonSubscriptionNodeIDs = [];
       let subscriptions = [];
       // Gather all subscription URLs from the source catalog.
       try {
@@ -2154,6 +2176,35 @@
           <label for="${id}">${escapeHtml(name)}</label>
         </div>`;
       }).join('');
+
+      const nonSubscriptionSection = document.getElementById('projectNonSubscriptionNodesSection');
+      const nonSubscriptionCheckbox = document.getElementById('projectNonSubscriptionNodes');
+      const nonSubscriptionLabel = document.getElementById('projectNonSubscriptionNodesLabel');
+      try {
+        const response = await nativeFetch('/api/nodes/config?scope=global');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '加载非订阅节点失败');
+        const nodes = (data.nodes || []).filter(node => node.source === 'inline' && node.id);
+        projectNonSubscriptionNodeIDs = nodes.map(node => node.id);
+        if (nodes.length > 0) {
+          const excludedCount = nodes.reduce((count, node) => count + (projectExcludedNodeIDs.has(node.id) ? 1 : 0), 0);
+          // The project editor exposes one aggregate switch. If an older
+          // per-node configuration left a partial selection, treat it as
+          // enabled so saving does not unexpectedly remove all manual nodes.
+          nonSubscriptionCheckbox.checked = excludedCount < nodes.length;
+          nonSubscriptionCheckbox.indeterminate = false;
+          document.getElementById('projectNonSubscriptionNodesTitle').textContent = `非订阅节点（${nodes.length}个）`;
+          nonSubscriptionLabel.textContent = '加载全部非订阅节点';
+          nonSubscriptionSection.style.display = 'block';
+        } else {
+          nonSubscriptionCheckbox.checked = false;
+          nonSubscriptionCheckbox.indeterminate = false;
+          nonSubscriptionSection.style.display = 'none';
+        }
+      } catch (error) {
+        projectNonSubscriptionNodeIDs = [];
+        nonSubscriptionSection.style.display = 'none';
+      }
     }
 
     function editCurrentManagedProject() {
