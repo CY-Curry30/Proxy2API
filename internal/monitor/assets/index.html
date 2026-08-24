@@ -1323,21 +1323,17 @@
             <div class="checkbox-row"><input type="checkbox" id="projectStickyEnabled" onchange="handleProjectStickyChange()" /><label for="projectStickyEnabled">启用粘性代理</label></div>
             <div class="form-group"><label>粘性端口</label><input type="number" id="projectStickyPort" class="setting-input" min="0" max="65535" oninput="updateProjectPortHints()" /><div class="port-field-hint" id="projectStickyPortHint" aria-live="polite"></div></div>
           </div>
-          <div class="form-section-title">选定订阅（不选则加载全部）</div>
+          <div class="form-section-title">选定订阅（不选择加载全部）</div>
+          <div id="projectNonSubscriptionNodesSection" style="display:none;">
+            <div class="checkbox-row">
+              <input type="checkbox" id="projectNonSubscriptionNodes" />
+              <label for="projectNonSubscriptionNodes" id="projectNonSubscriptionNodesLabel">非订阅节点（0个）</label>
+            </div>
+          </div>
           <div class="checkbox-grid" id="projectSubscriptionCheckboxes">
             <!-- Populated dynamically -->
           </div>
           <em style="font-size:11px;color:var(--text-muted);">勾选的订阅会为该项目加载节点；在项目页面新添加的订阅会自动关联当前项目。</em>
-          <div id="projectNonSubscriptionNodesSection" style="display:none;">
-            <div class="form-section-title" id="projectNonSubscriptionNodesTitle">非订阅节点（0个）</div>
-            <div class="checkbox-grid">
-              <div class="checkbox-row">
-                <input type="checkbox" id="projectNonSubscriptionNodes" />
-                <label for="projectNonSubscriptionNodes" id="projectNonSubscriptionNodesLabel">加载全部非订阅节点</label>
-              </div>
-            </div>
-            <em style="font-size:11px;color:var(--text-muted);">勾选后，该项目会加载全部手动添加的节点。</em>
-          </div>
           <div class="form-section-grid">
             <div class="checkbox-row"><input type="checkbox" id="projectEnabled" checked /><label for="projectEnabled">启用项目</label></div>
             <div class="checkbox-row"><input type="checkbox" id="projectAutostart" checked /><label for="projectAutostart">服务启动时自动运行</label></div>
@@ -2193,8 +2189,7 @@
           // enabled so saving does not unexpectedly remove all manual nodes.
           nonSubscriptionCheckbox.checked = excludedCount < nodes.length;
           nonSubscriptionCheckbox.indeterminate = false;
-          document.getElementById('projectNonSubscriptionNodesTitle').textContent = `非订阅节点（${nodes.length}个）`;
-          nonSubscriptionLabel.textContent = '加载全部非订阅节点';
+          nonSubscriptionLabel.textContent = `非订阅节点（${nodes.length}个）`;
           nonSubscriptionSection.style.display = 'block';
         } else {
           nonSubscriptionCheckbox.checked = false;

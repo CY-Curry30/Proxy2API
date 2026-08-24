@@ -113,6 +113,19 @@ func (r *Runtime) Start() error {
 		return fmt.Errorf("加载项目 %q 的配置失败: %w", r.id, err)
 	}
 	cfg.ClashAPIPort = r.clashAPIPort
+	// Reconcile restored node ports against the process-wide registry before
+	// claiming this project. The OS may report a port as free while another
+	// stopped project still has it assigned in its persisted state.
+	if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
+		portMap := cfg.BuildPortMap()
+		if err := cfg.NormalizeWithPortMapExcluding(portMap, r.ports.ReservedPorts(r.id)); err != nil {
+			r.setStatus(StatusFailed, err.Error())
+			return fmt.Errorf("规范化项目 %q 的节点端口失败: %w", r.id, err)
+		}
+		if err := cfg.SaveNodePortMap(); err != nil {
+			r.logger.Warnf("保存项目 %q 的节点端口映射失败: %v", r.id, err)
+		}
+	}
 	if err := r.ports.Reserve(r.id, cfg); err != nil {
 		r.setStatus(StatusFailed, err.Error())
 		return err
@@ -130,6 +143,9 @@ func (r *Runtime) Start() error {
 		boxmgr.WithLogger(r.logger),
 		boxmgr.WithConfigValidator(func(next *config.Config) error {
 			return r.ports.Reserve(r.id, next)
+		}),
+		boxmgr.WithReservedPorts(func() map[uint16]struct{} {
+			return r.ports.ReservedPorts(r.id)
 		}),
 		boxmgr.WithSharedConfig(r.sharedCfg, r.sharedMu),
 	)

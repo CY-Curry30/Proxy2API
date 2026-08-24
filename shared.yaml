@@ -2,3 +2,6 @@ nodes_file: nodes.txt
 subscriptions:
     - https://jkun.waimaosass.icu/api/v1/client/subscribe?token=76b358bae38d66a3678f1dff8c2c2823
     - https://hthth.cyou/sub?token=skFljrxSk7ec7dZU
+nodes:
+    - name: JMS-25345@c10s801.portablesubmarines.com:443
+      uri: vless://026d768b-11cc-4219-8724-3ac7f6c62b7b@c10s801.portablesubmarines.com:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=portal.citygrainla.com&fp=chrome&pbk=BlSccfT5tvDIOS7v9VaPd0ulUNhUdvlMjGiNzDNDUHE&sid=051f20c2344a2dfd&type=tcp#JMS-25345%40c10s801.portablesubmarines.com%3A443

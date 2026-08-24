@@ -54,6 +54,11 @@ func WithConfigValidator(validate func(*config.Config) error) Option {
 	return func(m *Manager) { m.configValidator = validate }
 }
 
+// WithReservedPorts supplies ports owned by other runtimes.
+func WithReservedPorts(provider func() map[uint16]struct{}) Option {
+	return func(m *Manager) { m.reservedPorts = provider }
+}
+
 // WithSharedConfig supplies the standalone node/subscription catalog used by
 // config-node CRUD while m.cfg continues to own project runtime settings.
 func WithSharedConfig(shared *config.Config, mu *sync.RWMutex) Option {
@@ -86,6 +91,7 @@ type Manager struct {
 	minAvailableNodes int
 	logger            Logger
 	configValidator   func(*config.Config) error
+	reservedPorts     func() map[uint16]struct{}
 
 	baseCtx               context.Context
 	healthCheckStarted    bool
@@ -1108,11 +1114,14 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 		return m.deactivateProxyCore(newCfg)
 	}
 
-	// Apply port mapping and assign ports. NormalizeWithPortMap preserves the
-	// port of any node present in portMap and assigns fresh, collision-free
-	// ports to the rest. It is always run (an empty map simply means "assign
-	// all ports fresh"), since createNewConfig no longer pre-assigns them.
-	if err := newCfg.NormalizeWithPortMap(portMap); err != nil {
+	// Apply the existing mapping and assign ports. The normalizer preserves
+	// ports from portMap, skips ports owned by other runtimes, and assigns
+	// fresh, bind-checked ports to the rest.
+	var reservedPorts map[uint16]struct{}
+	if m.reservedPorts != nil {
+		reservedPorts = m.reservedPorts()
+	}
+	if err := newCfg.NormalizeWithPortMapExcluding(portMap, reservedPorts); err != nil {
 		return fmt.Errorf("使用端口映射规范化配置失败: %w", err)
 	}
 
@@ -1307,6 +1316,11 @@ func (m *Manager) portInUseLocked(port uint16, currentName string) bool {
 	if port == 0 {
 		return false
 	}
+	if m.reservedPorts != nil {
+		if _, reserved := m.reservedPorts()[port]; reserved {
+			return true
+		}
+	}
 	cfg := m.sourceConfigLocked()
 	if cfg == nil {
 		return false
@@ -1332,6 +1346,11 @@ func (m *Manager) nextAvailablePortLocked() uint16 {
 		return base
 	}
 	used := make(map[uint16]struct{}, len(cfg.Nodes))
+	if m.reservedPorts != nil {
+		for port := range m.reservedPorts() {
+			used[port] = struct{}{}
+		}
+	}
 	for _, node := range cfg.Nodes {
 		if node.Port > 0 {
 			used[node.Port] = struct{}{}

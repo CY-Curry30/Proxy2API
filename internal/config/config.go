@@ -1153,6 +1153,14 @@ func (c *Config) applyPersistedPorts() error {
 // NormalizeWithPortMap applies defaults and validation, preserving port assignments
 // for nodes that exist in the provided port map.
 func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
+	return c.NormalizeWithPortMapExcluding(portMap, nil)
+}
+
+// NormalizeWithPortMapExcluding is the port-normalization variant used by
+// project runtimes. reservedPorts contains node/listener ports owned by other
+// projects and is treated as unavailable even when the other project is
+// currently stopped and the OS socket is free.
+func (c *Config) NormalizeWithPortMapExcluding(portMap map[string]uint16, reservedPorts map[uint16]struct{}) error {
 	if c.Mode == "" {
 		c.Mode = "pool"
 	}
@@ -1221,6 +1229,11 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 	if c.Mode == "hybrid" {
 		usedPorts[c.Listener.Port] = true
 	}
+	for port := range reservedPorts {
+		if port > 0 {
+			usedPorts[port] = true
+		}
+	}
 
 	// First pass: assign ports from portMap for existing nodes
 	preservedPorts := 0
@@ -1239,6 +1252,12 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 		if c.Nodes[idx].Name == "" {
 			c.Nodes[idx].Name = fmt.Sprintf("node-%d", idx)
 		}
+		// A project may have restored a port that is now registered by
+		// another project. Clear it before the second pass can assign a
+		// replacement; otherwise the stale value would bypass allocation.
+		if _, reserved := reservedPorts[c.Nodes[idx].Port]; reserved {
+			c.Nodes[idx].Port = 0
+		}
 
 		// Check if this node has a preserved port from portMap. Guard against a
 		// port that was already claimed by an earlier node sharing the same
@@ -1250,6 +1269,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 			nodeKey := c.Nodes[idx].NodeKey()
 			if existingPort, ok := portMap[nodeKey]; ok && existingPort > 0 {
 				if usedPorts[existingPort] {
+					c.Nodes[idx].Port = 0
 					duplicatePortHits++
 				} else {
 					c.Nodes[idx].Port = existingPort

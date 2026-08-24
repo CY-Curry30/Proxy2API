@@ -139,6 +139,22 @@ func (r *PortRegistry) Release(projectID string) {
 	}
 }
 
+// ReservedPorts returns a snapshot of every port owned by another project or
+// service. The current project's own ports are excluded so reloads can retain
+// stable node assignments.
+func (r *PortRegistry) ReservedPorts(projectID string) map[uint16]struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	reserved := make(map[uint16]struct{}, len(r.owners))
+	for port, owner := range r.owners {
+		if owner.Project != projectID {
+			reserved[port] = struct{}{}
+		}
+	}
+	return reserved
+}
+
 func (r *PortRegistry) NextAvailable(start uint16) (uint16, error) {
 	if start == 0 {
 		start = 1
