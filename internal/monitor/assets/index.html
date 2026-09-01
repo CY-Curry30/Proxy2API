@@ -920,6 +920,7 @@
                   <th>延迟 / 质量</th>
                   <th>连接</th>
                   <th>请求成功率</th>
+                  <th>探测时间</th>
                   <th>操作</th>
                 </tr>
               </thead>
@@ -3305,6 +3306,7 @@
           </td>
           <td class="tt-mono">${n.active_connections||0}</td>
           <td class="tt-mono" style="color:${successRate === null ? 'var(--text-muted)' : (successRate >= 90 ? 'var(--success)' : (successRate >= 70 ? 'var(--warning)' : 'var(--error)'))}" title="请求成功 ${n.success_count||0} / 请求失败 ${n.failure_count||0}">${successRate === null ? '-' : successRate.toFixed(1)+'%'}</td>
+          <td class="tt-mono" style="white-space:nowrap" title="${escapeHtml(formatDateTime(n.last_probed_at))}">${escapeHtml(formatDateTime(n.last_probed_at))}</td>
           <td>
             <button class="btn btn-sm" onclick="probeNode('${escapeAttrJs(n.tag)}')">探测</button>
             ${stickyNodeTag === n.tag

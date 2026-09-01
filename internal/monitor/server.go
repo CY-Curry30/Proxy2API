@@ -1190,6 +1190,7 @@ func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
 			"success_count":      snap.SuccessCount,
 			"active_connections": snap.ActiveConnections,
 			"last_latency_ms":    snap.LastLatencyMs,
+			"last_probed_at":     snap.LastProbedAt,
 			"last_success":       snap.LastSuccess,
 			"last_failure":       snap.LastFailure,
 			"last_error":         snap.LastError,

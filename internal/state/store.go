@@ -65,6 +65,7 @@ type NodeRecord struct {
 	LastError        string          `json:"last_error,omitempty"`
 	LastFailure      time.Time       `json:"last_failure,omitempty"`
 	LastSuccess      time.Time       `json:"last_success,omitempty"`
+	LastProbedAt     time.Time       `json:"last_probed_at,omitempty"`
 	LastProbeLatency time.Duration   `json:"last_probe_latency,omitempty"`
 	InitialCheckDone bool            `json:"initial_check_done"`
 	Available        bool            `json:"available"`
@@ -433,6 +434,7 @@ func mergeNodeRuntime(target *NodeRecord, existing NodeRecord) {
 	target.LastError = existing.LastError
 	target.LastFailure = existing.LastFailure
 	target.LastSuccess = existing.LastSuccess
+	target.LastProbedAt = existing.LastProbedAt
 	target.LastProbeLatency = existing.LastProbeLatency
 	target.InitialCheckDone = existing.InitialCheckDone
 	target.Available = existing.Available

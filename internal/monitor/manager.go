@@ -80,6 +80,7 @@ type Snapshot struct {
 	LastError         string          `json:"last_error,omitempty"`
 	LastFailure       time.Time       `json:"last_failure,omitempty"`
 	LastSuccess       time.Time       `json:"last_success,omitempty"`
+	LastProbedAt      time.Time       `json:"last_probed_at,omitempty"`
 	LastProbeLatency  time.Duration   `json:"last_probe_latency,omitempty"`
 	LastLatencyMs     int64           `json:"last_latency_ms"`
 	Available         bool            `json:"available"`
@@ -123,6 +124,7 @@ type entry struct {
 	lastError         string
 	lastFail          time.Time
 	lastOK            time.Time
+	lastProbedAt      time.Time
 	lastProbe         time.Duration
 	active            atomic.Int32
 	probe             probeFunc
@@ -1216,6 +1218,7 @@ func (e *entry) snapshot() Snapshot {
 		LastError:         e.lastError,
 		LastFailure:       e.lastFail,
 		LastSuccess:       e.lastOK,
+		LastProbedAt:      e.lastProbedAt,
 		LastProbeLatency:  e.lastProbe,
 		LastLatencyMs:     latencyMs,
 		Available:         e.available,
@@ -1237,6 +1240,7 @@ func (e *entry) restore(record state.NodeRecord) {
 	e.lastError = record.LastError
 	e.lastFail = record.LastFailure
 	e.lastOK = record.LastSuccess
+	e.lastProbedAt = record.LastProbedAt
 	e.lastProbe = record.LastProbeLatency
 	e.initialCheckDone = record.InitialCheckDone
 	e.available = record.Available && !record.Blacklisted
@@ -1271,6 +1275,7 @@ func (e *entry) stateRecordLocked() state.NodeRecord {
 		ConsecutiveFails: e.consecutiveFails,
 		Blacklisted:      e.blacklist, BlacklistedUntil: e.until,
 		LastError: e.lastError, LastFailure: e.lastFail, LastSuccess: e.lastOK,
+		LastProbedAt:     e.lastProbedAt,
 		LastProbeLatency: e.lastProbe, InitialCheckDone: e.initialCheckDone,
 		Available: e.available, Timeline: timeline, LastSeen: time.Now().UTC(),
 	}
@@ -1301,6 +1306,7 @@ func (e *entry) applyProbeResult(result ProbeResult, err error, availabilityEpoc
 	defer e.mu.Unlock()
 	defer e.persistLocked(true)
 	e.initialCheckDone = true
+	e.lastProbedAt = time.Now()
 	e.applyProbeProgressLocked(result)
 
 	healthy := err == nil && result.ConnectivityOK && result.TraceOK
