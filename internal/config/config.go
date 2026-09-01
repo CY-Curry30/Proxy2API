@@ -803,7 +803,17 @@ func (c *Config) normalize() error {
 	}
 
 	// Load nodes from file if specified (but NOT if subscriptions exist - subscription takes priority)
-	if c.NodesFile != "" && len(c.Subscriptions) == 0 {
+	//
+	// A project migrated to the shared source catalog has an empty Subscriptions
+	// list in its own YAML — the URLs live in shared.yaml and are overlaid by
+	// loadProjectWithShared before normalize runs. Its selected/excluded lists are
+	// what mark it as subscription-driven, so they suppress this branch too.
+	// Without that, loading such a project standalone reads the
+	// subscription-owned nodes.txt as manual nodes_file nodes.
+	subscriptionDriven := len(c.Subscriptions) > 0 ||
+		len(c.SelectedSubscriptions) > 0 ||
+		len(c.ExcludedSubscriptions) > 0
+	if c.NodesFile != "" && !subscriptionDriven {
 		fileNodes, err := loadNodesFromFile(c.NodesFile)
 		if err != nil {
 			return fmt.Errorf("从节点文件 %q 加载节点失败: %w", c.NodesFile, err)

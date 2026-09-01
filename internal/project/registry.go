@@ -140,6 +140,14 @@ func migrateSharedSources(workspace *config.Workspace) error {
 
 	changed := !sharedExists
 	rewriteProjectConfigs := !workspace.SharedSourcesMigrated || !sharedExists
+	// Adopting project-owned sources into the shared catalog is a one-time
+	// migration step, so it is gated on the same condition that rewrites the
+	// project configs. Repeating it on every boot re-adopts each project's
+	// nodes.txt — a file owned and rewritten by subscription refreshes — as
+	// manual inline nodes in shared.yaml. Those copies are then handed back to
+	// every project on the next start, appearing as manual duplicates of the
+	// real subscription nodes and accumulating on each run.
+	adoptProjectSources := rewriteProjectConfigs
 	knownURLs := make(map[string]struct{}, len(shared.Subscriptions))
 	for _, rawURL := range shared.Subscriptions {
 		knownURLs[rawURL] = struct{}{}
@@ -163,40 +171,54 @@ func migrateSharedSources(workspace *config.Workspace) error {
 		if err != nil {
 			return fmt.Errorf("迁移共享配置时加载项目 %q 失败: %w", id, err)
 		}
-		for _, rawURL := range projectCfg.Subscriptions {
-			if _, exists := knownURLs[rawURL]; exists {
-				continue
-			}
-			knownURLs[rawURL] = struct{}{}
-			shared.Subscriptions = append(shared.Subscriptions, rawURL)
-			changed = true
-		}
-		for _, rawURL := range projectCfg.DisabledSubscriptions {
-			if !containsString(shared.DisabledSubscriptions, rawURL) {
-				shared.DisabledSubscriptions = append(shared.DisabledSubscriptions, rawURL)
+		if adoptProjectSources {
+			for _, rawURL := range projectCfg.Subscriptions {
+				if _, exists := knownURLs[rawURL]; exists {
+					continue
+				}
+				knownURLs[rawURL] = struct{}{}
+				shared.Subscriptions = append(shared.Subscriptions, rawURL)
 				changed = true
 			}
-		}
-		for _, node := range projectCfg.Nodes {
-			if node.Source == config.NodeSourceSubscription {
-				continue
+			for _, rawURL := range projectCfg.DisabledSubscriptions {
+				if !containsString(shared.DisabledSubscriptions, rawURL) {
+					shared.DisabledSubscriptions = append(shared.DisabledSubscriptions, rawURL)
+					changed = true
+				}
 			}
-			key := node.NodeKey()
-			if key == "" {
-				continue
+			// A project that participates in any subscription does not own its
+			// nodes file: subscription refreshes rewrite nodes.txt wholesale. Only
+			// nodes written by hand into the project YAML may become shared inline
+			// nodes; adopting file-sourced ones would relabel subscription nodes as
+			// manual. Judged per project so a subscription-free project keeps its
+			// hand-maintained nodes file.
+			subscriptionManaged := len(projectCfg.Subscriptions) > 0 ||
+				len(projectCfg.SelectedSubscriptions) > 0 ||
+				len(projectCfg.ExcludedSubscriptions) > 0
+			for _, node := range projectCfg.Nodes {
+				if node.Source == config.NodeSourceSubscription {
+					continue
+				}
+				if subscriptionManaged && node.Source == config.NodeSourceFile {
+					continue
+				}
+				key := node.NodeKey()
+				if key == "" {
+					continue
+				}
+				if _, exists := knownNodes[key]; exists {
+					continue
+				}
+				knownNodes[key] = struct{}{}
+				node.Source = config.NodeSourceInline
+				node.SubscriptionURL = ""
+				node.StateKey = ""
+				node.Port = 0
+				node.Username = ""
+				node.Password = ""
+				shared.Nodes = append(shared.Nodes, node)
+				changed = true
 			}
-			if _, exists := knownNodes[key]; exists {
-				continue
-			}
-			knownNodes[key] = struct{}{}
-			node.Source = config.NodeSourceInline
-			node.SubscriptionURL = ""
-			node.StateKey = ""
-			node.Port = 0
-			node.Username = ""
-			node.Password = ""
-			shared.Nodes = append(shared.Nodes, node)
-			changed = true
 		}
 
 		targetPath, err := workspace.NewProjectConfigPath(id)
