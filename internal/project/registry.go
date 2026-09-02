@@ -271,6 +271,35 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+func appendUniqueString(values []string, value string) []string {
+	if value == "" || containsString(values, value) {
+		return values
+	}
+	return append(values, value)
+}
+
+func removeStringValue(values []string, value string) []string {
+	filtered := make([]string, 0, len(values))
+	for _, existing := range values {
+		if existing != value {
+			filtered = append(filtered, existing)
+		}
+	}
+	return filtered
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *Registry) DefaultProjectID() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -1233,6 +1262,103 @@ func (r *Registry) ReloadSharedSources(ctx context.Context) error {
 		}
 	}
 	return errors.Join(reloadErrors...)
+}
+
+// ApplySharedSubscriptionMembership attaches a shared subscription to the
+// projects listed in include and detaches it from those listed in exclude.
+// Projects absent from both lists keep their current relationship, so callers
+// can leave membership unspecified. Writes are all-or-nothing: a failure rolls
+// back every project already saved in this call.
+func (r *Registry) ApplySharedSubscriptionMembership(rawURL string, include, exclude []string) error {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" || (len(include) == 0 && len(exclude) == 0) {
+		return nil
+	}
+	desired := make(map[string]bool, len(include)+len(exclude))
+	for _, id := range exclude {
+		if id = strings.TrimSpace(id); id != "" {
+			desired[id] = false
+		}
+	}
+	// Inclusion wins when an id appears in both lists.
+	for _, id := range include {
+		if id = strings.TrimSpace(id); id != "" {
+			desired[id] = true
+		}
+	}
+	if len(desired) == 0 {
+		return nil
+	}
+
+	r.catalogMu.Lock()
+	defer r.catalogMu.Unlock()
+	r.mu.RLock()
+	runtimes := make(map[string]*Runtime, len(desired))
+	for id := range desired {
+		if runtime, ok := r.runtimes[id]; ok {
+			runtimes[id] = runtime
+		}
+	}
+	r.mu.RUnlock()
+
+	ids := make([]string, 0, len(desired))
+	for id := range desired {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	updates := make([]subscriptionReferenceUpdate, 0, len(ids))
+	for _, id := range ids {
+		runtime, ok := runtimes[id]
+		if !ok {
+			return fmt.Errorf("项目 %q 不存在", id)
+		}
+		cfg, err := config.LoadSettingsReadOnly(runtime.configPath)
+		if err != nil {
+			return fmt.Errorf("加载项目 %q 的订阅关联失败: %w", id, err)
+		}
+		before := *cfg
+		before.SelectedSubscriptions = append([]string(nil), cfg.SelectedSubscriptions...)
+		before.ExcludedSubscriptions = append([]string(nil), cfg.ExcludedSubscriptions...)
+		selected := append([]string(nil), cfg.SelectedSubscriptions...)
+		excluded := append([]string(nil), cfg.ExcludedSubscriptions...)
+		if desired[id] {
+			// An empty selection means "all subscriptions", so it already covers
+			// this URL and must stay empty to keep inheriting future additions.
+			if len(selected) > 0 {
+				selected = appendUniqueString(selected, rawURL)
+			}
+			excluded = removeStringValue(excluded, rawURL)
+		} else {
+			selected = removeStringValue(selected, rawURL)
+			excluded = appendUniqueString(excluded, rawURL)
+		}
+		if equalStringSlices(selected, cfg.SelectedSubscriptions) &&
+			equalStringSlices(excluded, cfg.ExcludedSubscriptions) {
+			continue
+		}
+		cfg.SelectedSubscriptions = selected
+		cfg.ExcludedSubscriptions = excluded
+		updates = append(updates, subscriptionReferenceUpdate{runtime: runtime, before: &before, after: cfg})
+	}
+
+	saved := make([]subscriptionReferenceUpdate, 0, len(updates))
+	for _, update := range updates {
+		if err := update.after.SaveSettings(); err != nil {
+			rollbackErrors := []error{fmt.Errorf("保存项目订阅关联失败: %w", err)}
+			for index := len(saved) - 1; index >= 0; index-- {
+				if rollbackErr := saved[index].before.SaveSettings(); rollbackErr != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("回滚项目订阅关联失败: %w", rollbackErr))
+				}
+			}
+			return errors.Join(rollbackErrors...)
+		}
+		saved = append(saved, update)
+	}
+	for _, update := range updates {
+		update.runtime.setSubscriptionReferences(update.after.SelectedSubscriptions, update.after.ExcludedSubscriptions)
+	}
+	return nil
 }
 
 type subscriptionReferenceUpdate struct {

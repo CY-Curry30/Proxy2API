@@ -188,6 +188,7 @@ type ProjectController interface {
 	ReloadProjectSources(ctx context.Context, id string) error
 	ReloadSharedSources(ctx context.Context) error
 	RewriteSharedSubscriptionReferences(oldURL, newURL string) error
+	ApplySharedSubscriptionMembership(rawURL string, include, exclude []string) error
 	SystemSettings() SystemSettings
 	UpdateSystemSettings(ctx context.Context, settings SystemSettings) error
 }

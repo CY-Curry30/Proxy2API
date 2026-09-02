@@ -445,7 +445,7 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) {
 	for _, e := range entries {
 		e.mu.Lock()
 		e.suppressed = !enabled
-		e.persistLocked(true)
+		e.persistLocked(false) // 批量 suppress 异步持久化，避免循环中的同步写竞争
 		e.mu.Unlock()
 	}
 }
@@ -1304,7 +1304,7 @@ func (e *entry) currentAvailabilityEpoch() uint64 {
 func (e *entry) applyProbeResult(result ProbeResult, err error, availabilityEpoch uint64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	defer e.persistLocked(true)
+	defer e.persistLocked(false) // 探测结果异步持久化，避免阻塞探测协程
 	e.initialCheckDone = true
 	e.lastProbedAt = time.Now()
 	e.applyProbeProgressLocked(result)

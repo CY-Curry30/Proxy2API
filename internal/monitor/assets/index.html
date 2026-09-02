@@ -1266,6 +1266,19 @@
             <input type="url" id="subscriptionURL" class="subscription-url-input" required placeholder="https://example.com/subscribe" />
           </div>
           <input type="hidden" id="subscriptionOriginalURL" />
+          <div id="subscriptionProjectSection" style="display:none;">
+            <div class="form-section-title">关联项目</div>
+            <div class="checkbox-row" style="margin-bottom:12px;">
+              <input type="checkbox" id="subscriptionAssignProjects" onchange="toggleSubscriptionProjectPicker()" />
+              <label for="subscriptionAssignProjects">指定使用该订阅的项目</label>
+            </div>
+            <div id="subscriptionProjectPicker" style="display:none;">
+              <div class="checkbox-grid" id="subscriptionProjectCheckboxes" style="max-height:200px; overflow-y:auto;">
+                <!-- Populated dynamically -->
+              </div>
+            </div>
+            <em id="subscriptionProjectHint" style="font-size:11px;color:var(--text-muted);"></em>
+          </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn" onclick="document.getElementById('subscriptionModalOverlay').classList.remove('show')">取消</button>
@@ -3701,7 +3714,43 @@
         : (currentProjectID ? '添加全局订阅并加入当前项目' : '添加全局订阅');
       document.getElementById('subscriptionURL').value = rawURL;
       document.getElementById('subscriptionOriginalURL').value = rawURL;
+      // Project binding only applies when adding a new global subscription.
+      // Edits are global by nature, and project scope already joins the
+      // current project automatically.
+      const section = document.getElementById('subscriptionProjectSection');
+      const showPicker = !rawURL && !currentProjectID;
+      section.style.display = showPicker ? 'block' : 'none';
+      if (showPicker) {
+        document.getElementById('subscriptionAssignProjects').checked = false;
+        populateSubscriptionProjectCheckboxes();
+        toggleSubscriptionProjectPicker();
+      }
       document.getElementById('subscriptionModalOverlay').classList.add('show');
+    }
+
+    function populateSubscriptionProjectCheckboxes() {
+      const grid = document.getElementById('subscriptionProjectCheckboxes');
+      const projects = Array.isArray(projectsCache) ? projectsCache : [];
+      if (!projects.length) {
+        grid.innerHTML = '<em style="font-size:12px;color:var(--text-muted);">暂无项目</em>';
+        return;
+      }
+      grid.innerHTML = projects.map((project, index) => {
+        const id = `subproj-${index}`;
+        const name = project.name || project.id;
+        return `<div class="checkbox-row" title="${escapeHtml(project.id)}">
+          <input type="checkbox" id="${id}" value="${escapeHtml(project.id)}" />
+          <label for="${id}">${escapeHtml(name)}</label>
+        </div>`;
+      }).join('');
+    }
+
+    function toggleSubscriptionProjectPicker() {
+      const assign = document.getElementById('subscriptionAssignProjects').checked;
+      document.getElementById('subscriptionProjectPicker').style.display = assign ? 'block' : 'none';
+      document.getElementById('subscriptionProjectHint').textContent = assign
+        ? '仅勾选的项目会使用该订阅，其余项目将被显式排除。'
+        : '不改动项目关联：已设置为加载全部订阅的项目仍会自动使用该订阅。';
     }
 
     async function handleSubscriptionSubmit(event) {
@@ -3714,11 +3763,19 @@
         originalURL ? '修改订阅中...' : '添加订阅中...',
         project ? '正在更新项目节点池' : '正在保存全局订阅定义'
       );
+      const payload = {url, original_url: originalURL, scope: currentProjectID ? 'project' : 'global'};
+      // Omitting projects entirely means "leave every project untouched"; an
+      // explicit array is authoritative, including when it is empty.
+      if (!originalURL && !currentProjectID && document.getElementById('subscriptionAssignProjects').checked) {
+        payload.projects = Array.from(
+          document.querySelectorAll('#subscriptionProjectCheckboxes input[type="checkbox"]')
+        ).filter(checkbox => checkbox.checked).map(checkbox => checkbox.value);
+      }
       try {
         const response = await fetch(globalScopePath('/api/subscriptions'), {
           method: originalURL ? 'PUT' : 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({url, original_url: originalURL, scope: currentProjectID ? 'project' : 'global'})
+          body: JSON.stringify(payload)
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || '保存失败');

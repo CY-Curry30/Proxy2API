@@ -395,6 +395,41 @@ func (s *Server) setCurrentProjectSubscriptionIncluded(rawURL string, included b
 	return nil
 }
 
+// resolveSubscriptionProjectMembership splits every known project into the ones
+// that should receive rawURL and the ones that should be kept away from it. The
+// requested list is authoritative, so projects that load all subscriptions are
+// explicitly excluded when they are not part of the selection.
+func (s *Server) resolveSubscriptionProjectMembership(requested []string) (include, exclude []string, err error) {
+	if s.projects == nil {
+		return nil, nil, errors.New("项目管理未启用")
+	}
+	known := make(map[string]struct{})
+	order := make([]string, 0)
+	for _, project := range s.projects.ListProjects() {
+		known[project.ID] = struct{}{}
+		order = append(order, project.ID)
+	}
+	wanted := make(map[string]struct{}, len(requested))
+	for _, id := range requested {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := known[id]; !ok {
+			return nil, nil, fmt.Errorf("项目 %q 不存在", id)
+		}
+		wanted[id] = struct{}{}
+	}
+	for _, id := range order {
+		if _, ok := wanted[id]; ok {
+			include = append(include, id)
+			continue
+		}
+		exclude = append(exclude, id)
+	}
+	return include, exclude, nil
+}
+
 func (s *Server) setCurrentProjectNodeIncluded(node config.NodeConfig, included bool) error {
 	return s.setCurrentProjectNodesIncluded([]config.NodeConfig{node}, included)
 }
@@ -2273,6 +2308,11 @@ type subscriptionMutationRequest struct {
 	Enabled      *bool  `json:"enabled,omitempty"`
 	DeleteGlobal *bool  `json:"delete_global,omitempty"`
 	Scope        string `json:"scope,omitempty"`
+	// Projects optionally binds a newly added global subscription to a specific
+	// set of projects. A nil value leaves every project's membership untouched,
+	// while a non-nil value is authoritative: listed projects are attached and
+	// all others are explicitly detached.
+	Projects *[]string `json:"projects,omitempty"`
 }
 
 func validateSubscriptionURL(rawURL string) error {
@@ -2318,7 +2358,16 @@ func (s *Server) effectiveSubscriptionURLs(urls []string) []string {
 	return effective
 }
 
-func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval time.Duration, globalScope bool, referenceOldURL, referenceNewURL string, refreshURLs ...string) error {
+// subscriptionMembership carries an explicit project binding for a subscription
+// that is being added to the shared catalog. A nil pointer means membership was
+// not specified and no project file is touched.
+type subscriptionMembership struct {
+	url     string
+	include []string
+	exclude []string
+}
+
+func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval time.Duration, globalScope bool, referenceOldURL, referenceNewURL string, membership *subscriptionMembership, refreshURLs ...string) error {
 	urls = append([]string(nil), urls...)
 	sharedLock := s.sharedSourceLock()
 	sharedLock.Lock()
@@ -2359,6 +2408,19 @@ func (s *Server) applySubscriptionConfig(urls []string, enabled bool, interval t
 			rollbackErr := shared.SaveSettings()
 			sharedLock.Unlock()
 			return errors.Join(fmt.Errorf("更新项目订阅关联失败: %w", err), rollbackErr)
+		}
+	}
+
+	// Project membership is persisted after the catalog so a reload below picks
+	// the new bindings up from disk.
+	if membership != nil && s.projects != nil {
+		if err := s.projects.ApplySharedSubscriptionMembership(membership.url, membership.include, membership.exclude); err != nil {
+			sharedLock.Lock()
+			shared.Subscriptions = previousURLs
+			shared.DisabledSubscriptions = previousDisabled
+			rollbackErr := shared.SaveSettings()
+			sharedLock.Unlock()
+			return errors.Join(fmt.Errorf("绑定项目订阅失败: %w", err), rollbackErr)
 		}
 	}
 
@@ -2574,6 +2636,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		globalScope := strings.EqualFold(strings.TrimSpace(req.Scope), "global") || !s.hasProjectScope()
 		var refreshURLs []string
 		var referenceOldURL, referenceNewURL string
+		var membership *subscriptionMembership
 
 		switch r.Method {
 		case http.MethodPost:
@@ -2590,12 +2653,23 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			urls = append(urls, req.URL)
-			if !globalScope {
-				if err := s.setCurrentProjectSubscriptionIncluded(req.URL, true, urls); err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					writeJSON(w, map[string]any{"error": err.Error()})
-					return
+			if globalScope {
+				// A nil Projects field keeps the previous behaviour: the
+				// subscription only joins the catalog and projects that load
+				// every subscription pick it up on their own.
+				if req.Projects != nil {
+					include, exclude, err := s.resolveSubscriptionProjectMembership(*req.Projects)
+					if err != nil {
+						w.WriteHeader(http.StatusBadRequest)
+						writeJSON(w, map[string]any{"error": err.Error()})
+						return
+					}
+					membership = &subscriptionMembership{url: req.URL, include: include, exclude: exclude}
 				}
+			} else if err := s.setCurrentProjectSubscriptionIncluded(req.URL, true, urls); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				writeJSON(w, map[string]any{"error": err.Error()})
+				return
 			}
 			refreshURLs = []string{req.URL}
 		case http.MethodPut:
@@ -2712,7 +2786,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := s.applySubscriptionConfig(urls, enabled, interval, globalScope, referenceOldURL, referenceNewURL, refreshURLs...); err != nil {
+		if err := s.applySubscriptionConfig(urls, enabled, interval, globalScope, referenceOldURL, referenceNewURL, membership, refreshURLs...); err != nil {
 			writeJSON(w, map[string]any{"message": "订阅配置已保存，但刷新失败", "refresh_error": err.Error()})
 			return
 		}
