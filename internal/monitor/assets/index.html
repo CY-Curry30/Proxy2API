@@ -3276,7 +3276,11 @@
         if (n.blacklisted) {
           badge = 'badge-error';
           statusText = '拉黑 Blocked';
+          const unblockTime = n.blacklisted_until ? formatDateTime(n.blacklisted_until) : '';
           statusTitle = n.last_error || '节点已被拉黑';
+          if (unblockTime && unblockTime !== '-') {
+            statusTitle += `\n解除拉黑时间：${unblockTime}`;
+          }
         } else if (!n.initial_check_done) {
           badge = 'badge-offline';
           statusText = '未测试 Unknown';
