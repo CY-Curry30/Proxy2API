@@ -31,6 +31,22 @@ func GetSystemPortsInUse() ([]SystemPortInfo, error) {
 	return parseNetstatLinuxOutput(string(output))
 }
 
+// GetSystemPortSet returns listening ports without any process metadata.
+func GetSystemPortSet() (map[uint16]struct{}, error) {
+	cmd := exec.Command("ss", "-lntp")
+	output, err := cmd.Output()
+	if err == nil {
+		return parseSSPortSet(string(output)), nil
+	}
+
+	cmd = exec.Command("netstat", "-lntp")
+	output, err = cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("执行 ss/netstat 失败: %w", err)
+	}
+	return parseNetstatLinuxPortSet(string(output)), nil
+}
+
 // parseSSOutput parses the output of ss -lntp. Process metadata is optional:
 // ss omits it when the caller lacks permission, but the listening port is still
 // useful and must remain visible.
@@ -93,6 +109,34 @@ func parseNetstatLinuxOutput(output string) ([]SystemPortInfo, error) {
 
 	sort.Slice(ports, func(i, j int) bool { return ports[i].Port < ports[j].Port })
 	return ports, nil
+}
+
+func parseSSPortSet(output string) map[uint16]struct{} {
+	ports := make(map[uint16]struct{})
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || !strings.EqualFold(fields[0], "LISTEN") {
+			continue
+		}
+		if port, ok := parseUnixEndpointPort(fields[3]); ok {
+			ports[port] = struct{}{}
+		}
+	}
+	return ports
+}
+
+func parseNetstatLinuxPortSet(output string) map[uint16]struct{} {
+	ports := make(map[uint16]struct{})
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 || !strings.HasPrefix(strings.ToLower(fields[0]), "tcp") || !strings.EqualFold(fields[5], "LISTEN") {
+			continue
+		}
+		if port, ok := parseUnixEndpointPort(fields[3]); ok {
+			ports[port] = struct{}{}
+		}
+	}
+	return ports
 }
 
 func parseUnixEndpointPort(endpoint string) (uint16, bool) {

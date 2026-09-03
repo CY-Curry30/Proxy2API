@@ -159,9 +159,10 @@ func (r *PortRegistry) NextAvailable(start uint16) (uint16, error) {
 	if start == 0 {
 		start = 1
 	}
+	systemPorts := currentSystemPortSet()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	port := r.nextAvailableLocked(start, nil)
+	port := r.nextAvailableWithHostLocked(start, nil, systemPorts)
 	if port == 0 {
 		return 0, fmt.Errorf("从 %d 开始没有可用端口", start)
 	}
@@ -171,6 +172,7 @@ func (r *PortRegistry) NextAvailable(start uint16) (uint16, error) {
 // CreationHints returns one consistent ownership snapshot and three distinct
 // ports that are currently available for a new project.
 func (r *PortRegistry) CreationHints() (map[uint16]portOwner, portRecommendations) {
+	systemPorts := currentSystemPortSet()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -182,11 +184,11 @@ func (r *PortRegistry) CreationHints() (map[uint16]portOwner, portRecommendation
 	}
 
 	selected := make(map[uint16]struct{}, 3)
-	listenerPort := r.nextAvailableLocked(2323, selected)
+	listenerPort := r.nextAvailableWithHostLocked(2323, selected, systemPorts)
 	if listenerPort != 0 {
 		selected[listenerPort] = struct{}{}
 	}
-	multiPortBase := r.nextAvailableLocked(24000, selected)
+	multiPortBase := r.nextAvailableWithHostLocked(24000, selected, systemPorts)
 	if multiPortBase != 0 {
 		selected[multiPortBase] = struct{}{}
 	}
@@ -194,7 +196,7 @@ func (r *PortRegistry) CreationHints() (map[uint16]portOwner, portRecommendation
 	if listenerPort > 0 && listenerPort < 65535 {
 		stickyStart = listenerPort + 1
 	}
-	stickyPort := r.nextAvailableLocked(stickyStart, selected)
+	stickyPort := r.nextAvailableWithHostLocked(stickyStart, selected, systemPorts)
 
 	return owners, portRecommendations{
 		ListenerPort:  listenerPort,
@@ -204,6 +206,10 @@ func (r *PortRegistry) CreationHints() (map[uint16]portOwner, portRecommendation
 }
 
 func (r *PortRegistry) nextAvailableLocked(start uint16, excluded map[uint16]struct{}) uint16 {
+	return r.nextAvailableWithHostLocked(start, excluded, nil)
+}
+
+func (r *PortRegistry) nextAvailableWithHostLocked(start uint16, excluded, systemPorts map[uint16]struct{}) uint16 {
 	if start == 0 {
 		start = 1
 	}
@@ -215,9 +221,20 @@ func (r *PortRegistry) nextAvailableLocked(start uint16, excluded map[uint16]str
 		if _, reserved := excluded[port]; reserved {
 			continue
 		}
+		if _, occupied := systemPorts[port]; occupied {
+			continue
+		}
 		if config.IsPortAvailable("0.0.0.0", port) {
 			return port
 		}
 	}
 	return 0
+}
+
+func currentSystemPortSet() map[uint16]struct{} {
+	ports, err := config.GetSystemPortSet()
+	if err != nil {
+		return nil
+	}
+	return ports
 }

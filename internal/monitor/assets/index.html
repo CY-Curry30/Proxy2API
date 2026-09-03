@@ -199,6 +199,8 @@
       vertical-align: middle;
       white-space: nowrap;
     }
+    .project-select-cell { width: 42px; text-align: center !important; }
+    .project-select-cell input { margin: 0; }
     .project-table th {
       color: var(--text-muted);
       font-size: 11px;
@@ -818,13 +820,17 @@
                 <div class="panel-title">项目列表</div>
                 <div class="table-tools">
                   <input id="projectSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索项目名称或 ID" aria-label="搜索项目" oninput="renderProjectManagement()" />
+                  <button class="btn btn-sm btn-danger" type="button" id="projectBatchDeleteBtn" onclick="deleteSelectedProjects()" disabled>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/></svg>
+                    <span id="projectBatchDeleteLabel">批量删除</span>
+                  </button>
                   <span class="badge badge-offline" id="projectTotalBadge">0 个项目</span>
                 </div>
               </div>
               <div class="project-table-wrap">
                 <table class="project-table">
                   <thead>
-                    <tr><th>项目</th><th>状态</th><th>模式</th><th>端口</th><th>节点 / 订阅</th><th>操作</th></tr>
+                    <tr><th class="project-select-cell"><input id="projectSelectAll" type="checkbox" onchange="toggleAllVisibleProjects(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>项目</th><th>状态</th><th>模式</th><th>端口</th><th>节点 / 订阅</th><th>操作</th></tr>
                   </thead>
                   <tbody id="projectTableBody"></tbody>
                 </table>
@@ -1438,6 +1444,8 @@
     let projectPortHintsCache = {occupied: [], recommended: {}};
     let editingProjectID = '';
     let deletingProjectID = '';
+    let deletingProjectIDs = [];
+    let selectedProjectIDs = new Set();
     let projectNonSubscriptionNodeIDs = [];
     let projectExcludedNodeIDs = new Set();
     const nativeFetch = window.fetch.bind(window);
@@ -1782,6 +1790,9 @@
         ? projectsCache.filter(project => [project.id, project.name]
           .some(value => String(value || '').toLowerCase().includes(query)))
         : projectsCache;
+      selectedProjectIDs.forEach(projectID => {
+        if (!projectsCache.some(project => project.id === projectID)) selectedProjectIDs.delete(projectID);
+      });
       const totalBadge = document.getElementById('projectTotalBadge');
       if (totalBadge) {
         totalBadge.textContent = query
@@ -1801,6 +1812,7 @@
           project.multi_port_base ? `<span>多端口 <code>${escapeHtml(projectEndpoint(project.multi_port_address, project.multi_port_base, '+'))}</code></span>` : ''
         ].filter(Boolean).join('') || '<span>-</span>';
         return `<tr class="${project.id === currentProjectID ? 'project-selected' : ''}" onclick="selectManagedProject('${projectID}')">
+          <td class="project-select-cell"><input type="checkbox" ${selectedProjectIDs.has(project.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleProjectSelection('${projectID}', this.checked)" aria-label="选择项目 ${escapeHtml(project.name || project.id)}" /></td>
           <td><div class="project-name"><strong>${escapeHtml(project.name)}</strong></div></td>
           <td><span class="badge ${statusView[0]}" title="${escapeHtml(project.last_error || '')}">${statusView[1]}</span></td>
           <td>${escapeHtml(projectModeLabel(project.mode))}</td>
@@ -1813,6 +1825,7 @@
           </div></td>
         </tr>`;
       }).join('');
+      syncProjectSelectionUI(visibleProjects);
 
       const project = currentProject();
       editButton.disabled = !project;
@@ -1845,6 +1858,41 @@
           <span class="badge ${statusView[0]}">${statusView[1]}</span>
         </div>
         <dl class="project-config-list">${configItems.map(item => `<div class="project-config-item"><dt>${escapeHtml(item[0])}</dt><dd>${escapeHtml(item[1])}</dd></div>`).join('')}</dl>`;
+    }
+
+    function toggleProjectSelection(projectID, checked) {
+      if (checked) selectedProjectIDs.add(projectID);
+      else selectedProjectIDs.delete(projectID);
+      renderProjectManagement();
+    }
+
+    function toggleAllVisibleProjects(checked) {
+      const query = (document.getElementById('projectSearchInput')?.value || '').trim().toLowerCase();
+      const visibleProjects = query
+        ? projectsCache.filter(project => [project.id, project.name]
+          .some(value => String(value || '').toLowerCase().includes(query)))
+        : projectsCache;
+      visibleProjects.forEach(project => {
+        if (checked) selectedProjectIDs.add(project.id);
+        else selectedProjectIDs.delete(project.id);
+      });
+      renderProjectManagement();
+    }
+
+    function syncProjectSelectionUI(visibleProjects) {
+      const selectAll = document.getElementById('projectSelectAll');
+      if (selectAll) {
+        const selectedVisible = visibleProjects.filter(project => selectedProjectIDs.has(project.id)).length;
+        selectAll.disabled = visibleProjects.length === 0;
+        selectAll.checked = visibleProjects.length > 0 && selectedVisible === visibleProjects.length;
+        selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleProjects.length;
+      }
+      const deleteButton = document.getElementById('projectBatchDeleteBtn');
+      if (deleteButton) {
+        deleteButton.disabled = selectedProjectIDs.size === 0;
+        const label = document.getElementById('projectBatchDeleteLabel');
+        if (label) label.textContent = selectedProjectIDs.size > 0 ? `批量删除（${selectedProjectIDs.size}）` : '批量删除';
+      }
     }
 
     async function loadProjects() {
@@ -2383,7 +2431,27 @@
       const project = projectsCache.find(item => item.id === projectID);
       if (!project) return;
       deletingProjectID = project.id;
+      deletingProjectIDs = [project.id];
       document.getElementById('deleteProjectName').textContent = project.name;
+      const deleteDataInput = document.getElementById('deleteProjectData');
+      deleteDataInput.checked = false;
+      deleteDataInput.disabled = false;
+      updateProjectDeleteChoice();
+      document.getElementById('projectDeleteModalOverlay').classList.add('show');
+    }
+
+    function deleteSelectedProjects() {
+      const selected = Array.from(selectedProjectIDs)
+        .map(projectID => projectsCache.find(project => project.id === projectID))
+        .filter(Boolean);
+      if (!selected.length) return;
+      deletingProjectID = '';
+      deletingProjectIDs = selected.map(project => project.id);
+      const names = selected.map(project => project.name || project.id);
+      const summary = names.length <= 3
+        ? names.join('、')
+        : `${names.slice(0, 3).join('、')} 等 ${names.length} 个项目`;
+      document.getElementById('deleteProjectName').textContent = summary;
       const deleteDataInput = document.getElementById('deleteProjectData');
       deleteDataInput.checked = false;
       deleteDataInput.disabled = false;
@@ -2393,6 +2461,7 @@
 
     function closeProjectDeleteModal() {
       deletingProjectID = '';
+      deletingProjectIDs = [];
       document.getElementById('projectDeleteModalOverlay').classList.remove('show');
     }
 
@@ -2400,38 +2469,62 @@
       const deleteData = document.getElementById('deleteProjectData').checked;
       const notice = document.getElementById('deleteProjectNotice');
       const button = document.getElementById('confirmProjectDeleteBtn');
+      const count = deletingProjectIDs.length || (deletingProjectID ? 1 : 0);
+      const batch = count > 1;
       notice.textContent = deleteData
-        ? '将永久删除项目配置、缓存、状态数据库和端口映射，无法恢复；节点和订阅不受影响。'
-        : '本地项目目录会保留，可用于检查或恢复；节点和订阅不受影响。再次创建同 ID 项目前需先处理原目录。';
+        ? `将永久删除${batch ? `选中的 ${count} 个项目` : '项目'}配置、缓存、状态数据库和端口映射，无法恢复；节点和订阅不受影响。`
+        : `本地${batch ? `选中的 ${count} 个项目` : '项目'}目录会保留，可用于检查或恢复；节点和订阅不受影响。再次创建同 ID 项目前需先处理原目录。`;
       notice.classList.toggle('danger', deleteData);
-      button.textContent = deleteData ? '删除项目及本地文件' : '仅移除项目';
+      button.textContent = deleteData
+        ? (batch ? `删除 ${count} 个项目及本地文件` : '删除项目及本地文件')
+        : (batch ? `仅移除 ${count} 个项目` : '仅移除项目');
     }
 
     async function confirmDeleteProject() {
-      const project = projectsCache.find(item => item.id === deletingProjectID);
-      if (!project) {
+      const projectIDs = (deletingProjectIDs.length ? deletingProjectIDs : [deletingProjectID]).filter(Boolean);
+      if (!projectIDs.length) {
         closeProjectDeleteModal();
         return;
       }
       const deleteData = document.getElementById('deleteProjectData').checked;
-      const deletingCurrent = project.id === currentProjectID;
       const button = document.getElementById('confirmProjectDeleteBtn');
       button.disabled = true;
+      const deletedNames = [];
+      let deletedCurrent = false;
+      const failures = [];
+      const warnings = [];
       try {
-        const response = await nativeFetch(`/api/projects/${encodeURIComponent(project.id)}?delete_data=${deleteData}`, {method:'DELETE'});
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || '删除项目失败');
+        for (const projectID of projectIDs) {
+          const project = projectsCache.find(item => item.id === projectID);
+          try {
+            const response = await nativeFetch(`/api/projects/${encodeURIComponent(projectID)}?delete_data=${deleteData}`, {method:'DELETE'});
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || '删除项目失败');
+            deletedNames.push(project?.name || projectID);
+            if (projectID === currentProjectID) deletedCurrent = true;
+            if (data.warning) warnings.push(`${project?.name || projectID}: ${data.warning}`);
+            selectedProjectIDs.delete(projectID);
+          } catch (error) {
+            failures.push(`${project?.name || projectID}: ${error.message || error}`);
+          }
+        }
         closeProjectDeleteModal();
         await loadProjects();
-        if (deletingCurrent) {
+        if (deletedCurrent) {
           resetProjectView();
           if (currentProject() && currentProject().status === 'running') await refresh();
         }
         renderProjectManagement();
-        if (data.warning) {
-          showToast(data.warning, 'error');
+        if (failures.length) {
+          const successText = deletedNames.length ? `已处理 ${deletedNames.length} 个项目` : '没有项目删除成功';
+          const warningText = warnings.length ? `；${warnings.join('；')}` : '';
+          showToast(`${successText}；${failures.length} 个失败：${failures.join('；')}${warningText}`, 'error');
+        } else if (warnings.length) {
+          showToast(`${deleteData ? '已处理' : '已移除'} ${deletedNames.length} 个项目，但有提示：${warnings.join('；')}`, 'error');
+        } else if (deleteData) {
+          showToast(`已删除 ${deletedNames.length} 个项目及本地文件`);
         } else {
-          showToast(data.data_deleted ? '项目及本地文件已删除' : '项目已移除，本地文件已保留');
+          showToast(`已移除 ${deletedNames.length} 个项目，本地文件已保留`);
         }
       } catch (error) {
         showToast(error.message, 'error');

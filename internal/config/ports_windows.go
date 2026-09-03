@@ -22,6 +22,18 @@ func GetSystemPortsInUse() ([]SystemPortInfo, error) {
 	return parseNetstatOutput(string(output))
 }
 
+// GetSystemPortSet returns the locally occupied ports without resolving
+// process names. It is used by port recommendations, where only occupancy is
+// needed and invoking tasklist for every PID would add unnecessary latency.
+func GetSystemPortSet() (map[uint16]struct{}, error) {
+	cmd := exec.Command("netstat", "-ano")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("执行 netstat 失败: %w", err)
+	}
+	return parseNetstatPortSet(string(output)), nil
+}
+
 // parseNetstatOutput parses the output of netstat -ano on Windows. TCP and UDP
 // entries are both included; a port is reported once even when it has multiple
 // local addresses or connections.
@@ -65,6 +77,20 @@ func parseNetstatOutput(output string) ([]SystemPortInfo, error) {
 
 	sort.Slice(ports, func(i, j int) bool { return ports[i].Port < ports[j].Port })
 	return ports, nil
+}
+
+func parseNetstatPortSet(output string) map[uint16]struct{} {
+	ports := make(map[uint16]struct{})
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || (fields[0] != "TCP" && fields[0] != "UDP") {
+			continue
+		}
+		if port, ok := parseNetstatEndpointPort(fields[1]); ok {
+			ports[port] = struct{}{}
+		}
+	}
+	return ports
 }
 
 func parseNetstatEndpointPort(endpoint string) (uint16, bool) {
