@@ -197,6 +197,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/projects/", s.withAuth(s.handleProjectRoute))
 	mux.HandleFunc("/api/dashboard/global", s.withAuth(s.handleGlobalDashboard))
 	mux.HandleFunc("/api/system/settings", s.withAuth(s.handleSystemSettings))
+	mux.HandleFunc("/api/system/ports", s.withAuth(s.handleSystemPorts))
 	mux.HandleFunc("/api/settings", s.withAuth(s.withDefaultProject((*Server).handleSettings)))
 	mux.HandleFunc("/api/nodes", s.withAuth(s.withDefaultProject((*Server).handleNodes)))
 	mux.HandleFunc("/api/nodes/online", s.withAuth(s.withDefaultProject((*Server).handleOnlineNodes)))
@@ -715,6 +716,25 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleSystemPorts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get system-wide port usage
+	systemPorts, err := config.GetSystemPortsInUse()
+	if err != nil {
+		log.Printf("获取系统端口占用失败: %v", err)
+		// Don't fail the request, just return empty list
+		systemPorts = []config.SystemPortInfo{}
+	}
+
+	writeJSON(w, map[string]any{
+		"system_ports": systemPorts,
+	})
 }
 
 func (s *Server) handleProjectRoute(w http.ResponseWriter, r *http.Request) {
@@ -1316,8 +1336,8 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		// Prefer the configured pool.blacklist_duration over a hardcoded 24h default.
-		defaultDuration := 24 * time.Hour
+		// Prefer the configured pool.blacklist_duration over the default.
+		defaultDuration := 30 * time.Minute
 		s.cfgMu.RLock()
 		if s.cfgSrc != nil && s.cfgSrc.Pool.BlacklistDuration > 0 {
 			defaultDuration = s.cfgSrc.Pool.BlacklistDuration

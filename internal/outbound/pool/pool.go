@@ -203,7 +203,7 @@ func normalizeOptions(options Options) Options {
 		options.FailureThreshold = 3
 	}
 	if options.BlacklistDuration <= 0 {
-		options.BlacklistDuration = 24 * time.Hour
+		options.BlacklistDuration = 30 * time.Minute
 	}
 	if options.RetryAttempts <= 0 {
 		options.RetryAttempts = 3
@@ -216,7 +216,9 @@ func normalizeOptions(options Options) Options {
 		options.Mode = modeRandom
 	case modeBalance:
 		options.Mode = modeBalance
-	case modeLatency:
+	case modeLatency, "lowest-latency":
+		options.Mode = modeLatency
+	case "":
 		options.Mode = modeLatency
 	default:
 		options.Mode = modeSequential

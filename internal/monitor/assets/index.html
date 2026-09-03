@@ -462,6 +462,7 @@
     .modal.modal-subscription { width: min(760px, calc(100vw - 32px)); }
     .modal.modal-node { width: min(800px, calc(100vw - 32px)); }
     .modal.modal-project { width: min(860px, calc(100vw - 32px)); }
+    .modal.modal-system-ports { width: min(920px, calc(100vw - 32px)); }
     .project-delete-notice { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
     .project-delete-notice.danger { color: var(--error); }
     .subscription-url-input {
@@ -800,16 +801,25 @@
         <div class="project-management">
           <div class="project-management-heading">
             <div class="project-management-title">项目管理</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn" type="button" onclick="showSystemPortsModal()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></svg>
+              查看端口占用
+            </button>
             <button class="btn btn-primary" type="button" onclick="showProjectModal()">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
               新建项目
             </button>
+            </div>
           </div>
           <div class="project-management-grid">
             <section class="panel project-list-panel">
               <div class="panel-header">
                 <div class="panel-title">项目列表</div>
-                <span class="badge badge-offline" id="projectTotalBadge">0 个项目</span>
+                <div class="table-tools">
+                  <input id="projectSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索项目名称或 ID" aria-label="搜索项目" oninput="renderProjectManagement()" />
+                  <span class="badge badge-offline" id="projectTotalBadge">0 个项目</span>
+                </div>
               </div>
               <div class="project-table-wrap">
                 <table class="project-table">
@@ -1302,12 +1312,12 @@
             <input type="text" id="projectName" required maxlength="80" placeholder="爬虫代理" />
           </div>
           <div class="form-section-grid">
-            <div class="form-group"><label>运行模式</label><select id="projectMode" class="setting-input" onchange="updateProjectPortHints()"><option value="pool">pool - 单端口负载池</option><option value="multi-port">multi-port - 多端口模式</option><option value="hybrid">hybrid - 混合模式</option></select></div>
+            <div class="form-group"><label>运行模式</label><select id="projectMode" class="setting-input" onchange="updateProjectPortHints()"><option value="hybrid" selected>hybrid - 混合模式</option><option value="pool">pool - 单端口负载池</option><option value="multi-port">multi-port - 多端口模式</option></select></div>
             <div class="form-group"><label>外部 IP</label><input type="text" id="projectExternalIP" class="setting-input" placeholder="可选" /></div>
             <div class="checkbox-row"><input type="checkbox" id="projectSkipCertVerify" checked /><label for="projectSkipCertVerify">跳过 SSL 证书验证</label></div>
           </div>
           <div class="port-availability" id="projectPortAvailability">
-            <div class="port-availability-title">其他项目及系统已占用端口</div>
+            <div class="port-availability-title">已存在项目占用端口</div>
             <div class="port-usage-list" id="projectPortUsageList"></div>
           </div>
           <div class="form-section-title">监听配置</div>
@@ -1326,7 +1336,7 @@
           </div>
           <div class="form-section-title">节点池配置</div>
           <div class="form-section-grid">
-            <div class="form-group"><label>调度模式</label><select id="projectPoolMode" class="setting-input"><option value="random">random - 随机</option><option value="balance">balance - 均衡</option><option value="latency">latency - 最低延迟</option><option value="sequential">sequential - 顺序</option></select></div>
+            <div class="form-group"><label>调度模式</label><select id="projectPoolMode" class="setting-input"><option value="latency" selected>latency - 最低延迟</option><option value="random">random - 随机</option><option value="balance">balance - 均衡</option><option value="sequential">sequential - 顺序</option></select></div>
             <div class="form-group"><label>故障阈值</label><input type="number" id="projectPoolFailure" class="setting-input" min="1" max="100" /></div>
             <div class="form-group"><label>拉黑时长</label><input type="text" id="projectPoolBlacklist" class="setting-input" placeholder="30m" /></div>
             <div class="form-group"><label>重试次数</label><input type="number" id="projectPoolRetryAttempts" class="setting-input" min="1" max="100" /></div>
@@ -1334,7 +1344,7 @@
           </div>
           <div class="form-section-title">粘性代理配置</div>
           <div class="form-section-grid">
-            <div class="checkbox-row"><input type="checkbox" id="projectStickyEnabled" onchange="handleProjectStickyChange()" /><label for="projectStickyEnabled">启用粘性代理</label></div>
+            <div class="checkbox-row"><input type="checkbox" id="projectStickyEnabled" checked onchange="handleProjectStickyChange()" /><label for="projectStickyEnabled">启用粘性代理</label></div>
             <div class="form-group"><label>粘性端口</label><input type="number" id="projectStickyPort" class="setting-input" min="0" max="65535" oninput="updateProjectPortHints()" /><div class="port-field-hint" id="projectStickyPortHint" aria-live="polite"></div></div>
           </div>
           <div class="form-section-title">选定订阅（不选择加载全部）</div>
@@ -1375,6 +1385,27 @@
       <div class="modal-footer">
         <button type="button" class="btn" onclick="closeProjectDeleteModal()">取消</button>
         <button type="button" class="btn btn-danger" id="confirmProjectDeleteBtn" onclick="confirmDeleteProject()">仅移除项目</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="systemPortsModalOverlay">
+    <div class="modal modal-system-ports">
+      <div class="modal-header" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <span>系统端口占用</span>
+        <button type="button" class="btn btn-sm" onclick="loadSystemPorts()">刷新</button>
+      </div>
+      <div class="modal-body">
+        <div id="systemPortsStatus" style="font-size:12px; color:var(--text-muted);">正在读取当前服务所在电脑的端口...</div>
+        <div class="table-container">
+          <table class="project-schedule-table">
+            <thead><tr><th>端口</th><th>PID</th><th>程序</th><th>状态</th></tr></thead>
+            <tbody id="systemPortsTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" onclick="closeSystemPortsModal()">关闭</button>
       </div>
     </div>
   </div>
@@ -1465,7 +1496,7 @@
     let stickyEnabled = false;
     let entryExitPortsByTag = new Map();
     let _savedCoreSnapshot = '';
-    // Cached pool.blacklist_duration from /api/settings (e.g. "1h", "24h0m0s"). null = not loaded yet.
+    // Cached pool.blacklist_duration from /api/settings (e.g. "1h", "30m0s"). null = not loaded yet.
     let cachedBlacklistDuration = null;
 
     function showFullscreenLoading(text, subtext) {
@@ -1544,7 +1575,7 @@
     }
 
     function projectPortFieldSpecs() {
-      const mode = document.getElementById('projectMode')?.value || 'pool';
+      const mode = document.getElementById('projectMode')?.value || 'hybrid';
       const stickyEnabled = document.getElementById('projectStickyEnabled')?.checked || false;
       return [
         {id:'projectListenerPort', hintID:'projectListenerPortHint', key:'listener_port', label:'监听端口', active:mode === 'pool' || mode === 'hybrid'},
@@ -1674,6 +1705,46 @@
       } catch (error) {}
     }
 
+    function closeSystemPortsModal() {
+      document.getElementById('systemPortsModalOverlay')?.classList.remove('show');
+    }
+
+    async function showSystemPortsModal() {
+      const overlay = document.getElementById('systemPortsModalOverlay');
+      if (!overlay) return;
+      overlay.classList.add('show');
+      await loadSystemPorts();
+    }
+
+    async function loadSystemPorts() {
+      const status = document.getElementById('systemPortsStatus');
+      const table = document.getElementById('systemPortsTableBody');
+      if (!status || !table) return;
+      status.textContent = '正在读取当前服务所在电脑的端口...';
+      table.innerHTML = '';
+      try {
+        const response = await nativeFetch('/api/system/ports');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        const ports = (data.system_ports || []).slice().sort((a, b) => Number(a.port || 0) - Number(b.port || 0));
+        if (!ports.length) {
+          status.textContent = '未读取到监听端口，或当前平台不支持端口扫描。';
+          table.innerHTML = '<tr><td colspan="4" class="table-empty-state">暂无端口</td></tr>';
+          return;
+        }
+        status.textContent = `共 ${ports.length} 个端口（数据来自当前服务所在电脑）`;
+        table.innerHTML = ports.map(item => `<tr>
+          <td class="tt-mono">${Number(item.port) || '-'}</td>
+          <td class="tt-mono">${Number(item.pid) || '-'}</td>
+          <td>${escapeHtml(item.program || '-')}</td>
+          <td>${escapeHtml(item.state || '-')}</td>
+        </tr>`).join('');
+      } catch (error) {
+        status.textContent = `读取系统端口失败：${error.message || error}`;
+        table.innerHTML = '<tr><td colspan="4" class="table-empty-state">无法读取端口</td></tr>';
+      }
+    }
+
     function renderProjectSelector() {
       const select = document.getElementById('projectSelect');
       select.replaceChildren();
@@ -1706,9 +1777,20 @@
       const editButton = document.getElementById('projectDetailEditBtn');
       if (!tbody || !empty || !detail || !editButton) return;
 
-      document.getElementById('projectTotalBadge').textContent = `${projectsCache.length} 个项目`;
-      empty.style.display = projectsCache.length ? 'none' : 'block';
-      tbody.innerHTML = projectsCache.map(project => {
+      const query = (document.getElementById('projectSearchInput')?.value || '').trim().toLowerCase();
+      const visibleProjects = query
+        ? projectsCache.filter(project => [project.id, project.name]
+          .some(value => String(value || '').toLowerCase().includes(query)))
+        : projectsCache;
+      const totalBadge = document.getElementById('projectTotalBadge');
+      if (totalBadge) {
+        totalBadge.textContent = query
+          ? `显示 ${visibleProjects.length} / ${projectsCache.length} 个项目`
+          : `${projectsCache.length} 个项目`;
+      }
+      empty.textContent = query ? '没有匹配的项目' : '暂无项目';
+      empty.style.display = visibleProjects.length ? 'none' : 'block';
+      tbody.innerHTML = visibleProjects.map(project => {
         const statusView = projectStatusView(project.status);
         const projectID = escapeAttrJs(project.id);
         const busy = project.status === 'starting' || project.status === 'stopping';
@@ -2041,13 +2123,13 @@
       return {
         probe: {
           target: probe.target || 'http://cp.cloudflare.com/generate_204',
-          interval: probe.interval || '5m0s',
+          interval: probe.interval || '1h0m0s',
           timeout: probe.timeout || '1m50s',
           concurrency: Number(probe.concurrency) || 32
         },
         subscription_refresh: {
           enabled: project ? subscription.enabled !== false : true,
-          interval: subscription.interval || '1h0m0s'
+          interval: subscription.interval || '24h0m0s'
         }
       };
     }
@@ -2089,7 +2171,7 @@
         pool: {
           mode: document.getElementById('projectPoolMode').value,
           failure_threshold: Number(document.getElementById('projectPoolFailure').value) || 3,
-          blacklist_duration: document.getElementById('projectPoolBlacklist').value.trim() || '24h',
+          blacklist_duration: document.getElementById('projectPoolBlacklist').value.trim() || '30m',
           retry_enabled: document.getElementById('projectPoolRetryEnabled').checked,
           retry_attempts: Number(document.getElementById('projectPoolRetryAttempts').value) || 3
         },
@@ -2111,7 +2193,7 @@
       const multi = s.multi_port || {};
       const pool = s.pool || {};
       const sticky = s.sticky || {};
-      document.getElementById('projectMode').value = s.mode || 'pool';
+      document.getElementById('projectMode').value = s.mode || 'hybrid';
       document.getElementById('projectExternalIP').value = s.external_ip || '';
       document.getElementById('projectSkipCertVerify').checked = s.skip_cert_verify !== false;
       document.getElementById('projectListenerAddr').value = listener.address || '0.0.0.0';
@@ -2122,12 +2204,12 @@
       document.getElementById('projectMPBasePort').value = multi.base_port || '';
       document.getElementById('projectMPUser').value = multi.username || '';
       document.getElementById('projectMPPass').value = multi.password || '';
-      document.getElementById('projectPoolMode').value = pool.mode || 'sequential';
+      document.getElementById('projectPoolMode').value = pool.mode || 'latency';
       document.getElementById('projectPoolFailure').value = pool.failure_threshold || 3;
-      document.getElementById('projectPoolBlacklist').value = pool.blacklist_duration || '24h';
+      document.getElementById('projectPoolBlacklist').value = pool.blacklist_duration || '30m';
       document.getElementById('projectPoolRetryEnabled').checked = pool.retry_enabled !== false;
       document.getElementById('projectPoolRetryAttempts').value = pool.retry_attempts || 3;
-      document.getElementById('projectStickyEnabled').checked = !!sticky.enabled;
+      document.getElementById('projectStickyEnabled').checked = sticky.enabled !== false;
       document.getElementById('projectStickyPort').value = sticky.port || '';
     }
 
@@ -3406,24 +3488,24 @@
       } catch(e) { }
     }
 
-    // Resolve configured pool.blacklist_duration (cache → /api/settings → 24h fallback).
+    // Resolve configured pool.blacklist_duration (cache → /api/settings → 30m fallback).
     async function getBlacklistDuration() {
       if (cachedBlacklistDuration) return cachedBlacklistDuration;
       try {
         const r = await fetch('/api/settings');
         const d = await r.json();
-        const dur = ((d.pool && d.pool.blacklist_duration) || '24h').trim();
+        const dur = ((d.pool && d.pool.blacklist_duration) || '30m').trim();
         cachedBlacklistDuration = dur;
         return dur;
       } catch (e) {
-        return '24h';
+        return '30m';
       }
     }
 
-    // Human-readable duration for confirm dialogs: "24h0m0s" → "24 小时", "1h30m" → "1 小时 30 分钟".
+    // Human-readable duration for confirm dialogs: "30m0s" → "30 分钟", "1h30m" → "1 小时 30 分钟".
     function formatDurationLabel(dur) {
       const s = String(dur || '').trim();
-      if (!s) return '24 小时';
+      if (!s) return '30 分钟';
       // Accept Go time.Duration.String() forms like "24h0m0s" / "1h30m0s".
       const m = s.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$/i);
       if (m && (m[1] || m[2] || m[3])) {

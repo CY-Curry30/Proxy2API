@@ -12,7 +12,7 @@
 # pool: 单端口代理池，所有节点共享一个端口，自动负载均衡
 # multi-port: 多端口模式，每个节点独立端口
 # hybrid: 混合模式，同时启用 pool + multi-port
-mode: pool
+mode: hybrid
 
 # 日志级别: debug, info, warn, error
 log_level: info
@@ -54,13 +54,13 @@ listener:
 # ───────────────────────────────────────────────────────────────
 pool:
   # 调度模式: sequential（顺序）, random（随机）, balance（均衡）, latency（最低延迟）
-  mode: sequential
+  mode: latency
   # 连续失败多少次后加入黑名单
   failure_threshold: 3
-  # 黑名单持续时间（建议 1h-6h，默认 24h 可能过长）
+  # 黑名单持续时间（默认 30m）
   # 节点被黑名单后将完全不可用，直到时间到期或手动释放
   # 可通过 WebUI 或 API 手动释放：POST /api/nodes/{tag}/release
-  blacklist_duration: 24h
+  blacklist_duration: 30m
   # 是否启用代理重试：节点拨号失败后自动切换下一个节点重试
   # 多端口模式下池只有 1 个成员，重试会再次拨同一节点
   retry_enabled: true
@@ -76,7 +76,7 @@ pool:
 # 绑定为永久保持，仅当该节点被拉黑/移除时才会重新选择节点。
 # 监听地址与认证复用 listener 配置。原 2323 端口（非粘性）不受影响，二者共存。
 sticky:
-  enabled: false        # 是否启用粘性代理端口
+  enabled: true         # 是否启用粘性代理端口
   port: 2324            # 粘性端口（留空或 0 则默认为 listener.port + 1）
   # 指定粘性入口的出口节点 tag；留空时默认选择最低延迟节点
   fixed_node: ""
@@ -104,7 +104,7 @@ management:
 # ───────────────────────────────────────────────────────────────
 probe:
   target: http://cp.cloudflare.com/generate_204  # 延迟及连通性探测目标
-  interval: 5m                                   # 自动全量探测间隔
+  interval: 1h                                   # 自动全量探测间隔
   timeout: 1m50s                                 # 总预算；必须至少 25 秒且为 5 秒的倍数
   concurrency: 32                                # 当前项目的并发探测节点数
 
@@ -124,7 +124,7 @@ dns:
 # ───────────────────────────────────────────────────────────────
 # subscription_refresh:
 #   enabled: false              # 是否启用定时刷新
-#   interval: 1h                # 刷新间隔（默认 1 小时）
+#   interval: 24h               # 刷新间隔（默认 24 小时）
 #   timeout: 30s                # 获取订阅的超时时间
 #   fetch_concurrency: 16       # 订阅抓取并发数（默认 16，最大 32）
 #   health_check_timeout: 2m    # 新节点健康检查超时

@@ -151,7 +151,7 @@ type ProbeConfig struct {
 // SubscriptionRefreshConfig controls subscription auto-refresh and reload settings.
 type SubscriptionRefreshConfig struct {
 	Enabled            bool          `yaml:"enabled"`              // 是否启用定时刷新
-	Interval           time.Duration `yaml:"interval"`             // 刷新间隔，默认 1 小时
+	Interval           time.Duration `yaml:"interval"`             // 刷新间隔，默认 24 小时
 	Timeout            time.Duration `yaml:"timeout"`              // 获取订阅的超时时间
 	HealthCheckTimeout time.Duration `yaml:"health_check_timeout"` // 新节点健康检查超时
 	DrainTimeout       time.Duration `yaml:"drain_timeout"`        // 旧实例排空超时时间
@@ -732,7 +732,7 @@ func ExtractNodeName(uri string) string {
 
 func (c *Config) normalize() error {
 	if c.Mode == "" {
-		c.Mode = "pool"
+		c.Mode = "hybrid" // 默认为混合模式
 	}
 	// Normalize mode name: support both multi-port and multi_port
 	if c.Mode == "multi_port" {
@@ -750,13 +750,13 @@ func (c *Config) normalize() error {
 		c.Listener.Port = 2323
 	}
 	if c.Pool.Mode == "" {
-		c.Pool.Mode = "sequential"
+		c.Pool.Mode = "latency" // 默认为最低延迟调度
 	}
 	if c.Pool.FailureThreshold <= 0 {
 		c.Pool.FailureThreshold = 3
 	}
 	if c.Pool.BlacklistDuration <= 0 {
-		c.Pool.BlacklistDuration = 24 * time.Hour
+		c.Pool.BlacklistDuration = 30 * time.Minute // 默认拉黑时长改为30分钟
 	}
 	if c.Pool.RetryAttempts <= 0 {
 		c.Pool.RetryAttempts = 3
@@ -781,7 +781,7 @@ func (c *Config) normalize() error {
 
 	// Subscription refresh defaults
 	if c.SubscriptionRefresh.Interval <= 0 {
-		c.SubscriptionRefresh.Interval = 1 * time.Hour
+		c.SubscriptionRefresh.Interval = 24 * time.Hour
 	}
 	if c.SubscriptionRefresh.Timeout <= 0 {
 		c.SubscriptionRefresh.Timeout = 30 * time.Second
@@ -1172,7 +1172,7 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 // currently stopped and the OS socket is free.
 func (c *Config) NormalizeWithPortMapExcluding(portMap map[string]uint16, reservedPorts map[uint16]struct{}) error {
 	if c.Mode == "" {
-		c.Mode = "pool"
+		c.Mode = "hybrid"
 	}
 	if c.Mode == "multi_port" {
 		c.Mode = "multi-port"
@@ -1189,13 +1189,13 @@ func (c *Config) NormalizeWithPortMapExcluding(portMap map[string]uint16, reserv
 		c.Listener.Port = 2323
 	}
 	if c.Pool.Mode == "" {
-		c.Pool.Mode = "sequential"
+		c.Pool.Mode = "latency"
 	}
 	if c.Pool.FailureThreshold <= 0 {
 		c.Pool.FailureThreshold = 3
 	}
 	if c.Pool.BlacklistDuration <= 0 {
-		c.Pool.BlacklistDuration = 24 * time.Hour
+		c.Pool.BlacklistDuration = 30 * time.Minute
 	}
 	if c.Pool.RetryAttempts <= 0 {
 		c.Pool.RetryAttempts = 3
@@ -1218,7 +1218,7 @@ func (c *Config) NormalizeWithPortMapExcluding(portMap map[string]uint16, reserv
 	}
 	c.normalizeDisabledSubscriptions()
 	if c.SubscriptionRefresh.Interval <= 0 {
-		c.SubscriptionRefresh.Interval = 1 * time.Hour
+		c.SubscriptionRefresh.Interval = 24 * time.Hour
 	}
 	if c.SubscriptionRefresh.Timeout <= 0 {
 		c.SubscriptionRefresh.Timeout = 30 * time.Second
@@ -1352,6 +1352,17 @@ func (c *Config) normalizeSticky() error {
 	c.Pool.FixedNode = ""
 	c.Sticky.FixedNode = strings.TrimSpace(c.Sticky.FixedNode)
 
+	// 默认启用粘性代理（仅在 pool/hybrid 模式下）
+	if c.Mode == "pool" || c.Mode == "hybrid" {
+		// 如果配置中没有明确设置 sticky.enabled，则默认启用
+		// 注意：这里我们无法区分"未设置"和"显式设为false"，所以采用以下逻辑：
+		// 如果 sticky.port 为 0 且 sticky.enabled 为 false，我们假定用户未配置，启用它
+		// 如果用户明确设置了 sticky.enabled: false，后续逻辑会尊重这个选择
+		if !c.Sticky.Enabled && c.Sticky.Port == 0 {
+			c.Sticky.Enabled = true
+		}
+	}
+
 	if !c.Sticky.Enabled {
 		return nil
 	}
@@ -1449,7 +1460,7 @@ func (c *Config) normalizeProbeConfig() error {
 		c.Probe.Target = "http://cp.cloudflare.com/generate_204"
 	}
 	if c.Probe.Interval <= 0 {
-		c.Probe.Interval = 5 * time.Minute
+		c.Probe.Interval = 1 * time.Hour
 	}
 	if c.Probe.Timeout <= 0 {
 		c.Probe.Timeout = DefaultProbeTimeout
@@ -1486,7 +1497,7 @@ func (c *Config) ProbeConcurrencyOrDefault() int {
 // ProbeIntervalOrDefault returns the interval between automatic full probes.
 func (c *Config) ProbeIntervalOrDefault() time.Duration {
 	if c.Probe.Interval <= 0 {
-		return 5 * time.Minute
+		return 1 * time.Hour
 	}
 	return c.Probe.Interval
 }
@@ -3118,4 +3129,12 @@ func writeFileWithLock(path string, data []byte, perm os.FileMode) error {
 	}
 
 	return nil
+}
+
+// SystemPortInfo represents a port occupied by a process on the system
+type SystemPortInfo struct {
+	Port    uint16 `json:"port"`
+	PID     int    `json:"pid"`
+	Program string `json:"program"`
+	State   string `json:"state"`
 }

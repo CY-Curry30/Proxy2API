@@ -495,6 +495,11 @@ func (r *Registry) ProjectPortHints() monitor.ProjectPortHints {
 
 	portsByProject := make(map[string][]uint16)
 	for port, owner := range owners {
+		// Creation hints are for choosing project ports. The management service
+		// port is a host-level detail and is shown only in the system port view.
+		if owner.Project == "__control__" || owner.Project == sharedCatalogID {
+			continue
+		}
 		portsByProject[owner.Project] = append(portsByProject[owner.Project], port)
 	}
 	ids := make([]string, 0, len(portsByProject))
@@ -703,7 +708,7 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 	}
 	mode := strings.TrimSpace(request.Mode)
 	if mode == "" {
-		mode = "pool"
+		mode = "hybrid"
 	}
 	if mode == "multi_port" {
 		mode = "multi-port"
@@ -853,20 +858,21 @@ func defaultProjectConfig(mode string, listenerPort, multiPortBase uint16) *conf
 			BasePort: multiPortBase,
 		},
 		Pool: config.PoolConfig{
-			Mode:              "sequential",
+			Mode:              "latency",
 			FailureThreshold:  3,
-			BlacklistDuration: 24 * time.Hour,
+			BlacklistDuration: 30 * time.Minute,
 			RetryAttempts:     3,
 		},
+		Sticky:     config.StickyConfig{Enabled: true},
 		Management: config.ManagementConfig{Enabled: &enabled},
 		Probe: config.ProbeConfig{
 			Target:      "http://cp.cloudflare.com/generate_204",
-			Interval:    5 * time.Minute,
+			Interval:    time.Hour,
 			Timeout:     config.DefaultProbeTimeout,
 			Concurrency: 32,
 		},
 		SubscriptionRefresh: config.SubscriptionRefreshConfig{
-			Interval:           time.Hour,
+			Interval:           24 * time.Hour,
 			Timeout:            30 * time.Second,
 			HealthCheckTimeout: 2 * time.Minute,
 			DrainTimeout:       30 * time.Second,

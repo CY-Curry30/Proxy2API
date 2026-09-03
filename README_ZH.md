@@ -79,10 +79,10 @@ docker compose up -d
 go run ./cmd/Proxy2API -config config.yaml
 ```
 
-## 最小配置示例（Pool）
+## 最小配置示例（Hybrid）
 
 ```yaml
-mode: pool
+mode: hybrid
 
 listener:
   address: 0.0.0.0
@@ -91,9 +91,9 @@ listener:
   password: pass
 
 pool:
-  mode: sequential    # sequential / random / balance / latency
+  mode: latency       # latency / random / balance / sequential
   failure_threshold: 3
-  blacklist_duration: 24h
+  blacklist_duration: 30m
   retry_enabled: true # 拨号失败时切换到另一节点重试
   retry_attempts: 3   # 每个请求的最大拨号次数
 
@@ -104,7 +104,7 @@ management:
 
 probe:
   target: http://cp.cloudflare.com/generate_204
-  interval: 5m
+  interval: 1h
   timeout: 1m50s
   concurrency: 32
 
@@ -342,13 +342,13 @@ docker run --user $(id -u):$(id -g) \
 - **"配置文件未找到"**：确保挂载目录中存在 `config.yaml` 文件
 - **"无法绑定端口"**：检查端口是否被其他服务占用
 - **"所有节点健康检查失败"**：验证代理 URI 格式正确，且上游服务器可达
-- **"代理之前正常使用，突然失效"**：检查节点是否被加入黑名单（连续失败 3 次后触发，默认持续 24 小时）
+- **"代理之前正常使用，突然失效"**：检查节点是否被加入黑名单（连续失败 3 次后触发，默认持续 30 分钟）
   - **解决方案 1**：通过 WebUI 释放 - 点击节点旁边的"释放"按钮
   - **解决方案 2**：通过 API 释放 - `POST http://localhost:9091/api/nodes/{tag}/release`
   - **解决方案 3**：在 `config.yaml` 中降低黑名单持续时间：
     ```yaml
     pool:
-      blacklist_duration: 1h  # 从默认的 24h 改为 1h
+      blacklist_duration: 1h  # 从默认的 30m 改为 1h
     ```
   - 查看黑名单事件日志：`docker compose logs | grep "BLACKLISTED"`
 
