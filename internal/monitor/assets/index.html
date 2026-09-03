@@ -1690,7 +1690,7 @@
         const sticky = document.getElementById('projectStickyPort');
         if (!listener.value && recommended.listener_port) listener.value = recommended.listener_port;
         if (!multiPort.value && recommended.multi_port_base) multiPort.value = recommended.multi_port_base;
-        sticky.placeholder = recommended.sticky_port ? `推荐 ${recommended.sticky_port}` : '';
+        if (!sticky.value && recommended.sticky_port) sticky.value = recommended.sticky_port;
       }
       updateProjectPortHints();
     }
