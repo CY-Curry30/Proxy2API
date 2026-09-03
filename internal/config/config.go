@@ -1364,7 +1364,39 @@ func (c *Config) normalizeSticky() error {
 		if c.Listener.Port >= 65535 {
 			return fmt.Errorf("无法自动分配 sticky.port（监听端口为 %d），请显式设置 sticky.port", c.Listener.Port)
 		}
-		c.Sticky.Port = c.Listener.Port + 1
+		// Find next available port starting from listener.port + 1
+		// Check system-wide port availability, not just internal registry
+		candidatePort := c.Listener.Port + 1
+		address := c.Listener.Address
+		if address == "" {
+			address = "0.0.0.0"
+		}
+		// Build set of ports used by nodes to avoid conflicts
+		usedByNodes := make(map[uint16]bool)
+		for _, node := range c.Nodes {
+			if node.Port > 0 {
+				usedByNodes[node.Port] = true
+			}
+		}
+		// Find first available port
+		for candidatePort <= 65535 {
+			if candidatePort == c.Listener.Port {
+				candidatePort++
+				continue
+			}
+			if usedByNodes[candidatePort] {
+				candidatePort++
+				continue
+			}
+			if IsPortAvailable(address, candidatePort) {
+				c.Sticky.Port = candidatePort
+				break
+			}
+			candidatePort++
+		}
+		if c.Sticky.Port == 0 {
+			return fmt.Errorf("无法为 sticky 入口找到可用端口（从 %d 开始搜索）", c.Listener.Port+1)
+		}
 	}
 	if c.Sticky.Port == c.Listener.Port {
 		return fmt.Errorf("sticky.port %d 与监听端口冲突", c.Sticky.Port)
@@ -3007,11 +3039,15 @@ func (c *Config) saveSharedNodes() error {
 	return c.saveSharedDocument(doc)
 }
 
-// IsPortAvailable checks if a port is available for binding.
+// IsPortAvailable checks if a port is available for binding on the entire system.
+// It attempts to bind to the port temporarily to detect if ANY program is using it.
 func IsPortAvailable(address string, port uint16) bool {
+	// Try to listen on the port - this checks if the port is truly available
+	// on the system, regardless of which program is using it
 	addr := fmt.Sprintf("%s:%d", address, port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		// Port is in use by ANY program (sing-box, other services, etc.)
 		return false
 	}
 	_ = ln.Close()
