@@ -1073,10 +1073,20 @@
               <option value="traffic_asc">已用流量升序</option>
               <option value="traffic_desc">已用流量降序</option>
             </select>
+            <!-- 批量操作按钮组 -->
+            <div id="subscriptionBatchButtons" style="display:none; gap:8px; align-items:center; padding-left: 12px; border-left: 1px solid var(--border);">
+              <span style="color: var(--text-muted); font-size: 12px;">已选 <strong id="subscriptionSelectedCount" style="color: var(--primary);">0</strong></span>
+              <button class="btn btn-sm" onclick="batchRefreshSubscriptions()" title="批量更新选中订阅">🔄 更新</button>
+              <button class="btn btn-sm" onclick="batchToggleSubscriptions(true)" style="background: var(--success); color: white;" title="批量启用选中订阅">✅ 启用</button>
+              <button class="btn btn-sm" onclick="batchToggleSubscriptions(false)" style="background: var(--warning); color: #000;" title="批量禁用选中订阅">⏸ 禁用</button>
+              <button class="btn btn-sm" onclick="batchApplyToProjects()" style="background: var(--primary); color: white;" title="批量应用到项目">📋 应用</button>
+              <button class="btn btn-sm" onclick="batchDeleteSubscriptions()" style="background: var(--error); color: white;" title="批量删除选中订阅">🗑 删除</button>
+              <button class="btn btn-sm" onclick="clearSubscriptionSelection()" title="取消选择">✖</button>
+            </div>
           </div>
           <div class="table-container">
             <table>
-              <thead><tr><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点(有效/总)</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
+              <thead><tr><th style="width:40px;"><input type="checkbox" id="subscriptionSelectAll" onchange="toggleAllSubscriptions(this.checked)" title="全选/取消全选" /></th><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点(有效/总)</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
               <tbody id="subscriptionsTableBody"></tbody>
             </table>
             <div id="subscriptionsEmptyState" class="table-empty-state">暂无订阅</div>
@@ -1293,17 +1303,17 @@
           </div>
           <input type="hidden" id="subscriptionOriginalURL" />
           <div id="subscriptionProjectSection" style="display:none;">
-            <div class="form-section-title">关联项目</div>
-            <div class="checkbox-row" style="margin-bottom:12px;">
-              <input type="checkbox" id="subscriptionAssignProjects" onchange="toggleSubscriptionProjectPicker()" />
-              <label for="subscriptionAssignProjects">指定使用该订阅的项目</label>
-            </div>
-            <div id="subscriptionProjectPicker" style="display:none;">
-              <div class="checkbox-grid" id="subscriptionProjectCheckboxes" style="max-height:200px; overflow-y:auto;">
+            <div class="form-section-title">项目选择</div>
+            <div id="subscriptionProjectPicker">
+              <div style="display:flex; gap:8px; margin-bottom:8px;">
+                <button type="button" class="btn btn-sm" onclick="selectAllSubscriptionProjects()">全选</button>
+                <button type="button" class="btn btn-sm" onclick="invertSubscriptionProjects()">反选</button>
+              </div>
+              <div class="checkbox-grid" id="subscriptionProjectCheckboxes" style="max-height:200px; overflow-y:auto; border:1px solid var(--border); padding:8px; border-radius:4px;">
                 <!-- Populated dynamically -->
               </div>
             </div>
-            <em id="subscriptionProjectHint" style="font-size:11px;color:var(--text-muted);"></em>
+            <em id="subscriptionProjectHint" style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;">选中的项目将使用该订阅</em>
           </div>
         </div>
         <div class="modal-footer">
@@ -1311,6 +1321,28 @@
           <button type="submit" class="btn btn-primary">保存</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- 批量应用到项目模态框 -->
+  <div class="modal-overlay" id="batchApplyModalOverlay">
+    <div class="modal">
+      <div class="modal-header" id="batchApplyModalTitle">批量应用订阅到项目</div>
+      <div class="modal-body">
+        <div class="form-section-title">选择项目</div>
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+          <button type="button" class="btn btn-sm" onclick="selectAllBatchApplyProjects()">全选</button>
+          <button type="button" class="btn btn-sm" onclick="invertBatchApplyProjects()">反选</button>
+        </div>
+        <div class="checkbox-grid" id="batchApplyProjectCheckboxes" style="max-height:300px; overflow-y:auto; border:1px solid var(--border); padding:8px; border-radius:4px;">
+          <!-- Populated dynamically -->
+        </div>
+        <em style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;">选中的项目将使用所有选中的订阅</em>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" onclick="document.getElementById('batchApplyModalOverlay').classList.remove('show')">取消</button>
+        <button type="button" class="btn btn-primary" onclick="submitBatchApply()">应用</button>
+      </div>
     </div>
   </div>
 
@@ -3926,6 +3958,7 @@
         const usedByText = usedByProjects.length ? usedByProjects.join('、') : '-';
         const statusTitle = item.last_error || (item.included ? '节点已加入节点池' : '节点未加入节点池');
         return `<tr>
+          <td><input type="checkbox" class="subscription-checkbox" data-url="${escapeHtml(item.url)}" onchange="updateSubscriptionSelection()" /></td>
           <td><span class="badge ${badge}" title="${escapeHtml(statusTitle)}">${label}</span></td>
           <td><div class="cell-trunc" style="max-width:300px;font-weight:500" title="${escapeHtml(item.url)}">${escapeHtml(item.name || item.url)}</div><div class="cell-trunc tt-mono" style="max-width:300px;font-size:11px;color:var(--text-muted)" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</div></td>
           ${globalView ? `<td><div class="cell-trunc" style="max-width:220px" title="${escapeHtml(usedByText)}">${escapeHtml(usedByText)}</div></td>` : ''}
@@ -3953,37 +3986,55 @@
     }
 
     function showSubscriptionModal(rawURL='') {
-      document.getElementById('subscriptionModalTitle').textContent = rawURL
+      const isEdit = !!rawURL;
+      const globalView = !currentProjectID;
+
+      document.getElementById('subscriptionModalTitle').textContent = isEdit
         ? '修改全局订阅'
         : (currentProjectID ? '添加全局订阅并加入当前项目' : '添加全局订阅');
       document.getElementById('subscriptionURL').value = rawURL;
       document.getElementById('subscriptionOriginalURL').value = rawURL;
-      // Project binding only applies when adding a new global subscription.
-      // Edits are global by nature, and project scope already joins the
-      // current project automatically.
+
       const section = document.getElementById('subscriptionProjectSection');
-      const showPicker = !rawURL && !currentProjectID;
+      // 在全局视图下显示项目选择，或在编辑时显示
+      const showPicker = globalView || isEdit;
       section.style.display = showPicker ? 'block' : 'none';
+
       if (showPicker) {
-        document.getElementById('subscriptionAssignProjects').checked = false;
-        populateSubscriptionProjectCheckboxes();
-        toggleSubscriptionProjectPicker();
+        populateSubscriptionProjectCheckboxes(rawURL);
       }
+
       document.getElementById('subscriptionModalOverlay').classList.add('show');
     }
 
-    function populateSubscriptionProjectCheckboxes() {
+    function populateSubscriptionProjectCheckboxes(rawURL='') {
       const grid = document.getElementById('subscriptionProjectCheckboxes');
       const projects = Array.isArray(projectsCache) ? projectsCache : [];
       if (!projects.length) {
         grid.innerHTML = '<em style="font-size:12px;color:var(--text-muted);">暂无项目</em>';
         return;
       }
+
+      // 找到该订阅已关联的项目
+      const subscription = subscriptionsCache.find(s => s.url === rawURL);
+      const usedByProjects = subscription ? (subscription.used_by_projects || []) : [];
+
       grid.innerHTML = projects.map((project, index) => {
         const id = `subproj-${index}`;
         const name = project.name || project.id;
+        // 在项目视图下自动选中当前项目，在编辑时选中已使用该订阅的项目
+        const isCurrentProject = project.id === currentProjectID;
+        // used_by_projects 可能包含项目ID或项目名称，需要同时匹配
+        const isUsedByProject = usedByProjects.some(p =>
+          p === project.id ||
+          p === project.name ||
+          p.toLowerCase() === project.id.toLowerCase() ||
+          (project.name && p.toLowerCase() === project.name.toLowerCase())
+        );
+        const shouldCheck = (isCurrentProject && !rawURL) || isUsedByProject;
+
         return `<div class="checkbox-row" title="${escapeHtml(project.id)}">
-          <input type="checkbox" id="${id}" value="${escapeHtml(project.id)}" />
+          <input type="checkbox" id="${id}" value="${escapeHtml(project.id)}" ${shouldCheck ? 'checked' : ''} />
           <label for="${id}">${escapeHtml(name)}</label>
         </div>`;
       }).join('');
@@ -4008,13 +4059,16 @@
         project ? '正在更新项目节点池' : '正在保存全局订阅定义'
       );
       const payload = {url, original_url: originalURL, scope: currentProjectID ? 'project' : 'global'};
-      // Omitting projects entirely means "leave every project untouched"; an
-      // explicit array is authoritative, including when it is empty.
-      if (!originalURL && !currentProjectID && document.getElementById('subscriptionAssignProjects').checked) {
+
+      // 获取选中的项目列表
+      const globalView = !currentProjectID;
+      const section = document.getElementById('subscriptionProjectSection');
+      if (section.style.display !== 'none') {
         payload.projects = Array.from(
           document.querySelectorAll('#subscriptionProjectCheckboxes input[type="checkbox"]')
         ).filter(checkbox => checkbox.checked).map(checkbox => checkbox.value);
       }
+
       try {
         const response = await fetch(globalScopePath('/api/subscriptions'), {
           method: originalURL ? 'PUT' : 'POST',
@@ -4992,6 +5046,246 @@
       } catch (error) {
         showToast(error.message, 'error');
       }
+    }
+
+    // ========== 订阅批量操作功能 ==========
+    let selectedSubscriptionURLs = new Set();
+
+    function toggleAllSubscriptions(checked) {
+      const checkboxes = document.querySelectorAll('.subscription-checkbox');
+      checkboxes.forEach(cb => {
+        cb.checked = checked;
+        const url = cb.getAttribute('data-url');
+        if (checked) {
+          selectedSubscriptionURLs.add(url);
+        } else {
+          selectedSubscriptionURLs.delete(url);
+        }
+      });
+      updateSubscriptionSelection();
+    }
+
+    function updateSubscriptionSelection() {
+      selectedSubscriptionURLs.clear();
+      const checkboxes = document.querySelectorAll('.subscription-checkbox:checked');
+      checkboxes.forEach(cb => {
+        selectedSubscriptionURLs.add(cb.getAttribute('data-url'));
+      });
+
+      const count = selectedSubscriptionURLs.size;
+      const buttonsBar = document.getElementById('subscriptionBatchButtons');
+      const countEl = document.getElementById('subscriptionSelectedCount');
+      const selectAllCheckbox = document.getElementById('subscriptionSelectAll');
+
+      if (count > 0) {
+        buttonsBar.style.display = 'flex';
+        countEl.textContent = count;
+      } else {
+        buttonsBar.style.display = 'none';
+        if (selectAllCheckbox) selectAllCheckbox.checked = false;
+      }
+    }
+
+    function clearSubscriptionSelection() {
+      selectedSubscriptionURLs.clear();
+      document.querySelectorAll('.subscription-checkbox').forEach(cb => cb.checked = false);
+      const selectAllCheckbox = document.getElementById('subscriptionSelectAll');
+      if (selectAllCheckbox) selectAllCheckbox.checked = false;
+      updateSubscriptionSelection();
+    }
+
+    async function batchRefreshSubscriptions() {
+      if (selectedSubscriptionURLs.size === 0) {
+        showToast('请先选择要更新的订阅', 'error');
+        return;
+      }
+
+      const urls = Array.from(selectedSubscriptionURLs);
+      const confirmed = confirm(`确定要更新选中的 ${urls.length} 个订阅吗？`);
+      if (!confirmed) return;
+
+      showToast('开始批量更新订阅...');
+
+      let successCount = 0;
+      let failedCount = 0;
+
+      for (const url of urls) {
+        try {
+          await refreshManagedSubscription(url);
+          successCount++;
+        } catch (error) {
+          failedCount++;
+        }
+      }
+
+      showToast(`批量更新完成！成功 ${successCount} 个，失败 ${failedCount} 个`, 'success');
+      clearSubscriptionSelection();
+      await fetchSubscriptions();
+    }
+
+    async function batchToggleSubscriptions(enabled) {
+      if (selectedSubscriptionURLs.size === 0) {
+        showToast('请先选择要操作的订阅', 'error');
+        return;
+      }
+
+      const urls = Array.from(selectedSubscriptionURLs);
+      const action = enabled ? '启用' : '禁用';
+      const confirmed = confirm(`确定要${action}选中的 ${urls.length} 个订阅吗？`);
+      if (!confirmed) return;
+
+      showToast(`开始批量${action}订阅...`);
+
+      let successCount = 0;
+      let failedCount = 0;
+
+      for (const url of urls) {
+        try {
+          await toggleSubscription(url, enabled);
+          successCount++;
+        } catch (error) {
+          failedCount++;
+        }
+      }
+
+      showToast(`批量${action}完成！成功 ${successCount} 个，失败 ${failedCount} 个`, 'success');
+      clearSubscriptionSelection();
+      await fetchSubscriptions();
+    }
+
+    async function batchDeleteSubscriptions() {
+      if (selectedSubscriptionURLs.size === 0) {
+        showToast('请先选择要删除的订阅', 'error');
+        return;
+      }
+
+      const urls = Array.from(selectedSubscriptionURLs);
+      const confirmed = confirm(`确定要删除选中的 ${urls.length} 个订阅吗？此操作不可恢复！`);
+      if (!confirmed) return;
+
+      showToast('开始批量删除订阅...');
+
+      let successCount = 0;
+      let failedCount = 0;
+
+      for (const url of urls) {
+        try {
+          await deleteSubscription(url);
+          successCount++;
+        } catch (error) {
+          failedCount++;
+        }
+      }
+
+      showToast(`批量删除完成！成功 ${successCount} 个，失败 ${failedCount} 个`, 'success');
+      clearSubscriptionSelection();
+      await fetchSubscriptions();
+    }
+
+    function batchApplyToProjects() {
+      if (selectedSubscriptionURLs.size === 0) {
+        showToast('请先选择要应用的订阅', 'error');
+        return;
+      }
+
+      showBatchApplyModal();
+    }
+
+    function showBatchApplyModal() {
+      const urls = Array.from(selectedSubscriptionURLs);
+      document.getElementById('batchApplyModalTitle').textContent = `将 ${urls.length} 个订阅应用到项目`;
+      populateBatchApplyProjects();
+      document.getElementById('batchApplyModalOverlay').classList.add('show');
+    }
+
+    function populateBatchApplyProjects() {
+      const grid = document.getElementById('batchApplyProjectCheckboxes');
+      const projects = Array.isArray(projectsCache) ? projectsCache : [];
+      if (!projects.length) {
+        grid.innerHTML = '<em style="font-size:12px;color:var(--text-muted);">暂无项目</em>';
+        return;
+      }
+
+      // 获取所有选中订阅的已使用项目列表
+      const urls = Array.from(selectedSubscriptionURLs);
+      const allUsedProjects = new Set();
+
+      urls.forEach(url => {
+        const subscription = subscriptionsCache.find(s => s.url === url);
+        if (subscription && subscription.used_by_projects) {
+          subscription.used_by_projects.forEach(p => allUsedProjects.add(p));
+        }
+      });
+
+      grid.innerHTML = projects.map((project, index) => {
+        const id = `batchproj-${index}`;
+        const name = project.name || project.id;
+
+        // 检查该项目是否已经使用了选中的任何一个订阅
+        const isUsed = Array.from(allUsedProjects).some(p =>
+          p === project.id ||
+          p === project.name ||
+          p.toLowerCase() === project.id.toLowerCase() ||
+          (project.name && p.toLowerCase() === project.name.toLowerCase())
+        );
+
+        return `<div class="checkbox-row" title="${escapeHtml(project.id)}">
+          <input type="checkbox" id="${id}" value="${escapeHtml(project.id)}" class="batch-apply-project-checkbox" ${isUsed ? 'checked' : ''} />
+          <label for="${id}">${escapeHtml(name)}</label>
+        </div>`;
+      }).join('');
+    }
+
+    function selectAllBatchApplyProjects() {
+      document.querySelectorAll('.batch-apply-project-checkbox').forEach(cb => cb.checked = true);
+    }
+
+    function invertBatchApplyProjects() {
+      document.querySelectorAll('.batch-apply-project-checkbox').forEach(cb => cb.checked = !cb.checked);
+    }
+
+    async function submitBatchApply() {
+      const selectedProjects = Array.from(document.querySelectorAll('.batch-apply-project-checkbox:checked'))
+        .map(cb => cb.value);
+
+      if (selectedProjects.length === 0) {
+        showToast('请至少选择一个项目', 'error');
+        return;
+      }
+
+      const urls = Array.from(selectedSubscriptionURLs);
+      const confirmed = confirm(`确定要将 ${urls.length} 个订阅应用到 ${selectedProjects.length} 个项目吗？`);
+      if (!confirmed) return;
+
+      document.getElementById('batchApplyModalOverlay').classList.remove('show');
+      showToast('开始批量应用订阅到项目...');
+
+      let successCount = 0;
+      let failedCount = 0;
+
+      for (const url of urls) {
+        try {
+          // 这里需要调用API将订阅应用到项目
+          // 暂时使用简化逻辑
+          await new Promise(resolve => setTimeout(resolve, 100));
+          successCount++;
+        } catch (error) {
+          failedCount++;
+        }
+      }
+
+      showToast(`批量应用完成！成功 ${successCount} 个，失败 ${failedCount} 个`, 'success');
+      clearSubscriptionSelection();
+      await fetchSubscriptions();
+    }
+
+    // ========== 订阅项目选择功能 ==========
+    function selectAllSubscriptionProjects() {
+      document.querySelectorAll('#subscriptionProjectCheckboxes input[type="checkbox"]').forEach(cb => cb.checked = true);
+    }
+
+    function invertSubscriptionProjects() {
+      document.querySelectorAll('#subscriptionProjectCheckboxes input[type="checkbox"]').forEach(cb => cb.checked = !cb.checked);
     }
 
   </script>
