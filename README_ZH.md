@@ -215,6 +215,12 @@ dns:
 - `GET|POST /api/subscription/status|refresh`
 - `POST /api/reload`
 
+### 异步操作
+
+节点探测、节点增删改/导入、订阅刷新与修改、项目启停/重载、设置保存等可能耗时的写操作默认异步执行。接口会立即返回 `202 Accepted`，响应中包含 `task_id`、`status_url`、`events_url` 和 `cancel_url`；通过 `GET /api/tasks/{task_id}` 轮询状态，或连接 `GET /api/tasks/{task_id}/events` 接收 SSE 进度。
+
+需要兼容旧的同步请求时，在 URL 添加 `?wait=true`，或发送 `Prefer: wait` 请求头。任务队列有界，队列满时返回 `429`，任务状态仅保留在当前进程内。
+
 未带项目前缀的旧接口继续操作 `default_project`，用于兼容已有脚本；没有项目时返回 HTTP 503，项目清单和系统设置接口仍然可用。
 
 `management.password` 为空时，Web/API 不要求登录。

@@ -435,6 +435,7 @@
     .badge-warning { background: var(--warning-bg); color: var(--warning); border: 1px solid var(--warning); }
     .badge-error { background: var(--error-bg); color: var(--error); border: 1px solid var(--error); }
     .badge-offline { background: var(--bg-hover); color: var(--text-muted); border: 1px solid var(--border); }
+    .badge-neutral { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); }
     .badge-copyable { cursor: copy; user-select: none; }
 
     .tt-mono { font-family: var(--font-mono); font-size: 12px; }
@@ -1003,7 +1004,7 @@
           </div>
           <div class="table-container">
             <table>
-              <thead><tr><th class="config-node-select-cell"><input id="configNodeSelectAll" class="config-node-select" type="checkbox" onchange="toggleAllVisibleConfigNodes(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>名称</th><th>URI</th><th>来源</th><th>操作</th></tr></thead>
+              <thead><tr><th class="config-node-select-cell"><input id="configNodeSelectAll" class="config-node-select" type="checkbox" onchange="toggleAllVisibleConfigNodes(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>名称</th><th>URI</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
               <tbody id="configNodesTableBody"></tbody>
             </table>
             <div id="configNodesEmptyState" class="table-empty-state">暂无节点</div>
@@ -1066,7 +1067,7 @@
           </div>
           <div class="table-container">
             <table>
-              <thead><tr><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
+              <thead><tr><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点(有效/总)</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
               <tbody id="subscriptionsTableBody"></tbody>
             </table>
             <div id="subscriptionsEmptyState" class="table-empty-state">暂无订阅</div>
@@ -1448,11 +1449,48 @@
     let selectedProjectIDs = new Set();
     let projectNonSubscriptionNodeIDs = [];
     let projectExcludedNodeIDs = new Set();
-    const nativeFetch = window.fetch.bind(window);
+    const rawFetch = window.fetch.bind(window);
+
+    async function waitForAsyncTask(taskID, statusURL, signal) {
+      const startedAt = Date.now();
+      let delay = 250;
+      while (Date.now() - startedAt < 60 * 60 * 1000) {
+        if (signal && signal.aborted) throw new DOMException('后台任务等待已取消', 'AbortError');
+        const response = await rawFetch(statusURL || `/api/tasks/${encodeURIComponent(taskID)}`, {cache: 'no-store', signal});
+        if (!response.ok) throw new Error(`后台任务状态查询失败 (${response.status})`);
+        const task = await response.json();
+        if (task.status === 'succeeded' || task.status === 'failed' || task.status === 'canceled') return task;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay = Math.min(1000, Math.round(delay * 1.4));
+      }
+      throw new Error('后台任务等待超时');
+    }
+
+    async function nativeFetch(input, init) {
+      const response = await rawFetch(input, init);
+      if (response.status !== 202) return response;
+      let accepted;
+      try {
+        accepted = await response.clone().json();
+      } catch (_) {
+        return response;
+      }
+      if (!accepted || !accepted.task_id) return response;
+      const task = await waitForAsyncTask(accepted.task_id, accepted.status_url, init && init.signal);
+      const nested = task.result || {};
+      const data = Object.prototype.hasOwnProperty.call(nested, 'data') ? nested.data : {};
+      const failed = task.status !== 'succeeded';
+      const status = Number(nested.status_code) || (failed ? 500 : 200);
+      const payload = failed ? {error: task.error || '后台任务未完成', task} : (data === undefined ? {} : data);
+      return new Response(JSON.stringify(payload), {
+        status,
+        headers: {'Content-Type': nested.content_type || 'application/json'}
+      });
+    }
 
     function projectAPIPath(path) {
       if (typeof path !== 'string' || !path.startsWith('/api/')) return path;
-      if (path === '/api/auth' || path === '/api/projects' || path.startsWith('/api/projects/')) return path;
+      if (path === '/api/auth' || path === '/api/projects' || path.startsWith('/api/projects/') || path === '/api/tasks' || path.startsWith('/api/tasks/')) return path;
       if (!currentProjectID) return path;
       return `/api/projects/${encodeURIComponent(currentProjectID)}${path.slice(4)}`;
     }
@@ -1467,7 +1505,7 @@
 		const scopedPath = projectAPIPath(input);
 		const scopedProject = currentProjectID;
 		const isProjectRequest = scopedPath !== input;
-		return nativeFetch(scopedPath, init).then(response => {
+        return nativeFetch(scopedPath, init).then(response => {
 		  if (isProjectRequest && scopedProject !== currentProjectID) {
 			throw new DOMException('切换项目时请求仍在处理中', 'AbortError');
 		  }
@@ -3753,6 +3791,15 @@
       }
     }
 
+    function renderSubscriptionNodeCount(item) {
+      const total = Number(item.node_count) || 0;
+      const probed = Number(item.probed_node_count) || 0;
+      if (probed <= 0) return String(total);
+      const valid = Number(item.valid_node_count) || 0;
+      const color = valid === 0 ? 'color:var(--error)' : 'color:var(--success)';
+      return `<span class="tt-mono" style="${color}" title="有效节点 / 总节点">${valid} / ${total}</span>`;
+    }
+
     function updateDashboardSubscriptionCount(items, globalView = !currentProjectID) {
       const list = Array.isArray(items) ? items : [];
       const count = globalView
@@ -3766,7 +3813,15 @@
       subscriptionsCache = globalView ? (data.global_items || data.items || []) : (data.items || []);
       updateDashboardSubscriptionCount(subscriptionsCache, globalView);
       document.getElementById('subscriptionTotalCount').textContent = subscriptionsCache.length;
-      document.getElementById('subscriptionActiveNodes').textContent = data.node_count || 0;
+      // Aggregate valid/total across all subscriptions. Before any probing
+      // (probed_node_count == 0 everywhere) show only the total.
+      let total = 0, valid = 0, probed = 0;
+      for (const item of subscriptionsCache) {
+        total += Number(item.node_count) || 0;
+        valid += Number(item.valid_node_count) || 0;
+        probed += Number(item.probed_node_count) || 0;
+      }
+      document.getElementById('subscriptionActiveNodes').textContent = probed > 0 ? `${valid} / ${total}` : String(total);
       document.getElementById('subscriptionNextRefresh').textContent = globalView ? '-' : (data.enabled ? formatDateTime(data.next_refresh) : '-');
       renderSubscriptions();
     }
@@ -3864,7 +3919,7 @@
           <td><span class="badge ${badge}" title="${escapeHtml(statusTitle)}">${label}</span></td>
           <td><div class="cell-trunc" style="max-width:300px;font-weight:500" title="${escapeHtml(item.url)}">${escapeHtml(item.name || item.url)}</div><div class="cell-trunc tt-mono" style="max-width:300px;font-size:11px;color:var(--text-muted)" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</div></td>
           ${globalView ? `<td><div class="cell-trunc" style="max-width:220px" title="${escapeHtml(usedByText)}">${escapeHtml(usedByText)}</div></td>` : ''}
-          <td class="tt-mono">${item.node_count || 0}</td>
+          <td class="tt-mono">${renderSubscriptionNodeCount(item)}</td>
           <td><div class="tt-mono">${traffic}</div><div style="font-size:11px;color:var(--text-muted)">${remaining}</div></td>
           <td class="tt-mono">${item.expires_at > 0 ? formatDateTime(item.expires_at) : '-'}</td>
           <td class="tt-mono">${formatDateTime(item.last_refresh)}</td>
@@ -4146,6 +4201,7 @@
             <td><strong class="cell-trunc" style="display:inline-block;vertical-align:bottom" title="${escapeHtml(n.name)}">${escapeHtml(n.name)}</strong></td>
             <td class="tt-mono cell-trunc cell-trunc-uri" title="${escapeHtml(n.uri)}">${escapeHtml(n.uri)}</td>
             <td>${renderConfigNodeSource(n)}</td>
+            <td>${renderConfigNodeStatus(n.status)}</td>
             <td>
               <button class="btn btn-sm" onclick="showEditNodeModal('${escapeAttrJs(n.name)}')">编辑</button>
               <button class="btn btn-sm btn-danger" onclick="deleteNode('${escapeAttrJs(n.name)}')">删除</button>
@@ -4201,6 +4257,15 @@
       }
       if (node.source === 'nodes_file') return '<span class="badge badge-offline">节点文件</span>';
       return '<span class="badge badge-healthy">手动</span>';
+    }
+
+    function renderConfigNodeStatus(status) {
+      switch (status) {
+        case 'valid': return '<span class="badge badge-healthy">有效</span>';
+        case 'abnormal': return '<span class="badge badge-error">异常</span>';
+        case 'blacklisted': return '<span class="badge badge-offline" title="该节点当前处于拉黑状态">拉黑</span>';
+        default: return '<span class="badge badge-neutral" title="尚未探测">未探测</span>';
+      }
     }
 
     function setNodeModalMode(mode) {

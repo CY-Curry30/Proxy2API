@@ -254,6 +254,13 @@ func (n *NodeConfig) StateIDForOccurrence(occurrence int) string {
 	return state.NodeID(key)
 }
 
+// StableNodeKey exposes the port-stable identity derivation for callers that
+// only have a raw URI string (for example the monitor, when matching runtime
+// snapshots back to a config node definition). See stableNodeKey for the rules.
+func StableNodeKey(uri string) string {
+	return stableNodeKey(uri)
+}
+
 // stableNodeKey derives a port-stable identity from a proxy URI by stripping the
 // volatile display name and canonicalizing query order. It never errors: on any
 // parse failure it falls back to the raw URI minus its fragment, so the result

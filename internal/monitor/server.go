@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -13,6 +14,7 @@ import (
 	"log"
 	mathrand "math/rand"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
@@ -110,6 +112,8 @@ type SubscriptionInfo struct {
 	Status         string    `json:"status"`
 	UsedByProjects []string  `json:"used_by_projects"`
 	NodeCount      int       `json:"node_count"`
+	ValidNodeCount int       `json:"valid_node_count,omitempty"`
+	ProbedNodeCount int      `json:"probed_node_count,omitempty"`
 	Included       bool      `json:"included"`
 	Enabled        bool      `json:"enabled"`
 	UploadBytes    int64     `json:"upload_bytes"`
@@ -157,6 +161,11 @@ type Server struct {
 	subRefresher   SubscriptionRefresher
 	nodeMgr        NodeManager
 	trafficHistory TrafficHistory
+
+	// tasks owns long-running mutations and probes. It is shared by every
+	// project-scoped view of this server so a task can outlive the submitting
+	// HTTP request and still be queried through /api/tasks.
+	tasks *TaskManager
 }
 
 // NewServer constructs a server; it can be nil when disabled.
@@ -185,6 +194,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 		projectProbeStop: make(map[string]*probeCancelState),
 		projectConfigMap: make(map[string]*sync.RWMutex),
 		systemUsage:      systemSampler,
+		tasks:            NewTaskManager(0),
 	}
 
 	// Start session cleanup goroutine
@@ -193,6 +203,8 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/auth", s.handleAuth)
+	mux.HandleFunc("/api/tasks", s.withAuth(s.handleTasks))
+	mux.HandleFunc("/api/tasks/", s.withAuth(s.handleTaskRoute))
 	mux.HandleFunc("/api/projects", s.withAuth(s.handleProjects))
 	mux.HandleFunc("/api/projects/", s.withAuth(s.handleProjectRoute))
 	mux.HandleFunc("/api/dashboard/global", s.withAuth(s.handleGlobalDashboard))
@@ -306,6 +318,17 @@ func (s *Server) scopedProject(binding ProjectBinding) *Server {
 		subRefresher:     binding.SubscriptionRefresher,
 		nodeMgr:          binding.NodeManager,
 		trafficHistory:   binding.TrafficHistory,
+		// Per-view maps and shared runtime bookkeeping are inherited from the
+		// calling server so a scoped view is never left with a nil map. Without
+		// this, re-scoping a view (or calling configLock/probeGate on it) panics
+		// with "assignment to entry in nil map".
+		projectConfigMap: s.projectConfigMap,
+		projectProbeGate: s.projectProbeGate,
+		projectProbeStop: s.projectProbeStop,
+		sessions:         s.sessions,
+		sessionTTL:       s.sessionTTL,
+		systemUsage:      s.systemUsage,
+		tasks:            s.tasks,
 	}
 }
 
@@ -528,6 +551,14 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 			"port_hints":      s.projects.ProjectPortHints(),
 		})
 	case http.MethodPost:
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "project.create",
+			Scope:     "workspace",
+			Exclusive: true,
+			Message:   "正在创建项目",
+		}, (*Server).handleProjects) {
+			return
+		}
 		var request ProjectCreateRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -701,6 +732,14 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 			"log": settings.Log,
 		})
 	case http.MethodPut:
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "system.settings.update",
+			Scope:     "workspace",
+			Exclusive: true,
+			Message:   "正在保存系统设置",
+		}, (*Server).handleSystemSettings) {
+			return
+		}
 		var settings SystemSettings
 		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -752,6 +791,18 @@ func (s *Server) handleProjectRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 1 || parts[1] == "" {
+		if r.Method == http.MethodPatch || r.Method == http.MethodDelete {
+			if s.enqueueAsyncMutation(w, r, TaskSpec{
+				Kind:      "project.update",
+				ProjectID: projectID,
+				Resource:  "project:" + projectID,
+				Message:   "正在更新项目",
+			}, func(taskServer *Server, ww http.ResponseWriter, rr *http.Request) {
+				taskServer.handleProjectItem(ww, rr, projectID)
+			}) {
+				return
+			}
+		}
 		s.handleProjectItem(w, r, projectID)
 		return
 	}
@@ -759,6 +810,14 @@ func (s *Server) handleProjectRoute(w http.ResponseWriter, r *http.Request) {
 	if actionOrAPI == "start" || actionOrAPI == "stop" || actionOrAPI == "reload" {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "project." + actionOrAPI,
+			ProjectID: projectID,
+			Resource:  "project:" + projectID,
+			Message:   "正在" + map[string]string{"start": "启动项目", "stop": "停止项目", "reload": "重载项目"}[actionOrAPI],
+		}, (*Server).handleProjectRoute) {
 			return
 		}
 		var actionErr error
@@ -1006,6 +1065,9 @@ func (s *Server) Start(ctx context.Context) {
 	if s == nil || s.srv == nil {
 		return
 	}
+	if s.tasks != nil {
+		s.tasks.Start(ctx)
+	}
 	s.logger.Printf("正在启动监控服务，监听地址：%s", s.cfg.Listen)
 	go func() {
 		if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -1031,6 +1093,9 @@ func (s *Server) Shutdown(ctx context.Context) {
 		s.systemUsage.close()
 	}
 	_ = s.srv.Shutdown(ctx)
+	if s.tasks != nil {
+		s.tasks.Close()
+	}
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -1172,6 +1237,13 @@ func (s *Server) handleStickyNode(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeJSON(w, map[string]any{"tag": s.mgr.StickyNode()})
 	case http.MethodPut, http.MethodDelete:
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "node.sticky.update",
+			ProjectID: s.projectID,
+			Message:   "正在更新固定出口",
+		}, (*Server).handleStickyNode) {
+			return
+		}
 		tag := ""
 		if r.Method == http.MethodPut {
 			var req struct {
@@ -1291,6 +1363,13 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:              "node.probe",
+			Message:           "正在探测节点 " + tag,
+			SkipWorkspaceLock: true,
+		}, (*Server).handleNodeAction) {
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), s.currentProbeTimeout())
 		defer cancel()
 		result, err := s.mgr.ProbeWithResult(ctx, tag)
@@ -1325,6 +1404,13 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:              "node.release",
+			Message:           "正在解除节点拉黑状态",
+			SkipWorkspaceLock: true,
+		}, (*Server).handleNodeAction) {
+			return
+		}
 		if err := s.mgr.Release(tag); err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			writeJSON(w, map[string]any{"error": err.Error()})
@@ -1334,6 +1420,13 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 	case "blacklist":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:              "node.blacklist",
+			Message:           "正在拉黑节点",
+			SkipWorkspaceLock: true,
+		}, (*Server).handleNodeAction) {
 			return
 		}
 		// Prefer the configured pool.blacklist_duration over the default.
@@ -1617,6 +1710,326 @@ func (s *Server) handleProbeCancel(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+const maxAsyncRequestBody = 32 << 20
+
+// asyncPreferred treats long-running mutations as asynchronous by default.
+// Clients that still need the historical request/response behaviour can add
+// ?wait=true (or Prefer: wait). Prefer: respond-async and ?async=true are
+// accepted explicitly as well, which makes the contract easy to use from
+// generic HTTP clients.
+func asyncPreferred(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	query := r.URL.Query()
+	if raw := strings.TrimSpace(query.Get("wait")); raw != "" {
+		if value, err := strconv.ParseBool(raw); err == nil {
+			return !value
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("async")); raw != "" {
+		if value, err := strconv.ParseBool(raw); err == nil {
+			return value
+		}
+	}
+	prefer := strings.ToLower(r.Header.Get("Prefer"))
+	if strings.Contains(prefer, "respond-async") {
+		return true
+	}
+	if strings.Contains(prefer, "wait") {
+		return false
+	}
+	return true
+}
+
+// enqueueAsyncMutation turns an existing JSON HTTP handler into a background
+// task without duplicating its validation/business logic. The original handler
+// is invoked with wait=true inside a bounded worker, and its response is stored
+// in the task result. This keeps the synchronous path available for scripts
+// while making the default API response a fast 202 Accepted.
+func (s *Server) enqueueAsyncMutation(w http.ResponseWriter, r *http.Request, spec TaskSpec, handler scopedProjectHandler) bool {
+	if s == nil || s.tasks == nil || r == nil || handler == nil || !asyncPreferred(r) {
+		return false
+	}
+
+	body := []byte(nil)
+	if r.Body != nil && r.Body != http.NoBody {
+		var err error
+		body, err = io.ReadAll(io.LimitReader(r.Body, maxAsyncRequestBody+1))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "读取请求体失败"})
+			return true
+		}
+		if len(body) > maxAsyncRequestBody {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			writeJSON(w, map[string]any{"error": "请求体过大"})
+			return true
+		}
+	}
+
+	if spec.Scope == "" {
+		if s.catalogOnly {
+			spec.Scope = "global"
+		} else if s.hasProjectScope() {
+			spec.Scope = "project"
+		} else {
+			spec.Scope = "runtime"
+		}
+	}
+	if spec.ProjectID == "" && s.hasProjectScope() {
+		spec.ProjectID = s.projectID
+	}
+	if spec.Resource == "" && spec.ProjectID != "" {
+		spec.Resource = "project:" + spec.ProjectID
+	}
+
+	// Preserve the complete URL (including scope, delete_global, etc.) while
+	// forcing the nested invocation down the synchronous compatibility path.
+	clonedURL := *r.URL
+	query := clonedURL.Query()
+	query.Set("wait", "true")
+	query.Del("async")
+	clonedURL.RawQuery = query.Encode()
+
+	snapshot, err := s.tasks.Submit(TaskSpec{
+		Kind:      spec.Kind,
+		Scope:     spec.Scope,
+		ProjectID: spec.ProjectID,
+		Resource:  spec.Resource,
+		Exclusive: spec.Exclusive,
+		Message:   spec.Message,
+		Run: func(ctx context.Context, reporter *TaskReporter) (any, error) {
+			reporter.Update(1, "正在执行", nil)
+			taskServer, resolveErr := s.resolveTaskServer()
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			request := r.Clone(ctx)
+			request.URL = &clonedURL
+			request.Body = io.NopCloser(bytes.NewReader(body))
+			request.ContentLength = int64(len(body))
+			recorder := httptest.NewRecorder()
+			handler(taskServer, recorder, request)
+			result, runErr := captureAsyncHTTPResult(recorder)
+			if runErr != nil {
+				reporter.Update(100, "处理失败", result)
+				return result, runErr
+			}
+			reporter.Update(100, "处理完成", result)
+			return result, nil
+		},
+	})
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, ErrTaskQueueFull) {
+			status = http.StatusTooManyRequests
+		}
+		w.WriteHeader(status)
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return true
+	}
+	writeTaskAccepted(w, snapshot)
+	return true
+}
+
+func (s *Server) resolveTaskServer() (*Server, error) {
+	if s == nil || s.projects == nil {
+		return s, nil
+	}
+	// A view already bound to a project or the shared catalog is already the
+	// correct runtime, with its Manager/SubscriptionRefresher/NodeManager
+	// pointed at the right binding. Re-scoping it would recurse through
+	// scopedProject again and dereference a nil per-view map (historically
+	// "assignment to entry in nil map" during subscription refreshes).
+	if s.hasProjectScope() || s.catalogOnly {
+		return s, nil
+	}
+	// The unscoped root server has no project binding to preserve, so the task
+	// replays against it directly.
+	return s, nil
+}
+
+type asyncHTTPResult struct {
+	StatusCode  int    `json:"status_code"`
+	ContentType string `json:"content_type,omitempty"`
+	Data        any    `json:"data,omitempty"`
+}
+
+func captureAsyncHTTPResult(recorder *httptest.ResponseRecorder) (asyncHTTPResult, error) {
+	if recorder == nil {
+		return asyncHTTPResult{}, errors.New("后台操作没有返回结果")
+	}
+	status := recorder.Code
+	if status == 0 {
+		status = http.StatusOK
+	}
+	result := asyncHTTPResult{StatusCode: status, ContentType: recorder.Header().Get("Content-Type")}
+	body := recorder.Body.Bytes()
+	if len(body) > 4<<20 {
+		body = body[:4<<20]
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		var data any
+		if err := json.Unmarshal(body, &data); err == nil {
+			result.Data = data
+		} else {
+			result.Data = string(body)
+		}
+	}
+	if status >= http.StatusBadRequest {
+		return result, asyncResultError(result.Data, fmt.Sprintf("后台操作失败（HTTP %d）", status))
+	}
+	if data, ok := result.Data.(map[string]any); ok {
+		for _, key := range []string{"error", "reload_error", "shared_reload_error", "refresh_error"} {
+			if message, ok := data[key].(string); ok && strings.TrimSpace(message) != "" {
+				return result, errors.New(message)
+			}
+		}
+	}
+	return result, nil
+}
+
+func asyncResultError(data any, fallback string) error {
+	if values, ok := data.(map[string]any); ok {
+		if message, ok := values["error"].(string); ok && strings.TrimSpace(message) != "" {
+			return errors.New(message)
+		}
+	}
+	return errors.New(fallback)
+}
+
+func writeTaskAccepted(w http.ResponseWriter, snapshot TaskSnapshot) {
+	statusURL := "/api/tasks/" + url.PathEscape(snapshot.ID)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Preference-Applied", "respond-async")
+	w.Header().Set("Location", statusURL)
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"task_id":    snapshot.ID,
+		"status":     snapshot.Status,
+		"kind":       snapshot.Kind,
+		"scope":      snapshot.Scope,
+		"project_id": snapshot.ProjectID,
+		"message":    snapshot.Message,
+		"status_url": statusURL,
+		"events_url": statusURL + "/events",
+		"cancel_url": statusURL + "/cancel",
+		"task":       snapshot,
+	})
+}
+
+func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.tasks == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]any{"error": "后台任务未启用"})
+		return
+	}
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	writeJSON(w, map[string]any{"tasks": s.tasks.List(limit)})
+}
+
+func (s *Server) handleTaskRoute(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "任务 ID 不能为空"})
+		return
+	}
+	id, err := url.PathUnescape(parts[0])
+	if err != nil || strings.TrimSpace(id) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "任务 ID 无效"})
+		return
+	}
+	if s.tasks == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]any{"error": "后台任务未启用"})
+		return
+	}
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		snapshot, getErr := s.tasks.Get(id)
+		if getErr != nil {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]any{"error": getErr.Error()})
+			return
+		}
+		writeJSON(w, snapshot)
+		return
+	}
+	switch parts[1] {
+	case "cancel":
+		if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		snapshot, cancelErr := s.tasks.Cancel(id)
+		if cancelErr != nil {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]any{"error": cancelErr.Error()})
+			return
+		}
+		writeJSON(w, snapshot)
+	case "events":
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleTaskEvents(w, r, id)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request, id string) {
+	updates, unsubscribe, err := s.tasks.Subscribe(id)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	defer unsubscribe()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"error": "当前连接不支持 SSE"})
+		return
+	}
+	for {
+		select {
+		case snapshot, open := <-updates:
+			if !open {
+				return
+			}
+			data, marshalErr := json.Marshal(snapshot)
+			if marshalErr != nil {
+				return
+			}
+			if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", data); writeErr != nil {
+				return
+			}
+			flusher.Flush()
+			if isTerminal(snapshot.Status) {
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 // withAuth 认证中间件，如果配置了密码则需要验证
@@ -1908,6 +2321,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, resp)
 	case http.MethodPut:
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "settings.update",
+			Scope:     map[bool]string{true: "project", false: "workspace"}[s.hasProjectScope()],
+			Resource:  map[bool]string{true: "project:" + s.projectID, false: ""}[s.hasProjectScope()],
+			Exclusive: !s.hasProjectScope(),
+			Message:   "正在保存运行设置",
+		}, (*Server).handleSettings) {
+			return
+		}
 		var req struct {
 			ExternalIP     string `json:"external_ip"`
 			ProbeTarget    string `json:"probe_target"`
@@ -2113,6 +2535,12 @@ func (s *Server) handleSubscriptionRefresh(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, map[string]any{"error": "订阅刷新未启用"})
 		return
 	}
+	if s.enqueueAsyncMutation(w, r, TaskSpec{
+		Kind:    "subscription.refresh",
+		Message: "正在刷新订阅",
+	}, (*Server).handleSubscriptionRefresh) {
+		return
+	}
 
 	if err := s.subRefresher.RefreshNow(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -2159,6 +2587,14 @@ func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if !s.ensureSharedSourceOwner(w) {
+			return
+		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "subscription.config.update",
+			Scope:     "workspace",
+			Exclusive: true,
+			Message:   "正在更新订阅配置",
+		}, (*Server).handleSubscriptionConfig) {
 			return
 		}
 		var req struct {
@@ -2558,12 +2994,46 @@ func (s *Server) subscriptionUsageByURL(urls []string) map[string][]string {
 	return usage
 }
 
+// subscriptionNodeStats reports, per subscription URL, how many nodes have been
+// probed and how many of those are currently valid (probe passed, not
+// blacklisted). It powers the "有效节点/总节点" display on the subscription page.
+type subscriptionNodeStats struct {
+	valid  int
+	probed int
+}
+
+func (s *Server) subscriptionNodeStatsIndex() map[string]subscriptionNodeStats {
+	index := make(map[string]subscriptionNodeStats)
+	if s.mgr == nil {
+		return index
+	}
+	for _, snap := range s.mgr.SnapshotFiltered(false) {
+		if snap.Source != string(config.NodeSourceSubscription) {
+			continue
+		}
+		rawURL := snap.SubscriptionURL
+		if rawURL == "" {
+			continue
+		}
+		stats := index[rawURL]
+		if snap.InitialCheckDone {
+			stats.probed++
+			if snap.Available && !snap.Blacklisted {
+				stats.valid++
+			}
+		}
+		index[rawURL] = stats
+	}
+	return index
+}
+
 func (s *Server) subscriptionManagementPayload() map[string]any {
 	urls, enabled, interval := s.subscriptionConfigSnapshot()
 	effectiveURLs := s.effectiveSubscriptionURLs(urls)
 	items := make([]SubscriptionInfo, 0)
 	globalItems := make([]SubscriptionInfo, 0, len(urls))
 	status := SubscriptionStatus{}
+	nodeStats := s.subscriptionNodeStatsIndex()
 	if s.subRefresher != nil {
 		items = s.subRefresher.Subscriptions()
 		status = s.subRefresher.Status()
@@ -2584,6 +3054,15 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 	usage := s.subscriptionUsageByURL(urls)
 	for index := range items {
 		items[index].UsedByProjects = append([]string(nil), usage[items[index].URL]...)
+		// Sync probe results onto the per-subscription node count. When no node
+		// has been probed yet, ValidNodeCount stays 0 and the UI shows only the
+		// total. A negative sentinel would be misleading, so 0 simply means
+		// "not yet counted" here (and is indistinguishable from "zero valid"),
+		// which the UI handles by showing total-only until probing starts.
+		if stats, ok := nodeStats[items[index].URL]; ok {
+			items[index].ValidNodeCount = stats.valid
+			items[index].ProbedNodeCount = stats.probed
+		}
 	}
 	runtimeItems := make(map[string]SubscriptionInfo, len(items))
 	if s.catalogOnly {
@@ -2643,6 +3122,14 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
 		if !s.ensureSharedSourceOwner(w) {
+			return
+		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "subscription.mutate",
+			Scope:     "workspace",
+			Exclusive: true,
+			Message:   "正在更新订阅",
+		}, (*Server).handleSubscriptions) {
 			return
 		}
 		var req subscriptionMutationRequest
@@ -2826,6 +3313,13 @@ func (s *Server) handleSubscriptionSettings(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	if s.enqueueAsyncMutation(w, r, TaskSpec{
+		Kind:      "subscription.settings.update",
+		ProjectID: s.projectID,
+		Message:   "正在保存订阅计划",
+	}, (*Server).handleSubscriptionSettings) {
+		return
+	}
 	var req struct {
 		Enabled  bool   `json:"enabled"`
 		Interval string `json:"interval"`
@@ -2857,6 +3351,13 @@ func (s *Server) handleManagedSubscriptionRefresh(w http.ResponseWriter, r *http
 	if s.subRefresher == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		writeJSON(w, map[string]any{"error": "订阅管理器未启用"})
+		return
+	}
+	if s.enqueueAsyncMutation(w, r, TaskSpec{
+		Kind:      "subscriptions.refresh",
+		ProjectID: s.projectID,
+		Message:   "正在刷新订阅",
+	}, (*Server).handleManagedSubscriptionRefresh) {
 		return
 	}
 	if len(s.subRefresher.Subscriptions()) == 0 {
@@ -2933,6 +3434,75 @@ type configNodeView struct {
 	// display-only value for the project editor instead of leaking runtime fields.
 	ID               string `json:"id"`
 	SubscriptionName string `json:"subscription_name,omitempty"`
+	// Status is the latest probe-derived health state of this node, synced from
+	// the runtime monitor. Empty ("") means the node has not been probed yet.
+	// Possible values: "", "valid", "abnormal", "blacklisted".
+	Status string `json:"status,omitempty"`
+}
+
+// nodeStatus constants describe the probe-derived state shown on the node
+// configuration page. The empty string is reserved for "not probed yet".
+const (
+	nodeStatusValid       = "valid"
+	nodeStatusAbnormal    = "abnormal"
+	nodeStatusBlacklisted = "blacklisted"
+)
+
+// classifyNodeStatus maps a runtime snapshot onto the compact status string used
+// by the node configuration page. It reports whether the node has been probed.
+func classifyNodeStatus(snap Snapshot) (status string, probed bool) {
+	if snap.Blacklisted {
+		return nodeStatusBlacklisted, true
+	}
+	if !snap.InitialCheckDone {
+		return "", false
+	}
+	if snap.Available {
+		return nodeStatusValid, true
+	}
+	return nodeStatusAbnormal, true
+}
+
+// runtimeNodeStatusIndex returns the probe-derived status of every registered
+// runtime node, keyed by stable node identity. Two keys are emitted per node —
+// its state ID and its stable URI key — so config node definitions that come
+// from a different normalization pass still match by URI. The empty string means
+// "not probed".
+func (s *Server) runtimeNodeStatusIndex() map[string]configNodeStatusEntry {
+	index := make(map[string]configNodeStatusEntry)
+	if s.mgr == nil {
+		return index
+	}
+	for _, snap := range s.mgr.SnapshotFiltered(false) {
+		status, probed := classifyNodeStatus(snap)
+		if !probed {
+			continue
+		}
+		statusEntry := configNodeStatusEntry{status: status, probed: true}
+		if snap.ID != "" {
+			index[snap.ID] = statusEntry
+		}
+		if key := config.StableNodeKey(snap.URI); key != "" {
+			index[key] = statusEntry
+		}
+	}
+	return index
+}
+
+type configNodeStatusEntry struct {
+	status string
+	probed bool
+}
+
+// configNodeStatusFor resolves the display status for a config node definition.
+func (s *Server) configNodeStatusFor(node config.NodeConfig, index map[string]configNodeStatusEntry) string {
+	if entry, ok := index[node.StateID()]; ok {
+		return entry.status
+	}
+	if entry, ok := index[config.StableNodeKey(node.URI)]; ok {
+		return entry.status
+	}
+	return ""
 }
 
 type snapshotNodeView struct {
@@ -2971,6 +3541,7 @@ func (s *Server) snapshotNodeViews(nodes []Snapshot) []snapshotNodeView {
 
 func (s *Server) configNodeViews(nodes []config.NodeConfig) []configNodeView {
 	subscriptionNames := s.subscriptionDisplayNames()
+	statusIndex := s.runtimeNodeStatusIndex()
 
 	views := make([]configNodeView, 0, len(nodes))
 	for _, node := range nodes {
@@ -2981,6 +3552,7 @@ func (s *Server) configNodeViews(nodes []config.NodeConfig) []configNodeView {
 				view.SubscriptionName = subscriptionNameFromURL(node.SubscriptionURL)
 			}
 		}
+		view.Status = s.configNodeStatusFor(node, statusIndex)
 		views = append(views, view)
 	}
 	return views
@@ -3021,6 +3593,15 @@ func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 		if !s.ensureSharedSourceOwner(w) {
 			return
 		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "node.create",
+			Scope:     map[bool]string{true: "global", false: "project"}[globalScope],
+			Resource:  map[bool]string{true: "", false: "project:" + s.projectID}[globalScope],
+			Exclusive: true,
+			Message:   "正在添加节点",
+		}, (*Server).handleConfigNodes) {
+			return
+		}
 		var payload nodePayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -3044,6 +3625,15 @@ func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, response)
 	case http.MethodDelete:
 		if !s.ensureSharedSourceOwner(w) {
+			return
+		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "node.delete",
+			Scope:     map[bool]string{true: "global", false: "project"}[globalScope],
+			Resource:  map[bool]string{true: "", false: "project:" + s.projectID}[globalScope],
+			Exclusive: true,
+			Message:   "正在删除节点",
+		}, (*Server).handleConfigNodes) {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
@@ -3145,6 +3735,15 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 		if !s.ensureSharedSourceOwner(w) {
 			return
 		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "node.update",
+			Scope:     map[bool]string{true: "global", false: "project"}[strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("scope")), "global")],
+			Resource:  map[bool]string{true: "", false: "project:" + s.projectID}[strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("scope")), "global")],
+			Exclusive: true,
+			Message:   "正在更新节点",
+		}, (*Server).handleConfigNodeItem) {
+			return
+		}
 		var payload nodePayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -3161,6 +3760,23 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, response)
 	case http.MethodDelete:
 		if !s.ensureSharedSourceOwner(w) {
+			return
+		}
+		globalScope := !s.hasProjectScope()
+		if s.hasProjectScope() {
+			if raw := strings.TrimSpace(r.URL.Query().Get("delete_global")); raw != "" {
+				if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
+					globalScope = parsed
+				}
+			}
+		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "node.delete",
+			Scope:     map[bool]string{true: "global", false: "project"}[globalScope],
+			Resource:  map[bool]string{true: "", false: "project:" + s.projectID}[globalScope],
+			Exclusive: true,
+			Message:   "正在删除节点",
+		}, (*Server).handleConfigNodeItem) {
 			return
 		}
 		deleteGlobal := !s.hasProjectScope()
@@ -3229,6 +3845,15 @@ func (s *Server) handleNodeImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	globalScope := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("scope")), "global")
+	if s.enqueueAsyncMutation(w, r, TaskSpec{
+		Kind:      "node.import",
+		Scope:     map[bool]string{true: "global", false: "project"}[globalScope],
+		Resource:  map[bool]string{true: "", false: "project:" + s.projectID}[globalScope],
+		Exclusive: true,
+		Message:   "正在导入节点",
+	}, (*Server).handleNodeImport) {
+		return
+	}
 
 	const (
 		maxImportContentSize = 10 * 1024 * 1024
@@ -3291,6 +3916,14 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.ensureNodeManager(w) {
+		return
+	}
+	if s.enqueueAsyncMutation(w, r, TaskSpec{
+		Kind:      "config.reload",
+		Scope:     "workspace",
+		Exclusive: true,
+		Message:   "正在重载配置",
+	}, (*Server).handleReload) {
 		return
 	}
 
@@ -3438,6 +4071,13 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeJSON(w, map[string]any{"logs": buffer.Content()})
 	case http.MethodDelete:
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:      "logs.clear",
+			ProjectID: s.projectID,
+			Message:   "正在清空日志",
+		}, (*Server).handleLogs) {
+			return
+		}
 		buffer.Clear()
 		writeJSON(w, map[string]any{"message": "控制台日志已清空"})
 	default:
