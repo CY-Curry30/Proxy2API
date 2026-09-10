@@ -927,10 +927,19 @@
               <input id="nodeSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索名称、标签或端口" oninput="applyNodeFilters()" />
             </div>
           </div>
+          <!-- 批量操作工具栏 -->
+          <div id="batchActionsBar" style="display:none; background: var(--bg-panel); border: 1px solid var(--border); padding: 12px; margin-bottom: 12px; border-radius: 6px; align-items:center; gap:12px;">
+            <span style="color: var(--text-muted); font-size: 13px;">已选择 <strong id="selectedCount" style="color: var(--primary);">0</strong> 个节点</span>
+            <button class="btn btn-sm btn-primary" onclick="batchProbeNodes()" title="批量探测选中节点">🔍 批量探测</button>
+            <button class="btn btn-sm btn-success" onclick="batchReleaseNodes()" title="批量解封选中节点">✅ 批量解封</button>
+            <button class="btn btn-sm" onclick="batchBlacklistNodes()" style="background: var(--error); color: white;" title="批量拉黑选中节点">🚫 批量拉黑</button>
+            <button class="btn btn-sm" onclick="clearNodeSelection()" style="margin-left: auto;">取消选择</button>
+          </div>
           <div class="table-container">
             <table>
               <thead>
                 <tr>
+                  <th style="width:40px;"><input type="checkbox" id="nodeSelectAll" onchange="toggleAllNodes(this.checked)" title="全选/取消全选" /></th>
                   <th>状态</th>
                   <th>名称 (Name/Tag)</th>
                   <th>端口</th>
@@ -3517,6 +3526,7 @@
           : nodeDisplayName;
 
         return `<tr>
+          <td><input type="checkbox" class="node-checkbox" data-tag="${escapeHtml(n.tag)}" onchange="updateBatchSelection()" /></td>
           <td><span class="badge ${badge}${copyableError ? ' badge-copyable' : ''}" title="${escapeHtml(statusTitle)}"${statusCopyAttrs}>${statusText}</span></td>
           <td class="tt-mono">${escapeHtml(formatRegion(n))}</td>
           <td class="tt-mono">${escapeHtml(n.ip || '-')}</td>
@@ -4809,6 +4819,180 @@
 
     // Init App
     checkAuth().then(ok => { if(ok) initializeProjects(); });
+
+    // ========== 批量操作功能 ==========
+    let selectedNodeTags = new Set();
+
+    function toggleAllNodes(checked) {
+      const checkboxes = document.querySelectorAll('.node-checkbox');
+      checkboxes.forEach(cb => {
+        cb.checked = checked;
+        const tag = cb.getAttribute('data-tag');
+        if (checked) {
+          selectedNodeTags.add(tag);
+        } else {
+          selectedNodeTags.delete(tag);
+        }
+      });
+      updateBatchSelection();
+    }
+
+    function updateBatchSelection() {
+      selectedNodeTags.clear();
+      const checkboxes = document.querySelectorAll('.node-checkbox:checked');
+      checkboxes.forEach(cb => {
+        selectedNodeTags.add(cb.getAttribute('data-tag'));
+      });
+
+      const count = selectedNodeTags.size;
+      const bar = document.getElementById('batchActionsBar');
+      const countEl = document.getElementById('selectedCount');
+      const selectAllCheckbox = document.getElementById('nodeSelectAll');
+
+      if (count > 0) {
+        bar.style.display = 'flex';
+        countEl.textContent = count;
+      } else {
+        bar.style.display = 'none';
+        if (selectAllCheckbox) selectAllCheckbox.checked = false;
+      }
+    }
+
+    function clearNodeSelection() {
+      selectedNodeTags.clear();
+      document.querySelectorAll('.node-checkbox').forEach(cb => cb.checked = false);
+      const selectAllCheckbox = document.getElementById('nodeSelectAll');
+      if (selectAllCheckbox) selectAllCheckbox.checked = false;
+      updateBatchSelection();
+    }
+
+    async function batchProbeNodes() {
+      if (selectedNodeTags.size === 0) {
+        showToast('请先选择要探测的节点', 'error');
+        return;
+      }
+
+      const tags = Array.from(selectedNodeTags);
+      const confirmed = confirm(`确定要探测选中的 ${tags.length} 个节点吗？`);
+      if (!confirmed) return;
+
+      showToast('开始批量探测...');
+
+      try {
+        const response = await fetch('/api/nodes/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'probe', tags })
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || '批量探测请求失败');
+        }
+
+        // SSE stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let successCount = 0;
+        let failedCount = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const data = JSON.parse(line.substring(6));
+
+            if (data.type === 'start') {
+              showToast(`开始探测 ${data.total} 个节点...`);
+            } else if (data.type === 'progress') {
+              if (data.status === 'success') successCount++;
+              else failedCount++;
+              const progress = Math.round(data.progress || 0);
+              showToast(`探测进度: ${data.current}/${data.total} (${progress}%)`);
+            } else if (data.type === 'complete') {
+              showToast(`批量探测完成！成功 ${data.success} 个，失败 ${data.failed} 个`, 'success');
+              clearNodeSelection();
+              await refresh();
+            }
+          }
+        }
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    }
+
+    async function batchReleaseNodes() {
+      if (selectedNodeTags.size === 0) {
+        showToast('请先选择要解封的节点', 'error');
+        return;
+      }
+
+      const tags = Array.from(selectedNodeTags);
+      const confirmed = confirm(`确定要解封选中的 ${tags.length} 个节点吗？`);
+      if (!confirmed) return;
+
+      showToast('开始批量解封...');
+
+      try {
+        const response = await fetch('/api/nodes/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'release', tags })
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || '批量解封失败');
+        }
+
+        showToast(result.message, 'success');
+        clearNodeSelection();
+        await refresh();
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    }
+
+    async function batchBlacklistNodes() {
+      if (selectedNodeTags.size === 0) {
+        showToast('请先选择要拉黑的节点', 'error');
+        return;
+      }
+
+      const tags = Array.from(selectedNodeTags);
+      const duration = prompt(`确定要拉黑选中的 ${tags.length} 个节点吗？\n请输入拉黑时长（如: 1h, 30m, 24h）:`, '1h');
+      if (!duration) return;
+
+      showToast('开始批量拉黑...');
+
+      try {
+        const response = await fetch('/api/nodes/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'blacklist', tags, duration })
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || '批量拉黑失败');
+        }
+
+        showToast(result.message, 'success');
+        clearNodeSelection();
+        await refresh();
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    }
 
   </script>
 </body>

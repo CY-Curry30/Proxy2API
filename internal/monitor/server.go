@@ -219,6 +219,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/nodes/import", s.withAuth(s.withDefaultProject((*Server).handleNodeImport)))
 	mux.HandleFunc("/api/nodes/probe-all", s.withAuth(s.withDefaultProject((*Server).handleProbeAll)))
 	mux.HandleFunc("/api/nodes/probe-cancel", s.withAuth(s.withDefaultProject((*Server).handleProbeCancel)))
+	mux.HandleFunc("/api/nodes/batch", s.withAuth(s.withDefaultProject((*Server).handleNodeBatch)))
 	mux.HandleFunc("/api/nodes/", s.withAuth(s.withDefaultProject((*Server).handleNodeAction)))
 	mux.HandleFunc("/api/debug", s.withAuth(s.withDefaultProject((*Server).handleDebug)))
 	mux.HandleFunc("/api/export", s.withAuth(s.withDefaultProject((*Server).handleExport)))
@@ -1706,6 +1707,297 @@ func (s *Server) handleProbeCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{"cancelled": cancelled, "message": message})
 }
+
+// handleNodeBatch handles batch operations on multiple nodes
+func (s *Server) handleNodeBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Action   string   `json:"action"`   // "probe", "release", "blacklist"
+		Tags     []string `json:"tags"`     // 节点标签列表
+		Duration string   `json:"duration"` // 拉黑时长，仅用于 blacklist 操作
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "请求格式错误"})
+		return
+	}
+
+	if len(req.Tags) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "节点列表不能为空"})
+		return
+	}
+
+	if req.Action != "probe" && s.catalogOnly {
+		w.WriteHeader(http.StatusConflict)
+		writeJSON(w, map[string]any{"error": "全局目录只允许探测节点，不能修改节点运行状态"})
+		return
+	}
+
+	switch req.Action {
+	case "probe":
+		s.handleBatchProbe(w, r, req.Tags)
+	case "release":
+		s.handleBatchRelease(w, r, req.Tags)
+	case "blacklist":
+		s.handleBatchBlacklist(w, r, req.Tags, req.Duration)
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "不支持的操作: " + req.Action})
+	}
+}
+
+// handleBatchProbe probes multiple nodes in parallel
+func (s *Server) handleBatchProbe(w http.ResponseWriter, r *http.Request, tags []string) {
+	if s.enqueueAsyncMutation(w, r, TaskSpec{
+		Kind:              "node.batch.probe",
+		Message:           fmt.Sprintf("正在批量探测 %d 个节点", len(tags)),
+		SkipWorkspaceLock: true,
+	}, func(taskServer *Server, ww http.ResponseWriter, rr *http.Request) {
+		// Re-encode the request body for the task
+		body := map[string]any{"action": "probe", "tags": tags}
+		bodyBytes, _ := json.Marshal(body)
+		rr.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		taskServer.handleNodeBatch(ww, rr)
+	}) {
+		return
+	}
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "当前连接不支持 SSE", http.StatusInternalServerError)
+		return
+	}
+
+	total := len(tags)
+	startData, _ := json.Marshal(map[string]any{"type": "start", "total": total})
+	fmt.Fprintf(w, "data: %s\n\n", startData)
+	flusher.Flush()
+
+	// Probe nodes with limited concurrency
+	concurrency := s.currentProbeConcurrency()
+	sem := semaphore.NewWeighted(concurrency)
+	perProbe := s.currentProbeTimeout()
+
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(total)*perProbe+30*time.Second)
+	defer cancel()
+
+	type probeResult struct {
+		tag       string
+		latency   int64
+		healthy   bool
+		err       string
+		traceErr  string
+		traceIP   string
+		traceRegion string
+	}
+
+	results := make(chan probeResult, total)
+	var wg sync.WaitGroup
+
+	for _, tag := range tags {
+		wg.Add(1)
+		go func(tag string) {
+			defer wg.Done()
+
+			if err := sem.Acquire(ctx, 1); err != nil {
+				results <- probeResult{tag: tag, err: "探测已取消"}
+				return
+			}
+			defer sem.Release(1)
+
+			probeCtx, probeCancel := context.WithTimeout(ctx, perProbe)
+			defer probeCancel()
+
+			result, err := s.mgr.ProbeWithResult(probeCtx, tag)
+			latency := int64(-1)
+			if result.ConnectivityOK {
+				latency = result.Latency.Milliseconds()
+				if latency == 0 && result.Latency > 0 {
+					latency = 1
+				}
+			}
+
+			errMsg := ""
+			if err != nil {
+				errMsg = err.Error()
+			}
+
+			results <- probeResult{
+				tag:         tag,
+				latency:     latency,
+				healthy:     err == nil,
+				err:         errMsg,
+				traceErr:    result.TraceError,
+				traceIP:     result.IP,
+				traceRegion: result.Region,
+			}
+		}(tag)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	successCount := 0
+	failedCount := 0
+	count := 0
+
+	for result := range results {
+		count++
+		if result.healthy {
+			successCount++
+		} else {
+			failedCount++
+		}
+
+		status := "success"
+		if !result.healthy {
+			status = "error"
+		}
+
+		eventPayload := map[string]any{
+			"type":     "progress",
+			"tag":      result.tag,
+			"latency":  result.latency,
+			"status":   status,
+			"error":    result.err,
+			"trace_ip": result.traceIP,
+			"trace_region": result.traceRegion,
+			"current":  count,
+			"total":    total,
+			"progress": float64(count) / float64(total) * 100,
+		}
+		eventData, _ := json.Marshal(eventPayload)
+		fmt.Fprintf(w, "data: %s\n\n", eventData)
+		flusher.Flush()
+	}
+
+	completeData, _ := json.Marshal(map[string]any{
+		"type":    "complete",
+		"total":   total,
+		"success": successCount,
+		"failed":  failedCount,
+	})
+	fmt.Fprintf(w, "data: %s\n\n", completeData)
+	flusher.Flush()
+}
+
+// handleBatchRelease releases multiple nodes from blacklist
+func (s *Server) handleBatchRelease(w http.ResponseWriter, r *http.Request, tags []string) {
+	if s.enqueueAsyncMutation(w, r, TaskSpec{
+		Kind:              "node.batch.release",
+		Message:           fmt.Sprintf("正在批量解封 %d 个节点", len(tags)),
+		SkipWorkspaceLock: true,
+	}, func(taskServer *Server, ww http.ResponseWriter, rr *http.Request) {
+		body := map[string]any{"action": "release", "tags": tags}
+		bodyBytes, _ := json.Marshal(body)
+		rr.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		taskServer.handleNodeBatch(ww, rr)
+	}) {
+		return
+	}
+
+	successCount := 0
+	failedCount := 0
+	errors := make(map[string]string)
+
+	for _, tag := range tags {
+		if err := s.mgr.Release(tag); err != nil {
+			failedCount++
+			errors[tag] = err.Error()
+		} else {
+			successCount++
+		}
+	}
+
+	response := map[string]any{
+		"message": fmt.Sprintf("批量解封完成：成功 %d 个，失败 %d 个", successCount, failedCount),
+		"success": successCount,
+		"failed":  failedCount,
+		"total":   len(tags),
+	}
+
+	if len(errors) > 0 {
+		response["errors"] = errors
+	}
+
+	writeJSON(w, response)
+}
+
+// handleBatchBlacklist blacklists multiple nodes
+func (s *Server) handleBatchBlacklist(w http.ResponseWriter, r *http.Request, tags []string, durationStr string) {
+	if s.enqueueAsyncMutation(w, r, TaskSpec{
+		Kind:              "node.batch.blacklist",
+		Message:           fmt.Sprintf("正在批量拉黑 %d 个节点", len(tags)),
+		SkipWorkspaceLock: true,
+	}, func(taskServer *Server, ww http.ResponseWriter, rr *http.Request) {
+		body := map[string]any{"action": "blacklist", "tags": tags, "duration": durationStr}
+		bodyBytes, _ := json.Marshal(body)
+		rr.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		taskServer.handleNodeBatch(ww, rr)
+	}) {
+		return
+	}
+
+	// Parse duration
+	defaultDuration := 30 * time.Minute
+	s.cfgMu.RLock()
+	if s.cfgSrc != nil && s.cfgSrc.Pool.BlacklistDuration > 0 {
+		defaultDuration = s.cfgSrc.Pool.BlacklistDuration
+	}
+	s.cfgMu.RUnlock()
+
+	if durationStr == "" {
+		durationStr = defaultDuration.String()
+	}
+
+	duration, err := time.ParseDuration(durationStr)
+	if err != nil || duration <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "拉黑时长格式无效"})
+		return
+	}
+
+	successCount := 0
+	failedCount := 0
+	errors := make(map[string]string)
+
+	for _, tag := range tags {
+		if err := s.mgr.ManualBlacklist(tag, duration); err != nil {
+			failedCount++
+			errors[tag] = err.Error()
+		} else {
+			successCount++
+		}
+	}
+
+	response := map[string]any{
+		"message":  fmt.Sprintf("批量拉黑完成：成功 %d 个，失败 %d 个", successCount, failedCount),
+		"success":  successCount,
+		"failed":   failedCount,
+		"total":    len(tags),
+		"duration": duration.String(),
+	}
+
+	if len(errors) > 0 {
+		response["errors"] = errors
+	}
+
+	writeJSON(w, response)
+}
+
 
 func writeJSON(w http.ResponseWriter, payload any) {
 	w.Header().Set("Content-Type", "application/json")
