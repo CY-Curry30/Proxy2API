@@ -110,6 +110,8 @@ type poolOutbound struct {
 	stickyMu        sync.Mutex        // protects stickyMap
 	stickyMap       map[string]string // sticky key (client source IP) -> member tag
 	stickySelection string            // last configured sticky node; protects stale pins
+	lastUsedMember  *memberState      // fallback when no healthy nodes available
+	lastUsedMu      sync.RWMutex      // protects lastUsedMember
 }
 
 func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger, tag string, options Options) (adapter.Outbound, error) {
@@ -446,6 +448,15 @@ func (p *poolOutbound) pickMemberFiltered(network string, tried map[string]bool,
 
 	if len(candidates) == 0 {
 		p.putCandidateBuffer(candidates)
+		// 降级策略：如果没有健康节点，使用最后一次成功的节点
+		p.lastUsedMu.RLock()
+		lastUsed := p.lastUsedMember
+		p.lastUsedMu.RUnlock()
+		if lastUsed != nil {
+			p.logger.Warn("没有可用的健康代理，降级使用最后一次成功的节点: ", lastUsed.tag)
+			log.Printf("⚠️  [节点池] 没有可用的健康代理，降级使用最后一次成功的节点: %s", lastUsed.tag)
+			return lastUsed, nil
+		}
 		return nil, E.New("没有可用的健康代理")
 	}
 
@@ -486,6 +497,15 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 
 	if len(candidates) == 0 {
 		p.putCandidateBuffer(candidates)
+		// 降级策略：如果没有健康节点，使用最后一次成功的节点
+		p.lastUsedMu.RLock()
+		lastUsed := p.lastUsedMember
+		p.lastUsedMu.RUnlock()
+		if lastUsed != nil {
+			p.logger.Warn("没有可用的健康代理，降级使用最后一次成功的节点: ", lastUsed.tag)
+			log.Printf("⚠️  [节点池] 没有可用的健康代理，降级使用最后一次成功的节点: %s", lastUsed.tag)
+			return lastUsed, nil
+		}
 		return nil, E.New("没有可用的健康代理")
 	}
 
@@ -667,6 +687,10 @@ func (p *poolOutbound) recordSuccess(member *memberState) {
 	if p.monitor != nil && p.options.EntryPort > 0 {
 		p.monitor.RecordEntryExit(p.options.EntryPort, member.tag)
 	}
+	// 更新最后一次成功使用的节点
+	p.lastUsedMu.Lock()
+	p.lastUsedMember = member
+	p.lastUsedMu.Unlock()
 }
 
 func (p *poolOutbound) wrapConn(conn net.Conn, member *memberState) net.Conn {
