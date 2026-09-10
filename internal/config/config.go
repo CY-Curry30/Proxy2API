@@ -1132,6 +1132,23 @@ func (c *Config) SaveNodePortMap() error {
 // non-conflicting ports. A corrupt or missing sidecar simply means "no saved
 // ports" and the freshly assigned ports stand.
 func (c *Config) applyPersistedPorts() error {
+	return c.NormalizePersistedPortsRespecting(nil)
+}
+
+// NormalizePersistedPortsRespecting restores the on-disk node→port mapping (or
+// assigns fresh ports on first boot) while treating reservedPorts — ports owned
+// by other runtimes, including stopped ones that remain registered process-wide
+// — as unavailable. Project runtimes must pass their reserved-port set here;
+// otherwise a stopped sibling project's ports look free at the OS layer and get
+// handed to a newly added node, producing a duplicate-port bind failure when
+// that sibling starts again.
+//
+// It clears the provisional ports assigned by normalize() first, making the
+// authoritative, bind-checked assignment happen exactly once: nodes whose stable
+// identity matches a saved entry get their saved port (unless reserved), and the
+// rest get fresh, non-conflicting ports. A corrupt or missing sidecar simply
+// means "no saved ports" and the freshly assigned ports stand.
+func (c *Config) NormalizePersistedPortsRespecting(reservedPorts map[uint16]struct{}) error {
 	if c.Mode != "multi-port" && c.Mode != "hybrid" {
 		return nil
 	}
@@ -1155,7 +1172,7 @@ func (c *Config) applyPersistedPorts() error {
 	for i := range c.Nodes {
 		c.Nodes[i].Port = 0
 	}
-	if err := c.NormalizeWithPortMap(saved); err != nil {
+	if err := c.NormalizeWithPortMapExcluding(saved, reservedPorts); err != nil {
 		return fmt.Errorf("恢复已保存端口失败: %w", err)
 	}
 	// Persisting is best-effort by design: the proxy runs correctly without the

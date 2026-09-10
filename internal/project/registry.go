@@ -90,8 +90,16 @@ func NewRegistry(parent context.Context, workspace *config.Workspace) (*Registry
 		if err != nil {
 			return nil, err
 		}
-		if cfg, err := config.LoadProjectWithShared(path, sharedCfg); err == nil {
+		if cfg, err := config.LoadProjectReadOnlyWithShared(path, sharedCfg); err == nil {
 			cfg.ClashAPIPort = spec.ClashAPIPort
+			// Restore node ports against the ports already reserved by earlier
+			// projects in this loop, so sibling projects never write the same
+			// proxy port into their sidecars at registry construction time.
+			if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
+				if err := cfg.NormalizePersistedPortsRespecting(r.ports.ReservedPorts(id)); err != nil {
+					log.Printf("[项目:%s] 规范化节点端口失败: %v", id, err)
+				}
+			}
 			if err := r.ports.Reserve(id, cfg); err != nil {
 				log.Printf("[项目:%s] 配置的端口无法保留: %v", id, err)
 			}

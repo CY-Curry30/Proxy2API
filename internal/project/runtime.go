@@ -104,7 +104,7 @@ func (r *Runtime) Start() error {
 	if r.sharedMu != nil {
 		r.sharedMu.RLock()
 	}
-	cfg, err := config.LoadProjectWithShared(r.configPath, r.sharedCfg)
+	cfg, err := config.LoadProjectReadOnlyWithShared(r.configPath, r.sharedCfg)
 	if r.sharedMu != nil {
 		r.sharedMu.RUnlock()
 	}
@@ -115,15 +115,14 @@ func (r *Runtime) Start() error {
 	cfg.ClashAPIPort = r.clashAPIPort
 	// Reconcile restored node ports against the process-wide registry before
 	// claiming this project. The OS may report a port as free while another
-	// stopped project still has it assigned in its persisted state.
+	// stopped project still has it assigned in its persisted state, so node-port
+	// restoration DID pass those reserved ports even though they are not
+	// currently listening — otherwise a newly added node steals a stopped
+	// sibling's port and that sibling fails to bind on its next start.
 	if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
-		portMap := cfg.BuildPortMap()
-		if err := cfg.NormalizeWithPortMapExcluding(portMap, r.ports.ReservedPorts(r.id)); err != nil {
+		if err := cfg.NormalizePersistedPortsRespecting(r.ports.ReservedPorts(r.id)); err != nil {
 			r.setStatus(StatusFailed, err.Error())
 			return fmt.Errorf("规范化项目 %q 的节点端口失败: %w", r.id, err)
-		}
-		if err := cfg.SaveNodePortMap(); err != nil {
-			r.logger.Warnf("保存项目 %q 的节点端口映射失败: %v", r.id, err)
 		}
 	}
 	if err := r.ports.Reserve(r.id, cfg); err != nil {
