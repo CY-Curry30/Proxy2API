@@ -909,6 +909,14 @@
             <div class="panel-title">节点监控列表</div>
             <div class="table-tools">
               <button class="btn btn-sm btn-primary" id="stickyNodeResetBtn" style="display:none" onclick="setStickyNode('')">取消指定</button>
+              <!-- 批量操作按钮组 -->
+              <div id="batchActionsButtons" style="display:none; gap:8px; align-items:center; padding-left: 12px; border-left: 1px solid var(--border);">
+                <span style="color: var(--text-muted); font-size: 12px;">已选 <strong id="selectedCount" style="color: var(--primary);">0</strong></span>
+                <button class="btn btn-sm btn-primary" onclick="batchProbeNodes()" title="批量探测选中节点">🔍 探测</button>
+                <button class="btn btn-sm btn-success" onclick="batchReleaseNodes()" title="批量解封选中节点">✅ 解封</button>
+                <button class="btn btn-sm" onclick="batchBlacklistNodes()" style="background: var(--error); color: white;" title="批量拉黑选中节点">🚫 拉黑</button>
+                <button class="btn btn-sm" onclick="clearNodeSelection()" title="取消选择">✖</button>
+              </div>
               <select id="nodeStatusFilter" class="setting-input table-tool" onchange="applyNodeFilters()" title="状态筛选">
                 <option value="all">全部状态</option>
                 <option value="healthy">在线</option>
@@ -926,14 +934,6 @@
               </select>
               <input id="nodeSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索名称、标签或端口" oninput="applyNodeFilters()" />
             </div>
-          </div>
-          <!-- 批量操作工具栏 -->
-          <div id="batchActionsBar" style="display:none; background: var(--bg-panel); border: 1px solid var(--border); padding: 12px; margin-bottom: 12px; border-radius: 6px; align-items:center; gap:12px;">
-            <span style="color: var(--text-muted); font-size: 13px;">已选择 <strong id="selectedCount" style="color: var(--primary);">0</strong> 个节点</span>
-            <button class="btn btn-sm btn-primary" onclick="batchProbeNodes()" title="批量探测选中节点">🔍 批量探测</button>
-            <button class="btn btn-sm btn-success" onclick="batchReleaseNodes()" title="批量解封选中节点">✅ 批量解封</button>
-            <button class="btn btn-sm" onclick="batchBlacklistNodes()" style="background: var(--error); color: white;" title="批量拉黑选中节点">🚫 批量拉黑</button>
-            <button class="btn btn-sm" onclick="clearNodeSelection()" style="margin-left: auto;">取消选择</button>
           </div>
           <div class="table-container">
             <table>
@@ -4845,15 +4845,15 @@
       });
 
       const count = selectedNodeTags.size;
-      const bar = document.getElementById('batchActionsBar');
+      const buttonsBar = document.getElementById('batchActionsButtons');
       const countEl = document.getElementById('selectedCount');
       const selectAllCheckbox = document.getElementById('nodeSelectAll');
 
       if (count > 0) {
-        bar.style.display = 'flex';
+        buttonsBar.style.display = 'flex';
         countEl.textContent = count;
       } else {
-        bar.style.display = 'none';
+        buttonsBar.style.display = 'none';
         if (selectAllCheckbox) selectAllCheckbox.checked = false;
       }
     }
