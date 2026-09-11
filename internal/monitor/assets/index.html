@@ -913,8 +913,8 @@
               <div id="batchActionsButtons" style="display:none; gap:8px; align-items:center; padding-left: 12px; border-left: 1px solid var(--border);">
                 <span style="color: var(--text-muted); font-size: 12px;">已选 <strong id="selectedCount" style="color: var(--primary);">0</strong></span>
                 <button class="btn btn-sm btn-primary" onclick="batchProbeNodes()" title="批量探测选中节点">🔍 探测</button>
-                <button class="btn btn-sm btn-success" onclick="batchReleaseNodes()" title="批量解封选中节点">✅ 解封</button>
-                <button class="btn btn-sm" onclick="batchBlacklistNodes()" style="background: var(--error); color: white;" title="批量拉黑选中节点">🚫 拉黑</button>
+                <button class="btn btn-sm btn-success" id="batchReleaseBtn" onclick="batchReleaseNodes()" title="批量解封选中节点">✅ 解封</button>
+                <button class="btn btn-sm" id="batchBlacklistBtn" onclick="batchBlacklistNodes()" style="background: var(--error); color: white;" title="批量拉黑选中节点">🚫 拉黑</button>
                 <button class="btn btn-sm" onclick="clearNodeSelection()" title="取消选择">✖</button>
               </div>
               <select id="nodeStatusFilter" class="setting-input table-tool" onchange="applyNodeFilters()" title="状态筛选">
@@ -2149,10 +2149,12 @@
 
     function resetProjectView() {
       allNodesCache = [];
+      selectedNodeTags.clear();
       configNodes = [];
       visibleConfigNodeNames = [];
       selectedConfigNodeNames.clear();
       subscriptionsCache = [];
+      selectedSubscriptionURLs.clear();
       cachedBlacklistDuration = null;
       stickyNodeTag = '';
       stickyEnabled = false;
@@ -2772,6 +2774,7 @@
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         allNodesCache = data.nodes || [];
+        pruneSelectedNodeTags();
         stickyNodeTag = data.sticky_node || '';
         stickyEnabled = !!data.sticky_enabled;
         entryExitPortsByTag = new Map();
@@ -3513,7 +3516,13 @@
     function renderNodes(nodes) {
       const tbody = document.getElementById('nodesTableBody');
       const hint = document.getElementById('nodesPagingHint');
-      if (!nodes.length) { tbody.innerHTML = ''; document.getElementById('emptyState').style.display='block'; if(hint) hint.style.display='none'; return;}
+      if (!nodes.length) {
+        tbody.innerHTML = '';
+        document.getElementById('emptyState').style.display='block';
+        if(hint) hint.style.display='none';
+        renderBatchSelectionState();
+        return;
+      }
       document.getElementById('emptyState').style.display='none';
       // 分批渲染：节点量大时只渲染前 nodeRenderLimit 个，避免一次性插入数千行 DOM 导致卡顿。
       const visible = nodes.slice(0, nodeRenderLimit);
@@ -3557,8 +3566,9 @@
           ? `${nodeDisplayName}\n订阅来源：${n.subscription_name}`
           : nodeDisplayName;
 
+        const checked = selectedNodeTags.has(String(n.tag)) ? ' checked' : '';
         return `<tr>
-          <td><input type="checkbox" class="node-checkbox" data-tag="${escapeHtml(n.tag)}" onchange="updateBatchSelection()" /></td>
+          <td><input type="checkbox" class="node-checkbox" data-tag="${escapeHtml(n.tag)}" onchange="updateBatchSelection()"${checked} /></td>
           <td><span class="badge ${badge}${copyableError ? ' badge-copyable' : ''}" title="${escapeHtml(statusTitle)}"${statusCopyAttrs}>${statusText}</span></td>
           <td class="tt-mono">${escapeHtml(formatRegion(n))}</td>
           <td class="tt-mono">${escapeHtml(n.ip || '-')}</td>
@@ -3591,6 +3601,7 @@
       if (isSharedCatalogMode()) {
         tbody.querySelectorAll('button[onclick^="setStickyNode"], button[onclick^="releaseNode"], button[onclick^="blacklistNode"]').forEach(button => button.remove());
       }
+      renderBatchSelectionState();
       if (hint) {
         if (nodes.length > visible.length) {
           const more = Math.min(300, nodes.length - visible.length);
@@ -3853,6 +3864,7 @@
     function applyCurrentSubscriptionPayload(data) {
       const globalView = !currentProjectID;
       subscriptionsCache = globalView ? (data.global_items || data.items || []) : (data.items || []);
+      pruneSelectedSubscriptionURLs();
       updateDashboardSubscriptionCount(subscriptionsCache, globalView);
       document.getElementById('subscriptionTotalCount').textContent = subscriptionsCache.length;
       // Aggregate valid/total across all subscriptions. Before any probing
@@ -3870,6 +3882,7 @@
 
     function clearCurrentProjectSubscriptions() {
       subscriptionsCache = [];
+      selectedSubscriptionURLs.clear();
       document.getElementById('subscriptionTotalCount').textContent = '0';
       document.getElementById('subscriptionActiveNodes').textContent = '0';
       document.getElementById('subscriptionNextRefresh').textContent = '-';
@@ -3957,8 +3970,9 @@
         const usedByProjects = (item.used_by_projects || []).filter(Boolean);
         const usedByText = usedByProjects.length ? usedByProjects.join('、') : '-';
         const statusTitle = item.last_error || (item.included ? '节点已加入节点池' : '节点未加入节点池');
+        const checked = selectedSubscriptionURLs.has(String(item.url)) ? ' checked' : '';
         return `<tr>
-          <td><input type="checkbox" class="subscription-checkbox" data-url="${escapeHtml(item.url)}" onchange="updateSubscriptionSelection()" /></td>
+          <td><input type="checkbox" class="subscription-checkbox" data-url="${escapeHtml(item.url)}" onchange="updateSubscriptionSelection()"${checked} /></td>
           <td><span class="badge ${badge}" title="${escapeHtml(statusTitle)}">${label}</span></td>
           <td><div class="cell-trunc" style="max-width:300px;font-weight:500" title="${escapeHtml(item.url)}">${escapeHtml(item.name || item.url)}</div><div class="cell-trunc tt-mono" style="max-width:300px;font-size:11px;color:var(--text-muted)" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</div></td>
           ${globalView ? `<td><div class="cell-trunc" style="max-width:220px" title="${escapeHtml(usedByText)}">${escapeHtml(usedByText)}</div></td>` : ''}
@@ -3976,6 +3990,7 @@
           </td>
         </tr>`;
       }).join('');
+      renderSubscriptionSelectionState();
     }
 
     function subscriptionSortTime(value) {
@@ -4058,7 +4073,15 @@
         originalURL ? '修改订阅中...' : '添加订阅中...',
         project ? '正在更新项目节点池' : '正在保存全局订阅定义'
       );
-      const payload = {url, original_url: originalURL, scope: currentProjectID ? 'project' : 'global'};
+      // Subscription URLs are global resources. Adding from a project view is
+      // project-scoped so the new URL is joined to that project; editing an
+      // existing URL must remain global or the shared catalog can be rewritten
+      // using only the current project's effective subset.
+      const payload = {
+        url,
+        original_url: originalURL,
+        scope: originalURL ? 'global' : (currentProjectID ? 'project' : 'global')
+      };
 
       // 获取选中的项目列表
       const globalView = !currentProjectID;
@@ -4118,7 +4141,9 @@
         const response = await fetch(globalScopePath('/api/subscriptions'), {
           method: 'PATCH',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({url: rawURL, enabled, scope: currentProjectID ? 'project' : 'global'})
+          // The toggle controls the shared subscription itself, even when the
+          // table is currently filtered to one project.
+          body: JSON.stringify({url: rawURL, enabled, scope: 'global'})
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || '操作失败');
@@ -4877,6 +4902,36 @@
     // ========== 批量操作功能 ==========
     let selectedNodeTags = new Set();
 
+    function pruneSelectedNodeTags() {
+      const knownTags = new Set(allNodesCache.map(node => String(node.tag || '')));
+      for (const tag of selectedNodeTags) {
+        if (!knownTags.has(tag)) selectedNodeTags.delete(tag);
+      }
+    }
+
+    function renderBatchSelectionState() {
+      const count = selectedNodeTags.size;
+      const buttonsBar = document.getElementById('batchActionsButtons');
+      const countEl = document.getElementById('selectedCount');
+      const selectAllCheckbox = document.getElementById('nodeSelectAll');
+      const checkboxes = Array.from(document.querySelectorAll('.node-checkbox'));
+      const selectedVisible = checkboxes.reduce((total, checkbox) => total + (checkbox.checked ? 1 : 0), 0);
+
+      if (buttonsBar) buttonsBar.style.display = count > 0 ? 'flex' : 'none';
+      if (countEl) countEl.textContent = count;
+      if (selectAllCheckbox) {
+        selectAllCheckbox.disabled = checkboxes.length === 0;
+        selectAllCheckbox.checked = checkboxes.length > 0 && selectedVisible === checkboxes.length;
+        selectAllCheckbox.indeterminate = selectedVisible > 0 && selectedVisible < checkboxes.length;
+      }
+
+      const allowRuntimeMutation = !isSharedCatalogMode();
+      const releaseButton = document.getElementById('batchReleaseBtn');
+      const blacklistButton = document.getElementById('batchBlacklistBtn');
+      if (releaseButton) releaseButton.style.display = allowRuntimeMutation ? '' : 'none';
+      if (blacklistButton) blacklistButton.style.display = allowRuntimeMutation ? '' : 'none';
+    }
+
     function toggleAllNodes(checked) {
       const checkboxes = document.querySelectorAll('.node-checkbox');
       checkboxes.forEach(cb => {
@@ -4888,28 +4943,18 @@
           selectedNodeTags.delete(tag);
         }
       });
-      updateBatchSelection();
+      renderBatchSelectionState();
     }
 
     function updateBatchSelection() {
-      selectedNodeTags.clear();
-      const checkboxes = document.querySelectorAll('.node-checkbox:checked');
+      const checkboxes = document.querySelectorAll('.node-checkbox');
       checkboxes.forEach(cb => {
-        selectedNodeTags.add(cb.getAttribute('data-tag'));
+        const tag = cb.getAttribute('data-tag');
+        if (!tag) return;
+        if (cb.checked) selectedNodeTags.add(tag);
+        else selectedNodeTags.delete(tag);
       });
-
-      const count = selectedNodeTags.size;
-      const buttonsBar = document.getElementById('batchActionsButtons');
-      const countEl = document.getElementById('selectedCount');
-      const selectAllCheckbox = document.getElementById('nodeSelectAll');
-
-      if (count > 0) {
-        buttonsBar.style.display = 'flex';
-        countEl.textContent = count;
-      } else {
-        buttonsBar.style.display = 'none';
-        if (selectAllCheckbox) selectAllCheckbox.checked = false;
-      }
+      renderBatchSelectionState();
     }
 
     function clearNodeSelection() {
@@ -4917,7 +4962,7 @@
       document.querySelectorAll('.node-checkbox').forEach(cb => cb.checked = false);
       const selectAllCheckbox = document.getElementById('nodeSelectAll');
       if (selectAllCheckbox) selectAllCheckbox.checked = false;
-      updateBatchSelection();
+      renderBatchSelectionState();
     }
 
     async function batchProbeNodes() {
@@ -5007,7 +5052,8 @@
           throw new Error(result.error || '批量解封失败');
         }
 
-        showToast(result.message, 'success');
+        const failed = Number(result.failed) || 0;
+        showToast(result.message || '批量解封完成', failed > 0 ? 'error' : 'success');
         clearNodeSelection();
         await refresh();
       } catch (error) {
@@ -5051,6 +5097,30 @@
     // ========== 订阅批量操作功能 ==========
     let selectedSubscriptionURLs = new Set();
 
+    function pruneSelectedSubscriptionURLs() {
+      const knownURLs = new Set(subscriptionsCache.map(item => String(item.url || '')));
+      for (const url of selectedSubscriptionURLs) {
+        if (!knownURLs.has(url)) selectedSubscriptionURLs.delete(url);
+      }
+    }
+
+    function renderSubscriptionSelectionState() {
+      const count = selectedSubscriptionURLs.size;
+      const buttonsBar = document.getElementById('subscriptionBatchButtons');
+      const countEl = document.getElementById('subscriptionSelectedCount');
+      const selectAllCheckbox = document.getElementById('subscriptionSelectAll');
+      const checkboxes = Array.from(document.querySelectorAll('.subscription-checkbox'));
+      const selectedVisible = checkboxes.reduce((total, checkbox) => total + (checkbox.checked ? 1 : 0), 0);
+
+      if (buttonsBar) buttonsBar.style.display = count > 0 ? 'flex' : 'none';
+      if (countEl) countEl.textContent = count;
+      if (selectAllCheckbox) {
+        selectAllCheckbox.disabled = checkboxes.length === 0;
+        selectAllCheckbox.checked = checkboxes.length > 0 && selectedVisible === checkboxes.length;
+        selectAllCheckbox.indeterminate = selectedVisible > 0 && selectedVisible < checkboxes.length;
+      }
+    }
+
     function toggleAllSubscriptions(checked) {
       const checkboxes = document.querySelectorAll('.subscription-checkbox');
       checkboxes.forEach(cb => {
@@ -5062,28 +5132,18 @@
           selectedSubscriptionURLs.delete(url);
         }
       });
-      updateSubscriptionSelection();
+      renderSubscriptionSelectionState();
     }
 
     function updateSubscriptionSelection() {
-      selectedSubscriptionURLs.clear();
-      const checkboxes = document.querySelectorAll('.subscription-checkbox:checked');
+      const checkboxes = document.querySelectorAll('.subscription-checkbox');
       checkboxes.forEach(cb => {
-        selectedSubscriptionURLs.add(cb.getAttribute('data-url'));
+        const url = cb.getAttribute('data-url');
+        if (!url) return;
+        if (cb.checked) selectedSubscriptionURLs.add(url);
+        else selectedSubscriptionURLs.delete(url);
       });
-
-      const count = selectedSubscriptionURLs.size;
-      const buttonsBar = document.getElementById('subscriptionBatchButtons');
-      const countEl = document.getElementById('subscriptionSelectedCount');
-      const selectAllCheckbox = document.getElementById('subscriptionSelectAll');
-
-      if (count > 0) {
-        buttonsBar.style.display = 'flex';
-        countEl.textContent = count;
-      } else {
-        buttonsBar.style.display = 'none';
-        if (selectAllCheckbox) selectAllCheckbox.checked = false;
-      }
+      renderSubscriptionSelectionState();
     }
 
     function clearSubscriptionSelection() {
@@ -5091,7 +5151,7 @@
       document.querySelectorAll('.subscription-checkbox').forEach(cb => cb.checked = false);
       const selectAllCheckbox = document.getElementById('subscriptionSelectAll');
       if (selectAllCheckbox) selectAllCheckbox.checked = false;
-      updateSubscriptionSelection();
+      renderSubscriptionSelectionState();
     }
 
     async function batchRefreshSubscriptions() {

@@ -390,6 +390,11 @@ func (m *Manager) reconcileSubscriptionStateLocked(urls []string) {
 		if !info.Enabled {
 			info.Status = "disabled"
 			info.Included = false
+		} else if info.Status == "disabled" {
+			// Re-enabling a paused subscription must also restore its visible
+			// lifecycle state. The cached nodes are retained, so the subscription
+			// is ready to participate again without requiring a remote fetch.
+			info.Status = "pending"
 		}
 		m.items[rawURL] = info
 	}
@@ -645,13 +650,16 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 		m.mu.Unlock()
 		return fmt.Errorf("订阅不存在")
 	}
+	if m.baseCfg.SubscriptionEnabled(rawURL) == enabled {
+		// Keep the in-memory item aligned even when the requested operation is
+		// idempotent (for example after restoring a stale persisted snapshot).
+		m.reconcileSubscriptionStateLocked(m.baseCfg.Subscriptions)
+		m.mu.Unlock()
+		return nil
+	}
 	if enabled && len(m.nodeCache[rawURL]) == 0 {
 		m.mu.Unlock()
 		return fmt.Errorf("订阅没有本地节点缓存，请先手动更新")
-	}
-	if m.baseCfg.SubscriptionEnabled(rawURL) == enabled {
-		m.mu.Unlock()
-		return nil
 	}
 	m.baseCfg.SetSubscriptionEnabled(rawURL, enabled)
 	m.reconcileSubscriptionStateLocked(m.baseCfg.Subscriptions)
@@ -725,6 +733,8 @@ func (m *Manager) Subscriptions() []monitor.SubscriptionInfo {
 		if !info.Enabled {
 			info.Status = "disabled"
 			info.Included = false
+		} else if info.Status == "disabled" {
+			info.Status = "pending"
 		}
 		if info.NodeCount == 0 {
 			info.NodeCount = len(m.nodeCache[rawURL])

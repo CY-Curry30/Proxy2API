@@ -1151,10 +1151,27 @@ func (m *Manager) Release(tag string) error {
 	if err != nil {
 		return err
 	}
-	if e.release == nil {
+	e.mu.RLock()
+	release := e.release
+	wasBlacklisted := e.blacklist
+	e.mu.RUnlock()
+	if release == nil {
 		return errors.New("该节点不支持解除拉黑")
 	}
-	e.release()
+	release()
+
+	// A release callback normally clears this entry through the pool's shared
+	// state. If that link is stale or missing, keep the requested manager state
+	// consistent and trigger the same verification probe directly.
+	if wasBlacklisted {
+		e.mu.RLock()
+		stillBlacklisted := e.blacklist
+		e.mu.RUnlock()
+		if stillBlacklisted {
+			e.clearBlacklist()
+			m.ProbeAfterRelease(tag)
+		}
+	}
 	return nil
 }
 

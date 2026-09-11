@@ -106,24 +106,24 @@ type SubscriptionStatus struct {
 
 // SubscriptionInfo describes the latest state reported by one subscription.
 type SubscriptionInfo struct {
-	ID             string    `json:"id"`
-	URL            string    `json:"url"`
-	Name           string    `json:"name"`
-	Status         string    `json:"status"`
-	UsedByProjects []string  `json:"used_by_projects"`
-	NodeCount      int       `json:"node_count"`
-	ValidNodeCount int       `json:"valid_node_count,omitempty"`
-	ProbedNodeCount int      `json:"probed_node_count,omitempty"`
-	Included       bool      `json:"included"`
-	Enabled        bool      `json:"enabled"`
-	UploadBytes    int64     `json:"upload_bytes"`
-	DownloadBytes  int64     `json:"download_bytes"`
-	UsedBytes      int64     `json:"used_bytes"`
-	TotalBytes     int64     `json:"total_bytes"`
-	RemainingBytes int64     `json:"remaining_bytes"`
-	ExpiresAt      int64     `json:"expires_at"`
-	LastRefresh    time.Time `json:"last_refresh"`
-	LastError      string    `json:"last_error,omitempty"`
+	ID              string    `json:"id"`
+	URL             string    `json:"url"`
+	Name            string    `json:"name"`
+	Status          string    `json:"status"`
+	UsedByProjects  []string  `json:"used_by_projects"`
+	NodeCount       int       `json:"node_count"`
+	ValidNodeCount  int       `json:"valid_node_count,omitempty"`
+	ProbedNodeCount int       `json:"probed_node_count,omitempty"`
+	Included        bool      `json:"included"`
+	Enabled         bool      `json:"enabled"`
+	UploadBytes     int64     `json:"upload_bytes"`
+	DownloadBytes   int64     `json:"download_bytes"`
+	UsedBytes       int64     `json:"used_bytes"`
+	TotalBytes      int64     `json:"total_bytes"`
+	RemainingBytes  int64     `json:"remaining_bytes"`
+	ExpiresAt       int64     `json:"expires_at"`
+	LastRefresh     time.Time `json:"last_refresh"`
+	LastError       string    `json:"last_error,omitempty"`
 }
 
 // Server exposes HTTP endpoints for monitoring.
@@ -914,6 +914,7 @@ func runtimeProjectMux(s *Server) *http.ServeMux {
 	mux.HandleFunc("/api/nodes/import", s.handleNodeImport)
 	mux.HandleFunc("/api/nodes/probe-all", s.handleProbeAll)
 	mux.HandleFunc("/api/nodes/probe-cancel", s.handleProbeCancel)
+	mux.HandleFunc("/api/nodes/batch", s.handleNodeBatch)
 	mux.HandleFunc("/api/nodes/", s.handleNodeAction)
 	mux.HandleFunc("/api/debug", s.handleDebug)
 	mux.HandleFunc("/api/export", s.handleExport)
@@ -1793,12 +1794,12 @@ func (s *Server) handleBatchProbe(w http.ResponseWriter, r *http.Request, tags [
 	defer cancel()
 
 	type probeResult struct {
-		tag       string
-		latency   int64
-		healthy   bool
-		err       string
-		traceErr  string
-		traceIP   string
+		tag         string
+		latency     int64
+		healthy     bool
+		err         string
+		traceErr    string
+		traceIP     string
 		traceRegion string
 	}
 
@@ -1868,16 +1869,16 @@ func (s *Server) handleBatchProbe(w http.ResponseWriter, r *http.Request, tags [
 		}
 
 		eventPayload := map[string]any{
-			"type":     "progress",
-			"tag":      result.tag,
-			"latency":  result.latency,
-			"status":   status,
-			"error":    result.err,
-			"trace_ip": result.traceIP,
+			"type":         "progress",
+			"tag":          result.tag,
+			"latency":      result.latency,
+			"status":       status,
+			"error":        result.err,
+			"trace_ip":     result.traceIP,
 			"trace_region": result.traceRegion,
-			"current":  count,
-			"total":    total,
-			"progress": float64(count) / float64(total) * 100,
+			"current":      count,
+			"total":        total,
+			"progress":     float64(count) / float64(total) * 100,
 		}
 		eventData, _ := json.Marshal(eventPayload)
 		fmt.Fprintf(w, "data: %s\n\n", eventData)
@@ -1998,7 +1999,6 @@ func (s *Server) handleBatchBlacklist(w http.ResponseWriter, r *http.Request, ta
 	writeJSON(w, response)
 }
 
-
 func writeJSON(w http.ResponseWriter, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
@@ -2087,12 +2087,13 @@ func (s *Server) enqueueAsyncMutation(w http.ResponseWriter, r *http.Request, sp
 	clonedURL.RawQuery = query.Encode()
 
 	snapshot, err := s.tasks.Submit(TaskSpec{
-		Kind:      spec.Kind,
-		Scope:     spec.Scope,
-		ProjectID: spec.ProjectID,
-		Resource:  spec.Resource,
-		Exclusive: spec.Exclusive,
-		Message:   spec.Message,
+		Kind:              spec.Kind,
+		Scope:             spec.Scope,
+		ProjectID:         spec.ProjectID,
+		Resource:          spec.Resource,
+		Exclusive:         spec.Exclusive,
+		SkipWorkspaceLock: spec.SkipWorkspaceLock,
+		Message:           spec.Message,
 		Run: func(ctx context.Context, reporter *TaskReporter) (any, error) {
 			reporter.Update(1, "正在执行", nil)
 			taskServer, resolveErr := s.resolveTaskServer()
@@ -3499,6 +3500,17 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 			if req.OriginalURL != req.URL {
 				referenceOldURL = req.OriginalURL
 				referenceNewURL = req.URL
+			}
+			if globalScope && req.Projects != nil {
+				include, exclude, err := s.resolveSubscriptionProjectMembership(*req.Projects)
+				if err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					writeJSON(w, map[string]any{"error": err.Error()})
+					return
+				}
+				// Editing a subscription also edits its optional project bindings.
+				// Treat the submitted project list as authoritative, just like POST.
+				membership = &subscriptionMembership{url: req.URL, include: include, exclude: exclude}
 			}
 		case http.MethodDelete:
 			target := req.URL

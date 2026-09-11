@@ -3026,9 +3026,8 @@ func (c *Config) saveSharedSettings() error {
 	if err != nil {
 		return err
 	}
-	doc.Subscriptions = append([]string(nil), c.Subscriptions...)
-	doc.DisabledSubscriptions = append([]string(nil), c.DisabledSubscriptions...)
 	c.normalizeDisabledSubscriptions()
+	doc.Subscriptions = append([]string(nil), c.Subscriptions...)
 	doc.DisabledSubscriptions = append([]string(nil), c.DisabledSubscriptions...)
 	return c.saveSharedDocument(doc)
 }
