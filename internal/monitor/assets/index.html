@@ -1003,8 +1003,14 @@
               <option value="all">全部订阅来源</option>
               <option value="__non_subscription__">非订阅节点</option>
             </select>
-            <input id="configNodeNameSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称" oninput="renderConfigNodes()" />
-            <input id="configNodeURLSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点 URL" oninput="renderConfigNodes()" />
+            <select id="configNodeStatusFilter" class="setting-input table-tool" onchange="renderConfigNodes()" title="状态筛选">
+              <option value="all">全部状态</option>
+              <option value="valid">有效</option>
+              <option value="abnormal">异常</option>
+              <option value="blacklisted">拉黑</option>
+              <option value="unknown">未探测</option>
+            </select>
+            <input id="configNodeSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称或 URL" aria-label="搜索节点名称或 URL" oninput="renderConfigNodes()" />
             <select id="configNodeNameSort" class="setting-input table-tool" onchange="renderConfigNodes()" title="名称排序">
               <option value="default">默认排序</option>
               <option value="asc">名称升序</option>
@@ -4102,8 +4108,15 @@
         if (!response.ok || data.error) throw new Error(data.error || '保存失败');
         document.getElementById('subscriptionModalOverlay').classList.remove('show');
         if (data.refresh_error) showToast(data.refresh_error, 'error'); else showToast('订阅已保存');
+        // The mutation response already contains the authoritative subscription
+        // payload. Apply it immediately so the table reflects a newly added or
+        // edited entry without waiting for a second request (which can briefly
+        // race a project source reload).
+        if (data && (Array.isArray(data.items) || Array.isArray(data.global_items))) {
+          applyCurrentSubscriptionPayload(data);
+        }
         await loadSubscriptionsPage();
-        refresh();
+        await refresh();
       } catch (error) {
         showToast(error.message, 'error');
       } finally {
@@ -4125,8 +4138,20 @@
         if (!response.ok || data.error) throw new Error(data.error || '删除失败');
         if (data.refresh_error || data.reload_error) showToast(data.refresh_error || data.reload_error, 'error');
         else showToast(data.message || (deleteGlobal ? '全局订阅已删除' : '订阅已从当前项目移除'));
+        // Render the server response first; this removes the stale-row window
+        // that users could see after deleting a subscription.
+        if (data && (Array.isArray(data.items) || Array.isArray(data.global_items))) {
+          applyCurrentSubscriptionPayload(data);
+        } else {
+          // Project-scoped removal intentionally returns a compact message from
+          // the API. Remove the deleted row locally while the authoritative
+          // project payload is reloaded below.
+          subscriptionsCache = subscriptionsCache.filter(item => String(item.url || '') !== String(rawURL));
+          pruneSelectedSubscriptionURLs();
+          renderSubscriptions();
+        }
         await loadSubscriptionsPage();
-        refresh();
+        await refresh();
       } catch (error) {
         showToast(error.message, 'error');
       } finally {
@@ -4261,19 +4286,20 @@
       const empty = document.getElementById('configNodesEmptyState');
       if (!tbody || !empty) return;
       const subscriptionFilter = document.getElementById('configNodeSubscriptionFilter')?.value || 'all';
-      const nameQuery = (document.getElementById('configNodeNameSearch')?.value || '').trim().toLowerCase();
-      const urlQuery = (document.getElementById('configNodeURLSearch')?.value || '').trim().toLowerCase();
+      const statusFilter = document.getElementById('configNodeStatusFilter')?.value || 'all';
+      const query = (document.getElementById('configNodeSearch')?.value || '').trim().toLowerCase();
       const sort = document.getElementById('configNodeNameSort')?.value || 'default';
       const nodes = configNodes
         .map((node, index) => ({node, index}))
         .filter(({node}) => {
           const name = String(node.name || '');
           const subscriptionName = String(node.subscription_name || '未知订阅');
+          const status = node.status || 'unknown';
           if (subscriptionFilter === '__non_subscription__' && node.source === 'subscription') return false;
           if (subscriptionFilter !== 'all' && subscriptionFilter !== '__non_subscription__'
               && (node.source !== 'subscription' || subscriptionName !== subscriptionFilter)) return false;
-          if (nameQuery && !name.toLowerCase().includes(nameQuery)) return false;
-          if (urlQuery && !String(node.uri || '').toLowerCase().includes(urlQuery)) return false;
+          if (statusFilter !== 'all' && status !== statusFilter) return false;
+          if (query && ![name, node.uri].some(value => String(value || '').toLowerCase().includes(query))) return false;
           return true;
         });
       if (sort !== 'default') {
