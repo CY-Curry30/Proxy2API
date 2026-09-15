@@ -637,6 +637,7 @@ func runtimeSettings(cfg *config.Config) monitor.ProjectRuntimeSettings {
 		},
 		MultiPort: monitor.ProjectMultiPortSettings{
 			Address: cfg.MultiPort.Address, BasePort: cfg.MultiPort.BasePort,
+			ReserveCount: cfg.MultiPort.ReserveCount, UsedCount: len(cfg.Nodes),
 			Username: cfg.MultiPort.Username, Password: cfg.MultiPort.Password,
 		},
 		Pool: monitor.ProjectPoolSettings{
@@ -862,8 +863,9 @@ func defaultProjectConfig(mode string, listenerPort, multiPortBase uint16) *conf
 			Port:    listenerPort,
 		},
 		MultiPort: config.MultiPortConfig{
-			Address:  "0.0.0.0",
-			BasePort: multiPortBase,
+			Address:      "0.0.0.0",
+			BasePort:     multiPortBase,
+			ReserveCount: 3000,
 		},
 		Pool: config.PoolConfig{
 			Mode:              "latency",
@@ -1034,6 +1036,10 @@ func applyRuntimeSettings(cfg *config.Config, settings monitor.ProjectRuntimeSet
 	cfg.Listener.Password = settings.Listener.Password
 	cfg.MultiPort.Address = strings.TrimSpace(settings.MultiPort.Address)
 	cfg.MultiPort.BasePort = settings.MultiPort.BasePort
+	cfg.MultiPort.ReserveCount = settings.MultiPort.ReserveCount
+	if cfg.MultiPort.ReserveCount == 0 {
+		cfg.MultiPort.ReserveCount = 3000
+	}
 	cfg.MultiPort.Username = settings.MultiPort.Username
 	cfg.MultiPort.Password = settings.MultiPort.Password
 	cfg.Pool.Mode = strings.TrimSpace(settings.Pool.Mode)

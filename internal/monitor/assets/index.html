@@ -509,6 +509,7 @@
     .port-field-hint { min-height: 16px; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
     .port-field-hint.available { color: var(--success); }
     .port-field-hint.conflict { color: var(--error); }
+    .subscription-block-hint { margin-top: 6px; max-width: 260px; color: var(--error); font-size: 11px; line-height: 1.45; }
     .setting-input.port-conflict { border-color: var(--error); box-shadow: 0 0 0 1px var(--error); }
     .checkbox-row {
       display: flex; align-items: center; gap: 10px;
@@ -1385,6 +1386,7 @@
           <div class="form-section-grid">
             <div class="form-group"><label>监听地址</label><input type="text" id="projectMPAddr" class="setting-input" placeholder="0.0.0.0" /></div>
             <div class="form-group"><label>起始端口</label><input type="number" id="projectMPBasePort" class="setting-input" min="0" max="65535" oninput="updateProjectPortHints()" /><div class="port-field-hint" id="projectMPBasePortHint" aria-live="polite"></div></div>
+            <div class="form-group"><label>预留端口数量</label><input type="number" id="projectMPReserveCount" class="setting-input" min="1" max="65535" value="3000" oninput="updateProjectPortHints()" /><div class="port-field-hint" id="projectMPReserveCountHint" aria-live="polite"></div></div>
             <div class="form-group"><label>用户名</label><input type="text" id="projectMPUser" class="setting-input" /></div>
             <div class="form-group"><label>密码</label><input type="password" id="projectMPPass" class="setting-input" /></div>
           </div>
@@ -2300,6 +2302,7 @@
         multi_port: {
           address: document.getElementById('projectMPAddr').value.trim(),
           base_port: Number(document.getElementById('projectMPBasePort').value) || 0,
+          reserve_count: Number(document.getElementById('projectMPReserveCount').value) || 3000,
           username: document.getElementById('projectMPUser').value,
           password: document.getElementById('projectMPPass').value
         },
@@ -2337,6 +2340,8 @@
       document.getElementById('projectListenerPass').value = listener.password || '';
       document.getElementById('projectMPAddr').value = multi.address || '0.0.0.0';
       document.getElementById('projectMPBasePort').value = multi.base_port || '';
+      document.getElementById('projectMPReserveCount').value = multi.reserve_count || 3000;
+      document.getElementById('projectMPReserveCountHint').textContent = `已使用 ${Number(multi.used_count) || 0} 个`;
       document.getElementById('projectMPUser').value = multi.username || '';
       document.getElementById('projectMPPass').value = multi.password || '';
       document.getElementById('projectPoolMode').value = pool.mode || 'latency';
@@ -3966,8 +3971,11 @@
       document.getElementById('subscriptionVisibleCount').textContent = visibleItems.length;
       tbody.innerHTML = visibleItems.map(item => {
         const [badge, label] = subscriptionStatusView(item.status, globalView);
-		const modifyLabel = globalView ? '修改' : '全局修改';
-		const toggleLabel = `${globalView ? '' : '全局'}${item.enabled ? '关闭' : '开启'}`;
+        const blockReason = item.block_reason || '';
+        const blocked = blockReason !== '';
+        const blockHint = blocked ? `订阅已${blockReason}，无法开启，请先更新订阅` : '';
+        const modifyLabel = globalView ? '修改' : '全局修改';
+        const toggleLabel = `${globalView ? '' : '全局'}${item.enabled ? '关闭' : '开启'}`;
 		const deleteLabel = globalView ? '删除' : '移出项目';
         const traffic = item.total_bytes > 0
           ? `${formatBytes(item.used_bytes)} / ${formatBytes(item.total_bytes)}`
@@ -3989,10 +3997,11 @@
           <td>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               <button class="btn btn-sm" onclick="showSubscriptionModal('${escapeAttrJs(item.url)}')">${modifyLabel}</button>
-              <button class="btn btn-sm ${item.enabled ? '' : 'btn-primary'}" onclick="toggleSubscription('${escapeAttrJs(item.url)}', ${item.enabled ? 'false' : 'true'})">${toggleLabel}</button>
-              <button class="btn btn-sm" onclick="refreshManagedSubscription('${escapeAttrJs(item.url)}')" ${item.enabled ? '' : 'disabled'}>更新</button>
+              <button class="btn btn-sm ${item.enabled ? '' : 'btn-primary'}" onclick="toggleSubscription('${escapeAttrJs(item.url)}', ${item.enabled ? 'false' : 'true'})" ${blocked && !item.enabled ? `title="${escapeHtml(blockHint)}"` : ''}>${toggleLabel}</button>
+              <button class="btn btn-sm" onclick="refreshManagedSubscription('${escapeAttrJs(item.url)}')" ${item.enabled || blocked ? '' : 'disabled'}>更新</button>
               <button class="btn btn-sm btn-danger" onclick="deleteSubscription('${escapeAttrJs(item.url)}')">${deleteLabel}</button>
             </div>
+            ${blocked && !item.enabled ? `<div class="subscription-block-hint">${escapeHtml(blockHint)}</div>` : ''}
           </td>
         </tr>`;
       }).join('');
@@ -4160,6 +4169,16 @@
     }
 
     async function toggleSubscription(rawURL, enabled) {
+      // 开启已关闭的订阅前先看后端下发的闸门原因：流量用尽或到期都会让开启
+      // 必然失败，这里直接把原因说清楚，不再发起注定被拒绝的请求。
+      if (enabled) {
+        const blockedItem = subscriptionsCache.find(entry => String(entry.url || '') === String(rawURL));
+        const reason = blockedItem && blockedItem.block_reason ? blockedItem.block_reason : '';
+        if (reason) {
+          showToast(`开启失败：订阅已${reason}，无法开启，请先更新订阅`, 'error');
+          return;
+        }
+      }
       if (currentProjectID && !confirm(`确定在全局${enabled ? '开启' : '关闭'}该订阅？\n\n此操作会影响所有项目。`)) return;
       showFullscreenLoading(enabled ? '开启订阅中...' : '关闭订阅中...', currentProjectID ? (enabled ? '正在恢复缓存节点并启动探测' : '正在暂停更新并屏蔽节点') : '正在更新全局目录（不会自动探测）');
       try {

@@ -153,6 +153,21 @@ func (m *Manager) restorePersistentState() {
 	for _, rawURL := range m.baseCfg.Subscriptions {
 		configured[rawURL] = struct{}{}
 	}
+	// Re-apply a close performed by the traffic/expiry rule in an earlier run.
+	// A project whose subscription sources come from the shared catalog cannot
+	// persist DisabledSubscriptions itself, so without this the subscription
+	// would come back enabled after every restart until the next refresh.
+	for _, item := range stored.Items {
+		if _, ok := configured[item.URL]; !ok {
+			continue
+		}
+		if item.Status != "expired" && item.Status != "quota_exhausted" {
+			continue
+		}
+		if m.baseCfg.SubscriptionEnabled(item.URL) {
+			m.baseCfg.SetSubscriptionEnabled(item.URL, false)
+		}
+	}
 	m.status.LastRefresh = stored.LastRefresh
 	m.status.NextRefresh = stored.NextRefresh
 	m.status.NodeCount = stored.NodeCount
@@ -166,7 +181,12 @@ func (m *Manager) restorePersistentState() {
 		status := item.Status
 		included := item.Included
 		if !enabled {
-			status = "disabled"
+			// A subscription that was closed because its traffic ran out or it
+			// expired keeps that lifecycle state, so the panel can explain why
+			// the toggle is unavailable instead of showing a generic pause.
+			if status != "expired" && status != "quota_exhausted" {
+				status = "disabled"
+			}
 			included = false
 		} else if status == "disabled" {
 			status = "pending"
@@ -388,7 +408,9 @@ func (m *Manager) reconcileSubscriptionStateLocked(urls []string) {
 		info := m.items[rawURL]
 		info.Enabled = m.baseCfg.SubscriptionEnabled(rawURL)
 		if !info.Enabled {
-			info.Status = "disabled"
+			if info.Status != "expired" && info.Status != "quota_exhausted" {
+				info.Status = "disabled"
+			}
 			info.Included = false
 		} else if info.Status == "disabled" {
 			// Re-enabling a paused subscription must also restore its visible
@@ -507,7 +529,10 @@ func (m *Manager) updateConfig(urls []string, enabled bool, interval time.Durati
 			info.Name = subscriptionName(renamedTo)
 			info.Enabled = !renamedWasDisabled
 			if renamedWasDisabled {
-				info.Status = "disabled"
+				// A rename must not hide why the subscription is closed.
+				if info.Status != "expired" && info.Status != "quota_exhausted" {
+					info.Status = "disabled"
+				}
 				info.Included = false
 			}
 			m.items[renamedTo] = info
@@ -650,6 +675,15 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 		m.mu.Unlock()
 		return fmt.Errorf("订阅不存在")
 	}
+	if enabled {
+		// A subscription that has been observed as expired or exhausted can only
+		// become usable after a successful refresh updates its metadata and cache.
+		info := m.items[rawURL]
+		if reason := subscriptionInactiveReason(info); reason != "" {
+			m.mu.Unlock()
+			return fmt.Errorf("订阅已%s，请先更新订阅", reason)
+		}
+	}
 	if m.baseCfg.SubscriptionEnabled(rawURL) == enabled {
 		// Keep the in-memory item aligned even when the requested operation is
 		// idempotent (for example after restoring a stale persisted snapshot).
@@ -699,6 +733,24 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 	return nil
 }
 
+// EnableBlockReason reports why a subscription may not be enabled right now.
+// An empty string means enabling is allowed. A subscription without a traffic
+// quota and without an expiry date is unconstrained and always allowed.
+func (m *Manager) EnableBlockReason(rawURL string) string {
+	if m == nil {
+		return ""
+	}
+	m.mu.RLock()
+	info := m.items[rawURL]
+	m.mu.RUnlock()
+	return monitor.SubscriptionInactiveReason(info)
+}
+
+// subscriptionInactiveReason reports the enable gate for an in-memory item.
+func subscriptionInactiveReason(info monitor.SubscriptionInfo) string {
+	return monitor.SubscriptionInactiveReason(info)
+}
+
 // RefreshNow triggers an immediate refresh.
 func (m *Manager) RefreshNow() error {
 	m.doRefresh(true)
@@ -731,7 +783,11 @@ func (m *Manager) Subscriptions() []monitor.SubscriptionInfo {
 		}
 		info.Enabled = m.baseCfg.SubscriptionEnabled(rawURL)
 		if !info.Enabled {
-			info.Status = "disabled"
+			// Keep expired/quota_exhausted visible: the UI relies on it to keep
+			// the enable toggle disabled until the subscription is refreshed.
+			if info.Status != "expired" && info.Status != "quota_exhausted" {
+				info.Status = "disabled"
+			}
 			info.Included = false
 		} else if info.Status == "disabled" {
 			info.Status = "pending"
@@ -739,6 +795,7 @@ func (m *Manager) Subscriptions() []monitor.SubscriptionInfo {
 		if info.NodeCount == 0 {
 			info.NodeCount = len(m.nodeCache[rawURL])
 		}
+		info.BlockReason = monitor.SubscriptionInactiveReason(info)
 		result = append(result, info)
 	}
 	return result
@@ -1142,6 +1199,8 @@ func (m *Manager) applySharedFetch(rawURL string) {
 		m.nodeCache[rawURL] = append([]config.NodeConfig(nil), result.nodes...)
 	} else if result.info.Status == "expired" || result.info.Status == "quota_exhausted" {
 		delete(m.nodeCache, rawURL)
+		m.baseCfg.SetSubscriptionEnabled(rawURL, false)
+		result.info.Enabled = false
 	} else {
 		m.mu.Unlock()
 		return
@@ -1152,6 +1211,11 @@ func (m *Manager) applySharedFetch(rawURL string) {
 	m.status.IsRefreshing = true
 	m.mu.Unlock()
 	m.saveNodeCache(cacheSnapshot)
+	if result.info.Status == "expired" || result.info.Status == "quota_exhausted" {
+		if err := m.baseCfg.SaveSettings(); err != nil {
+			m.logger.Warnf("自动关闭失效订阅失败: %v", err)
+		}
+	}
 	if err := m.writeNodesToFile(m.getNodesFilePath(), nodes); err != nil {
 		m.logger.Warnf("写入共享订阅缓存失败: %v", err)
 		m.restoreSharedFetchState(previousCache, previousItems, err)
@@ -1356,7 +1420,7 @@ func (m *Manager) cachedNodesForConfigLocked() []config.NodeConfig {
 			info.Enabled = enabled
 			info.NodeCount = len(m.nodeCache[rawURL])
 			info.Included = enabled && info.NodeCount > 0
-			if !enabled {
+			if !enabled && info.Status != "expired" && info.Status != "quota_exhausted" {
 				info.Status = "disabled"
 			}
 			m.items[rawURL] = info
@@ -1405,6 +1469,21 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 	timeout := m.baseCfg.SubscriptionRefresh.Timeout
 	concurrency := m.baseCfg.SubscriptionRefresh.FetchConcurrency
 	ctx := m.ctx
+	// A subscription closed by the traffic/expiry rule is no longer active, so
+	// an explicit refresh request would be filtered out and its metadata could
+	// never recover — leaving the enable toggle blocked forever. Collect the
+	// recoverable ones so a manual refresh can still contact them. The decision
+	// reads the quota/expiry metadata rather than the status, because a failed
+	// refresh replaces the status with "error" while keeping the metadata.
+	recoverable := make(map[string]struct{})
+	for _, rawURL := range m.baseCfg.Subscriptions {
+		if m.baseCfg.SubscriptionEnabled(rawURL) {
+			continue
+		}
+		if subscriptionInactiveReason(m.items[rawURL]) != "" {
+			recoverable[rawURL] = struct{}{}
+		}
+	}
 	m.mu.RUnlock()
 	if requestedURLs != nil {
 		active := make(map[string]struct{}, len(urls))
@@ -1415,7 +1494,11 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 		seen := make(map[string]struct{}, len(requestedURLs))
 		for _, rawURL := range requestedURLs {
 			if _, ok := active[rawURL]; !ok {
-				continue
+				// Manually paused subscriptions stay untouched, but one that was
+				// closed by the traffic/expiry rule must remain refreshable.
+				if _, ok := recoverable[rawURL]; !ok {
+					continue
+				}
 			}
 			if _, ok := seen[rawURL]; ok {
 				continue
@@ -1456,12 +1539,18 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 	wg.Wait()
 
 	failed := 0
+	autoDisabled := false
 	var lastErr error
 	m.mu.Lock()
 	for _, result := range results {
 		if result.err != nil {
 			failed++
 			lastErr = result.err
+			// A failed fetch carries no fresh metadata, so keep the quota and
+			// expiry we already learned. Overwriting them with zeroes would make
+			// an exhausted subscription look unlimited and let it be enabled
+			// again after a transient network error.
+			result.info = carryOverSubscriptionLimits(m.items[result.url], result.info)
 			if cached := m.nodeCache[result.url]; len(cached) > 0 {
 				result.nodes = append([]config.NodeConfig(nil), cached...)
 				result.info.NodeCount = len(cached)
@@ -1475,6 +1564,11 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 			delete(m.nodeCache, result.url)
 			result.nodes = nil
 			result.info.Included = false
+			if result.info.Status == "expired" || result.info.Status == "quota_exhausted" {
+				m.baseCfg.SetSubscriptionEnabled(result.url, false)
+				result.info.Enabled = false
+				autoDisabled = true
+			}
 		}
 		m.items[result.url] = result.info
 	}
@@ -1482,6 +1576,11 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 	cacheSnapshot := cloneSubscriptionNodeCache(m.nodeCache)
 	m.mu.Unlock()
 	m.saveNodeCache(cacheSnapshot)
+	if autoDisabled {
+		if err := m.baseCfg.SaveSettings(); err != nil {
+			m.logger.Warnf("自动关闭失效订阅失败: %v", err)
+		}
+	}
 
 	if requestedURLs != nil && failed > 0 && lastErr != nil {
 		return allNodes, lastErr
@@ -1490,6 +1589,23 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 		return nil, lastErr
 	}
 	return allNodes, nil
+}
+
+// carryOverSubscriptionLimits copies the previously known quota and expiry
+// fields onto an item that carries no fresh metadata (a failed fetch). Traffic
+// and expiry are only ever cleared by a successful fetch that reports them
+// absent, never by an outage.
+func carryOverSubscriptionLimits(previous, current monitor.SubscriptionInfo) monitor.SubscriptionInfo {
+	current.UploadBytes = previous.UploadBytes
+	current.DownloadBytes = previous.DownloadBytes
+	current.UsedBytes = previous.UsedBytes
+	current.TotalBytes = previous.TotalBytes
+	current.ExpiresAt = previous.ExpiresAt
+	current.RemainingBytes = 0
+	if current.TotalBytes > current.UsedBytes {
+		current.RemainingBytes = current.TotalBytes - current.UsedBytes
+	}
+	return current
 }
 
 // createNewConfig creates a new config with updated nodes while preserving other settings.

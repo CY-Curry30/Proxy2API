@@ -91,6 +91,10 @@ type SubscriptionRefresher interface {
 	UpdateConfigAndRefresh(urls []string, enabled bool, interval time.Duration) error
 	UpdateConfigAndRefreshSelected(urls []string, enabled bool, interval time.Duration, refreshURLs []string) error
 	SetSubscriptionEnabled(rawURL string, enabled bool) error
+	// EnableBlockReason returns a non-empty reason when the subscription must
+	// not be enabled (expired or out of traffic). An empty string means the
+	// subscription is unconstrained and may be toggled freely.
+	EnableBlockReason(rawURL string) string
 }
 
 // SubscriptionStatus represents subscription refresh status.
@@ -104,26 +108,70 @@ type SubscriptionStatus struct {
 	NodesModified bool      `json:"nodes_modified"` // True if nodes.txt was modified since last refresh
 }
 
+// Subscription lifecycle statuses set by the traffic/expiry rule.
+const (
+	SubscriptionStatusExpired        = "expired"
+	SubscriptionStatusQuotaExhausted = "quota_exhausted"
+)
+
+// User-facing reasons that accompany the lifecycle statuses above.
+const (
+	SubscriptionReasonExpired        = "过期"
+	SubscriptionReasonQuotaExhausted = "流量用尽"
+)
+
+// SubscriptionStatusCloseReason maps a lifecycle status to its user-facing
+// reason, returning an empty string for statuses that are not a rule-driven
+// close.
+func SubscriptionStatusCloseReason(status string) string {
+	switch status {
+	case SubscriptionStatusExpired:
+		return SubscriptionReasonExpired
+	case SubscriptionStatusQuotaExhausted:
+		return SubscriptionReasonQuotaExhausted
+	}
+	return ""
+}
+
+// SubscriptionInactiveReason reports why a subscription must not be enabled
+// right now, based on the traffic and expiry metadata reported by its provider.
+// An empty string means the subscription is unconstrained — no quota and no
+// expiry date — and may be toggled freely. This is the single source of truth
+// for the enable gate; the panel mirrors it through SubscriptionInfo.BlockReason.
+func SubscriptionInactiveReason(info SubscriptionInfo) string {
+	if info.ExpiresAt > 0 && info.ExpiresAt <= time.Now().Unix() {
+		return SubscriptionReasonExpired
+	}
+	if info.TotalBytes > 0 && info.UsedBytes >= info.TotalBytes {
+		return SubscriptionReasonQuotaExhausted
+	}
+	return ""
+}
+
 // SubscriptionInfo describes the latest state reported by one subscription.
 type SubscriptionInfo struct {
-	ID              string    `json:"id"`
-	URL             string    `json:"url"`
-	Name            string    `json:"name"`
-	Status          string    `json:"status"`
-	UsedByProjects  []string  `json:"used_by_projects"`
-	NodeCount       int       `json:"node_count"`
-	ValidNodeCount  int       `json:"valid_node_count,omitempty"`
-	ProbedNodeCount int       `json:"probed_node_count,omitempty"`
-	Included        bool      `json:"included"`
-	Enabled         bool      `json:"enabled"`
-	UploadBytes     int64     `json:"upload_bytes"`
-	DownloadBytes   int64     `json:"download_bytes"`
-	UsedBytes       int64     `json:"used_bytes"`
-	TotalBytes      int64     `json:"total_bytes"`
-	RemainingBytes  int64     `json:"remaining_bytes"`
-	ExpiresAt       int64     `json:"expires_at"`
-	LastRefresh     time.Time `json:"last_refresh"`
-	LastError       string    `json:"last_error,omitempty"`
+	ID              string   `json:"id"`
+	URL             string   `json:"url"`
+	Name            string   `json:"name"`
+	Status          string   `json:"status"`
+	UsedByProjects  []string `json:"used_by_projects"`
+	NodeCount       int      `json:"node_count"`
+	ValidNodeCount  int      `json:"valid_node_count,omitempty"`
+	ProbedNodeCount int      `json:"probed_node_count,omitempty"`
+	Included        bool     `json:"included"`
+	Enabled         bool     `json:"enabled"`
+	UploadBytes     int64    `json:"upload_bytes"`
+	DownloadBytes   int64    `json:"download_bytes"`
+	UsedBytes       int64    `json:"used_bytes"`
+	TotalBytes      int64    `json:"total_bytes"`
+	RemainingBytes  int64    `json:"remaining_bytes"`
+	ExpiresAt       int64    `json:"expires_at"`
+	// BlockReason is non-empty while the traffic/expiry rule forbids enabling
+	// this subscription, even if the visible status was replaced by a transient
+	// refresh error. The panel uses it to keep the enable toggle disabled.
+	BlockReason string    `json:"block_reason,omitempty"`
+	LastRefresh time.Time `json:"last_refresh"`
+	LastError   string    `json:"last_error,omitempty"`
 }
 
 // Server exposes HTTP endpoints for monitoring.
@@ -3268,6 +3316,60 @@ func projectUsesSubscription(settings ProjectRuntimeSettings, rawURL string) boo
 	return false
 }
 
+// subscriptionLifecycleClosed reports whether a status was set by the
+// traffic/expiry rule rather than by a manual pause.
+func subscriptionLifecycleClosed(status string) bool {
+	return SubscriptionStatusCloseReason(status) != ""
+}
+
+// projectSubscriptionClosedStatuses returns, per subscription URL, the closed
+// lifecycle status observed by any running project runtime. Project runtimes
+// persist their own subscription state, so this recovers the reason after a
+// restart even when the shared catalog has not refreshed its own copy yet.
+func (s *Server) projectSubscriptionClosedStatuses() map[string]string {
+	closed := make(map[string]string)
+	if s.projects == nil {
+		return closed
+	}
+	for _, project := range s.projects.ListProjects() {
+		binding, err := s.projects.Project(project.ID)
+		if err != nil || binding.SubscriptionRefresher == nil {
+			continue
+		}
+		for _, item := range binding.SubscriptionRefresher.Subscriptions() {
+			if subscriptionLifecycleClosed(item.Status) {
+				closed[item.URL] = item.Status
+			}
+		}
+	}
+	return closed
+}
+
+// subscriptionEnableBlockReason reports why a subscription may not be enabled.
+// The local view is authoritative, but a subscription is a shared resource, so
+// the traffic/expiry rule must also hold when only a project runtime has
+// observed the closed state.
+func (s *Server) subscriptionEnableBlockReason(rawURL string) string {
+	if s.subRefresher != nil {
+		if reason := s.subRefresher.EnableBlockReason(rawURL); reason != "" {
+			return reason
+		}
+	}
+	if s.projects == nil {
+		return ""
+	}
+	for _, project := range s.projects.ListProjects() {
+		binding, err := s.projects.Project(project.ID)
+		if err != nil || binding.SubscriptionRefresher == nil {
+			continue
+		}
+		if reason := binding.SubscriptionRefresher.EnableBlockReason(rawURL); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
 func (s *Server) subscriptionUsageByURL(urls []string) map[string][]string {
 	usage := make(map[string][]string, len(urls))
 	if s.projects == nil {
@@ -3347,6 +3449,10 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 	usage := s.subscriptionUsageByURL(urls)
 	for index := range items {
 		items[index].UsedByProjects = append([]string(nil), usage[items[index].URL]...)
+		// The gate is derived from the metadata rather than from Status, because
+		// a failed refresh replaces the visible status with "error" while the
+		// traffic/expiry facts stay known.
+		items[index].BlockReason = SubscriptionInactiveReason(items[index])
 		// Sync probe results onto the per-subscription node count. When no node
 		// has been probed yet, ValidNodeCount stays 0 and the UI shows only the
 		// total. A negative sentinel would be misleading, so 0 simply means
@@ -3362,6 +3468,13 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 		for _, item := range items {
 			runtimeItems[item.URL] = item
 		}
+	}
+	// The shared catalog keeps no subscription state of its own, so after a
+	// restart it cannot explain a close until it refreshes. Project runtimes
+	// persist that state, so borrow their answer for the global view.
+	var projectClosed map[string]string
+	if s.catalogOnly {
+		projectClosed = s.projectSubscriptionClosedStatuses()
 	}
 	sharedLock := s.sharedSourceLock()
 	sharedLock.RLock()
@@ -3385,7 +3498,20 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 			}
 		}
 		if !item.Enabled {
-			item.Status = "disabled"
+			// Preserve expired/quota_exhausted so the panel can explain why the
+			// subscription is closed and keep its enable toggle disabled.
+			if !subscriptionLifecycleClosed(item.Status) {
+				if status := projectClosed[rawURL]; status != "" {
+					item.Status = status
+				} else {
+					item.Status = "disabled"
+				}
+			}
+		}
+		if item.BlockReason == "" {
+			// The catalog may not have refreshed since a restart, so fall back to
+			// the close a project runtime has already observed.
+			item.BlockReason = SubscriptionStatusCloseReason(projectClosed[rawURL])
 		}
 		item.UsedByProjects = append([]string(nil), usage[rawURL]...)
 		globalItems = append(globalItems, item)
@@ -3569,6 +3695,18 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				writeJSON(w, map[string]any{"error": "订阅管理器未启用"})
 				return
+			}
+			// Enabling a subscription must honour the traffic/expiry rule on
+			// every scope. A global toggle writes the shared catalog directly,
+			// so it cannot rely on the project manager's own enable path to
+			// reject it, and it must also respect a close that only a project
+			// runtime has observed.
+			if *req.Enabled {
+				if reason := s.subscriptionEnableBlockReason(req.URL); reason != "" {
+					w.WriteHeader(http.StatusBadRequest)
+					writeJSON(w, map[string]any{"error": fmt.Sprintf("订阅已%s，无法开启，请先更新订阅", reason)})
+					return
+				}
 			}
 			if !(globalScope && s.projects != nil && !s.catalogOnly) {
 				if err := s.subRefresher.SetSubscriptionEnabled(req.URL, *req.Enabled); err != nil {

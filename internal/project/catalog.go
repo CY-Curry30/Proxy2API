@@ -292,3 +292,6 @@ func (r *catalogSubscriptionRefresher) UpdateConfigAndRefreshSelected(urls []str
 func (r *catalogSubscriptionRefresher) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 	return r.sync(r.inner.SetSubscriptionEnabled(rawURL, enabled))
 }
+func (r *catalogSubscriptionRefresher) EnableBlockReason(rawURL string) string {
+	return r.inner.EnableBlockReason(rawURL)
+}

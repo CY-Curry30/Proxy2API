@@ -56,10 +56,12 @@ type ProjectListenerSettings struct {
 }
 
 type ProjectMultiPortSettings struct {
-	Address  string `json:"address"`
-	BasePort uint16 `json:"base_port"`
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Address      string `json:"address"`
+	BasePort     uint16 `json:"base_port"`
+	ReserveCount uint16 `json:"reserve_count"`
+	UsedCount    int    `json:"used_count"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
 }
 
 type ProjectPoolSettings struct {

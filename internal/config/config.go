@@ -123,10 +123,11 @@ func (p PoolConfig) RetryEnabledOrDefault() bool {
 
 // MultiPortConfig defines address/credential defaults for multi-port mode.
 type MultiPortConfig struct {
-	Address  string `yaml:"address"`
-	BasePort uint16 `yaml:"base_port"`
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
+	Address      string `yaml:"address"`
+	BasePort     uint16 `yaml:"base_port"`
+	ReserveCount uint16 `yaml:"reserve_count"`
+	Username     string `yaml:"username"`
+	Password     string `yaml:"password"`
 }
 
 // ManagementConfig controls the monitoring HTTP endpoint.
@@ -774,6 +775,9 @@ func (c *Config) normalize() error {
 	if c.MultiPort.BasePort == 0 {
 		c.MultiPort.BasePort = 24000
 	}
+	if c.MultiPort.ReserveCount == 0 {
+		c.MultiPort.ReserveCount = 3000
+	}
 	if c.Management.Listen == "" {
 		c.Management.Listen = "0.0.0.0:9091"
 	}
@@ -1229,6 +1233,9 @@ func (c *Config) NormalizeWithPortMapExcluding(portMap map[string]uint16, reserv
 	}
 	if c.MultiPort.BasePort == 0 {
 		c.MultiPort.BasePort = 24000
+	}
+	if c.MultiPort.ReserveCount == 0 {
+		c.MultiPort.ReserveCount = 3000
 	}
 	if c.Management.Listen == "" {
 		c.Management.Listen = "0.0.0.0:9091"

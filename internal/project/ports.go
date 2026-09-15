@@ -21,6 +21,11 @@ type portRecommendations struct {
 	StickyPort    uint16
 }
 
+// multiPortReservationSize keeps room for subscriptions added after a
+// multi-port project is created. Each project owns this block even when only
+// a subset of its ports currently have nodes.
+const defaultMultiPortReservationSize = 3000
+
 // PortRegistry is the process-wide authority for listener ownership. It is
 // intentionally conservative and treats a TCP port as host-wide, regardless
 // of bind address, so projects can never steal a listener from each other.
@@ -109,6 +114,24 @@ func declaredPorts(cfg *config.Config) (map[uint16]string, error) {
 				return nil, err
 			}
 		}
+		// Reserve the complete future node-port block. Ports already declared by
+		// this project are part of the same block and therefore are not conflicts.
+		if cfg.MultiPort.BasePort != 0 {
+			reserveCount := cfg.MultiPort.ReserveCount
+			if reserveCount == 0 {
+				reserveCount = defaultMultiPortReservationSize
+			}
+			for offset := uint32(0); offset < uint32(reserveCount); offset++ {
+				candidate := uint32(cfg.MultiPort.BasePort) + offset
+				if candidate > 65535 {
+					break
+				}
+				port := uint16(candidate)
+				if _, exists := ports[port]; !exists {
+					ports[port] = "multi-port reserved block"
+				}
+			}
+		}
 	}
 	if err := add(cfg.ClashAPIPort, "internal traffic API"); err != nil {
 		return nil, err
@@ -188,7 +211,22 @@ func (r *PortRegistry) CreationHints() (map[uint16]portOwner, portRecommendation
 	if listenerPort != 0 {
 		selected[listenerPort] = struct{}{}
 	}
-	multiPortBase := r.nextAvailableWithHostLocked(24000, selected, systemPorts)
+	multiStart := uint16(24000)
+	for port, owner := range r.owners {
+		if owner.Project == sharedCatalogID || owner.Purpose != "multi-port reserved block" {
+			continue
+		}
+		if port >= multiStart && port < 65535 {
+			multiStart = port + 1
+		}
+		if port < 24000 && port < 65535 {
+			candidate := port + 1
+			if candidate > multiStart {
+				multiStart = candidate
+			}
+		}
+	}
+	multiPortBase := r.nextAvailableWithHostLocked(multiStart, selected, systemPorts)
 	if multiPortBase != 0 {
 		selected[multiPortBase] = struct{}{}
 	}
