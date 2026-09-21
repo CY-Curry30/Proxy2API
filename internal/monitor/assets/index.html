@@ -3998,7 +3998,7 @@
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               <button class="btn btn-sm" onclick="showSubscriptionModal('${escapeAttrJs(item.url)}')">${modifyLabel}</button>
               <button class="btn btn-sm ${item.enabled ? '' : 'btn-primary'}" onclick="toggleSubscription('${escapeAttrJs(item.url)}', ${item.enabled ? 'false' : 'true'})" ${blocked && !item.enabled ? `title="${escapeHtml(blockHint)}"` : ''}>${toggleLabel}</button>
-              <button class="btn btn-sm" onclick="refreshManagedSubscription('${escapeAttrJs(item.url)}')" ${item.enabled || blocked ? '' : 'disabled'}>更新</button>
+              <button class="btn btn-sm" onclick="refreshManagedSubscription('${escapeAttrJs(item.url)}')">更新</button>
               <button class="btn btn-sm btn-danger" onclick="deleteSubscription('${escapeAttrJs(item.url)}')">${deleteLabel}</button>
             </div>
             ${blocked && !item.enabled ? `<div class="subscription-block-hint">${escapeHtml(blockHint)}</div>` : ''}

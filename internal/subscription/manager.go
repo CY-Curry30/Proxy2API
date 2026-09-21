@@ -1454,51 +1454,64 @@ func countEnabledNodes(nodes []config.NodeConfig) int {
 	return count
 }
 
-// fetchAllSubscriptions fetches every configured URL while retaining a separate
-// cache and lifecycle state for each subscription.
+// fetchAllSubscriptions runs a full refresh while retaining a separate cache
+// and lifecycle state for each subscription. forceFetch distinguishes a manual
+// "update all" (true) from the timer tick (false), which decides whether a
+// manually paused subscription is contacted too.
 func (m *Manager) fetchAllSubscriptions(forceFetch bool) ([]config.NodeConfig, error) {
 	return m.fetchSubscriptions(nil, forceFetch)
 }
 
-// fetchSubscriptions fetches the requested active URLs. A nil request means
-// all active subscriptions; non-nil requests are used for incremental config
-// updates so existing remote subscriptions are not contacted again.
+// fetchSubscriptions fetches the subscriptions a pass should contact. A nil
+// request means a full refresh whose scope follows forceFetch; a non-nil
+// request is an explicit (manual) update of specific URLs and may reach any
+// configured subscription, so existing remote subscriptions are not contacted
+// again during incremental config updates.
 func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([]config.NodeConfig, error) {
 	m.mu.RLock()
-	urls := m.baseCfg.ActiveSubscriptions()
+	active := m.baseCfg.ActiveSubscriptions()
+	configured := append([]string(nil), m.baseCfg.Subscriptions...)
 	timeout := m.baseCfg.SubscriptionRefresh.Timeout
 	concurrency := m.baseCfg.SubscriptionRefresh.FetchConcurrency
 	ctx := m.ctx
-	// A subscription closed by the traffic/expiry rule is no longer active, so
-	// an explicit refresh request would be filtered out and its metadata could
-	// never recover — leaving the enable toggle blocked forever. Collect the
-	// recoverable ones so a manual refresh can still contact them. The decision
-	// reads the quota/expiry metadata rather than the status, because a failed
-	// refresh replaces the status with "error" while keeping the metadata.
-	recoverable := make(map[string]struct{})
-	for _, rawURL := range m.baseCfg.Subscriptions {
+	// A subscription closed by the traffic/expiry rule is no longer active, yet
+	// it must stay refreshable or its metadata could never recover and the
+	// enable toggle would stay blocked forever. Collect those so both the timed
+	// refresh and an explicit request can still contact them. The decision reads
+	// the quota/expiry metadata rather than the status, because a failed refresh
+	// replaces the status with "error" while keeping the metadata.
+	autoClosed := make(map[string]struct{})
+	for _, rawURL := range configured {
 		if m.baseCfg.SubscriptionEnabled(rawURL) {
 			continue
 		}
 		if subscriptionInactiveReason(m.items[rawURL]) != "" {
-			recoverable[rawURL] = struct{}{}
+			autoClosed[rawURL] = struct{}{}
 		}
 	}
 	m.mu.RUnlock()
-	if requestedURLs != nil {
-		active := make(map[string]struct{}, len(urls))
-		for _, rawURL := range urls {
-			active[rawURL] = struct{}{}
+
+	// Which subscriptions a pass contacts depends on who asked:
+	//   - an explicit request is a manual update and may reach any configured
+	//     subscription, including one the user paused or that was auto-closed;
+	//   - a manual full refresh (forceFetch) covers every configured one, so
+	//     "update all" matches the per-subscription manual update;
+	//   - the timed refresh keeps the enabled subscriptions fresh plus the ones
+	//     auto-closed by the traffic/expiry rule, so an exhausted or expired
+	//     subscription can recover on its own, while a manually paused one is
+	//     never contacted by the timer.
+	urls := append([]string(nil), active...)
+	switch {
+	case requestedURLs != nil:
+		configuredSet := make(map[string]struct{}, len(configured))
+		for _, rawURL := range configured {
+			configuredSet[rawURL] = struct{}{}
 		}
 		selected := make([]string, 0, len(requestedURLs))
 		seen := make(map[string]struct{}, len(requestedURLs))
 		for _, rawURL := range requestedURLs {
-			if _, ok := active[rawURL]; !ok {
-				// Manually paused subscriptions stay untouched, but one that was
-				// closed by the traffic/expiry rule must remain refreshable.
-				if _, ok := recoverable[rawURL]; !ok {
-					continue
-				}
+			if _, ok := configuredSet[rawURL]; !ok {
+				continue
 			}
 			if _, ok := seen[rawURL]; ok {
 				continue
@@ -1507,6 +1520,14 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 			selected = append(selected, rawURL)
 		}
 		urls = selected
+	case forceFetch:
+		urls = configured
+	default:
+		for _, rawURL := range configured {
+			if _, ok := autoClosed[rawURL]; ok {
+				urls = append(urls, rawURL)
+			}
+		}
 	}
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -1540,6 +1561,7 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 
 	failed := 0
 	autoDisabled := false
+	autoRecovered := false
 	var lastErr error
 	m.mu.Lock()
 	for _, result := range results {
@@ -1559,6 +1581,17 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 			}
 		} else if result.info.Status == "active" {
 			m.nodeCache[result.url] = append([]config.NodeConfig(nil), result.nodes...)
+			// A subscription the traffic/expiry rule had closed recovers
+			// automatically on the timed refresh (forceFetch == false), so a
+			// renewed subscription comes back without a manual re-enable. A manual
+			// refresh only updates the data: the subscription stays closed until
+			// the user enables it. One the user paused by hand is never in
+			// autoClosed, so it stays paused either way.
+			if _, wasAutoClosed := autoClosed[result.url]; wasAutoClosed && !forceFetch {
+				m.baseCfg.SetSubscriptionEnabled(result.url, true)
+				result.info.Enabled = true
+				autoRecovered = true
+			}
 		} else {
 			// Expired and quota-exhausted subscriptions must not retain stale nodes.
 			delete(m.nodeCache, result.url)
@@ -1576,9 +1609,9 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 	cacheSnapshot := cloneSubscriptionNodeCache(m.nodeCache)
 	m.mu.Unlock()
 	m.saveNodeCache(cacheSnapshot)
-	if autoDisabled {
+	if autoDisabled || autoRecovered {
 		if err := m.baseCfg.SaveSettings(); err != nil {
-			m.logger.Warnf("自动关闭失效订阅失败: %v", err)
+			m.logger.Warnf("保存订阅自动状态失败: %v", err)
 		}
 	}
 
