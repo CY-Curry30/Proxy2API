@@ -535,6 +535,104 @@ func (s *Server) setCurrentProjectNodesIncluded(nodes []config.NodeConfig, inclu
 	return nil
 }
 
+// quarantineTarget pairs a runtime node tag with the stable node identity that
+// the project config uses to remember manual quarantine ("小黑屋") decisions.
+type quarantineTarget struct {
+	tag string
+	id  string
+}
+
+// resolveQuarantineTargets maps runtime node tags onto their stable node
+// identities. Tags that this project's runtime does not know are reported back
+// so the caller can surface a per-node error instead of failing the whole call.
+func (s *Server) resolveQuarantineTargets(tags []string) ([]quarantineTarget, map[string]string) {
+	failures := make(map[string]string)
+	if s.mgr == nil {
+		for _, tag := range tags {
+			if tag = strings.TrimSpace(tag); tag != "" {
+				failures[tag] = "节点运行时未就绪"
+			}
+		}
+		return nil, failures
+	}
+	byTag := make(map[string]Snapshot)
+	for _, snapshot := range s.mgr.Snapshot() {
+		byTag[snapshot.Tag] = snapshot
+	}
+	targets := make([]quarantineTarget, 0, len(tags))
+	seen := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, duplicate := seen[tag]; duplicate {
+			continue
+		}
+		seen[tag] = struct{}{}
+		snapshot, ok := byTag[tag]
+		if !ok {
+			failures[tag] = "节点不存在"
+			continue
+		}
+		if snapshot.ID == "" {
+			failures[tag] = "节点缺少稳定标识"
+			continue
+		}
+		targets = append(targets, quarantineTarget{tag: tag, id: snapshot.ID})
+	}
+	return targets, failures
+}
+
+// setCurrentProjectQuarantine persists the manual quarantine state of the
+// current project and mirrors it onto the live runtime.
+//
+// Quarantine ("小黑屋") is deliberately separate from the failure blacklist: it
+// is always a manual action, it is stored in that project's own YAML (never in
+// the shared catalog, so every project keeps an independent black room), it
+// never expires on its own, and it never touches blacklist counters. When the
+// persisted write fails the in-memory list is rolled back and no runtime flag
+// is changed, so config and runtime never disagree.
+func (s *Server) setCurrentProjectQuarantine(tags []string, quarantined bool) (map[string]string, error) {
+	failures := make(map[string]string)
+	if !s.hasProjectScope() || s.cfgSrc == nil {
+		return failures, errors.New("小黑屋仅适用于具体项目")
+	}
+	targets, resolveFailures := s.resolveQuarantineTargets(tags)
+	for tag, reason := range resolveFailures {
+		failures[tag] = reason
+	}
+	if len(targets) == 0 {
+		if len(failures) > 0 {
+			return failures, nil
+		}
+		return failures, errors.New("没有可操作的节点")
+	}
+
+	s.cfgMu.Lock()
+	previous := append([]string(nil), s.cfgSrc.QuarantinedNodes...)
+	for _, target := range targets {
+		if quarantined {
+			s.cfgSrc.QuarantineNode(target.id)
+		} else {
+			s.cfgSrc.ReleaseQuarantinedNode(target.id)
+		}
+	}
+	if err := s.cfgSrc.SaveSettings(); err != nil {
+		s.cfgSrc.QuarantinedNodes = previous
+		s.cfgMu.Unlock()
+		return failures, fmt.Errorf("保存项目小黑屋状态: %w", err)
+	}
+	s.cfgMu.Unlock()
+
+	for _, target := range targets {
+		if err := s.mgr.SetQuarantined(target.tag, quarantined); err != nil {
+			failures[target.tag] = err.Error()
+		}
+	}
+	return failures, nil
+}
+
 func (s *Server) reloadCurrentProjectSources(ctx context.Context) error {
 	if !s.hasProjectScope() {
 		return nil
@@ -1509,6 +1607,48 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"tag": tag, "duration": duration.String(), "message": fmt.Sprintf("已拉黑 %s", duration)})
+	case "quarantine", "unquarantine":
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		// 小黑屋只存在于具体项目里：全局目录和单配置模式没有项目边界，
+		// 因此直接拒绝，避免出现一份“谁都不是”的小黑屋。
+		if !s.hasProjectScope() {
+			w.WriteHeader(http.StatusConflict)
+			writeJSON(w, map[string]any{"error": "小黑屋仅适用于具体项目，全局目录不支持"})
+			return
+		}
+		quarantined := action == "quarantine"
+		taskMessage := "正在将节点关进小黑屋"
+		if !quarantined {
+			taskMessage = "正在将节点移出小黑屋"
+		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:              "node." + action,
+			Message:           taskMessage,
+			SkipWorkspaceLock: true,
+		}, (*Server).handleNodeAction) {
+			return
+		}
+		failures, err := s.setCurrentProjectQuarantine([]string{tag}, quarantined)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": err.Error()})
+			return
+		}
+		if reason, failed := failures[tag]; failed {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]any{"error": reason})
+			return
+		}
+		response := map[string]any{"tag": tag, "quarantined": quarantined}
+		if quarantined {
+			response["message"] = "已关进小黑屋，需手动释放"
+		} else {
+			response["message"] = "已释放出小黑屋"
+		}
+		writeJSON(w, response)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -1765,7 +1905,7 @@ func (s *Server) handleNodeBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Action   string   `json:"action"`   // "probe", "release", "blacklist"
+		Action   string   `json:"action"`   // "probe", "release", "blacklist", "quarantine", "unquarantine"
 		Tags     []string `json:"tags"`     // 节点标签列表
 		Duration string   `json:"duration"` // 拉黑时长，仅用于 blacklist 操作
 	}
@@ -1795,6 +1935,10 @@ func (s *Server) handleNodeBatch(w http.ResponseWriter, r *http.Request) {
 		s.handleBatchRelease(w, r, req.Tags)
 	case "blacklist":
 		s.handleBatchBlacklist(w, r, req.Tags, req.Duration)
+	case "quarantine":
+		s.handleBatchQuarantine(w, r, req.Tags, true)
+	case "unquarantine":
+		s.handleBatchQuarantine(w, r, req.Tags, false)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]any{"error": "不支持的操作: " + req.Action})
@@ -2044,6 +2188,59 @@ func (s *Server) handleBatchBlacklist(w http.ResponseWriter, r *http.Request, ta
 		response["errors"] = errors
 	}
 
+	writeJSON(w, response)
+}
+
+// handleBatchQuarantine moves multiple nodes in or out of the current project's
+// manual quarantine ("小黑屋"). It is intentionally independent from the batch
+// blacklist/release actions so the two features can never influence each other.
+func (s *Server) handleBatchQuarantine(w http.ResponseWriter, r *http.Request, tags []string, quarantined bool) {
+	action := "quarantine"
+	verb := "关进小黑屋"
+	if !quarantined {
+		action = "unquarantine"
+		verb = "移出小黑屋"
+	}
+	if !s.hasProjectScope() {
+		w.WriteHeader(http.StatusConflict)
+		writeJSON(w, map[string]any{"error": "小黑屋仅适用于具体项目，全局目录不支持"})
+		return
+	}
+	if s.enqueueAsyncMutation(w, r, TaskSpec{
+		Kind:              "node.batch." + action,
+		Message:           fmt.Sprintf("正在将 %d 个节点%s", len(tags), verb),
+		SkipWorkspaceLock: true,
+	}, func(taskServer *Server, ww http.ResponseWriter, rr *http.Request) {
+		body := map[string]any{"action": action, "tags": tags}
+		bodyBytes, _ := json.Marshal(body)
+		rr.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		taskServer.handleNodeBatch(ww, rr)
+	}) {
+		return
+	}
+
+	failures, err := s.setCurrentProjectQuarantine(tags, quarantined)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+
+	failedCount := len(failures)
+	successCount := len(tags) - failedCount
+	if successCount < 0 {
+		successCount = 0
+	}
+	response := map[string]any{
+		"message":     fmt.Sprintf("批量%s完成：成功 %d 个，失败 %d 个", verb, successCount, failedCount),
+		"success":     successCount,
+		"failed":      failedCount,
+		"total":       len(tags),
+		"quarantined": quarantined,
+	}
+	if failedCount > 0 {
+		response["errors"] = failures
+	}
 	writeJSON(w, response)
 }
 
@@ -3878,7 +4075,7 @@ type configNodeView struct {
 	SubscriptionName string `json:"subscription_name,omitempty"`
 	// Status is the latest probe-derived health state of this node, synced from
 	// the runtime monitor. Empty ("") means the node has not been probed yet.
-	// Possible values: "", "valid", "abnormal", "blacklisted".
+	// Possible values: "", "valid", "abnormal", "blacklisted", "quarantined".
 	Status string `json:"status,omitempty"`
 }
 
@@ -3888,11 +4085,18 @@ const (
 	nodeStatusValid       = "valid"
 	nodeStatusAbnormal    = "abnormal"
 	nodeStatusBlacklisted = "blacklisted"
+	// nodeStatusQuarantined is the manual "小黑屋" state. It takes priority over
+	// the probe-derived states because it is an explicit operator decision and
+	// it is the only state that cannot clear itself.
+	nodeStatusQuarantined = "quarantined"
 )
 
 // classifyNodeStatus maps a runtime snapshot onto the compact status string used
 // by the node configuration page. It reports whether the node has been probed.
 func classifyNodeStatus(snap Snapshot) (status string, probed bool) {
+	if snap.Quarantined {
+		return nodeStatusQuarantined, true
+	}
 	if snap.Blacklisted {
 		return nodeStatusBlacklisted, true
 	}

@@ -31,6 +31,17 @@ func Build(cfg *config.Config) (option.Options, error) {
 	usedTags := make(map[string]int) // Track tag usage for uniqueness
 	usedStateKeys := make(map[string]int)
 
+	// Manual quarantine ("小黑屋") is a project-level, manual-only state kept in
+	// the project config. Resolving it here means every reload re-applies the
+	// same set to the freshly built pool, and it stays fully independent from
+	// the failure-driven blacklist.
+	quarantined := make(map[string]struct{}, len(cfg.QuarantinedNodes))
+	for _, id := range cfg.QuarantinedNodes {
+		if id = strings.TrimSpace(id); id != "" {
+			quarantined[id] = struct{}{}
+		}
+	}
+
 	totalNodes := len(cfg.Nodes)
 	for i, node := range cfg.Nodes {
 		if i > 0 && i%1000 == 0 {
@@ -79,6 +90,10 @@ func Build(cfg *config.Config) (option.Options, error) {
 		} else {
 			meta.ListenAddress = cfg.Listener.Address
 			meta.Port = cfg.Listener.Port
+		}
+
+		if _, held := quarantined[meta.ID]; held {
+			meta.Quarantined = true
 		}
 
 		metadata[tag] = meta

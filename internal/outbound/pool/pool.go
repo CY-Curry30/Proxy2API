@@ -77,6 +77,9 @@ type MemberMeta struct {
 	Port            uint16
 	SubscriptionURL string
 	Suppressed      bool
+	// Quarantined mirrors the project's manual quarantine ("小黑屋") state for
+	// this member. It is never derived from failures.
+	Quarantined bool
 }
 
 // Register wires the pool outbound into the registry.
@@ -172,6 +175,7 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 				Username:        meta.Username,
 				Password:        meta.Password,
 				Suppressed:      meta.Suppressed,
+				Quarantined:     meta.Quarantined,
 			}
 			entry := monitorMgr.Register(info)
 			if entry != nil {
@@ -286,6 +290,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 				Username:        meta.Username,
 				Password:        meta.Password,
 				Suppressed:      meta.Suppressed,
+				Quarantined:     meta.Quarantined,
 			}
 			entry := p.monitor.Register(info)
 			if entry != nil {
@@ -452,7 +457,7 @@ func (p *poolOutbound) pickMemberFiltered(network string, tried map[string]bool,
 		p.lastUsedMu.RLock()
 		lastUsed := p.lastUsedMember
 		p.lastUsedMu.RUnlock()
-		if lastUsed != nil {
+		if lastUsed != nil && usableFallback(lastUsed) {
 			p.logger.Warn("没有可用的健康代理，降级使用最后一次成功的节点: ", lastUsed.tag)
 			log.Printf("⚠️  [节点池] 没有可用的健康代理，降级使用最后一次成功的节点: %s", lastUsed.tag)
 			return lastUsed, nil
@@ -501,7 +506,7 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 		p.lastUsedMu.RLock()
 		lastUsed := p.lastUsedMember
 		p.lastUsedMu.RUnlock()
-		if lastUsed != nil {
+		if lastUsed != nil && usableFallback(lastUsed) {
 			p.logger.Warn("没有可用的健康代理，降级使用最后一次成功的节点: ", lastUsed.tag)
 			log.Printf("⚠️  [节点池] 没有可用的健康代理，降级使用最后一次成功的节点: %s", lastUsed.tag)
 			return lastUsed, nil
@@ -528,6 +533,14 @@ func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf
 			continue
 		}
 		if member.entry != nil {
+			// Manual quarantine ("小黑屋") is an operator decision, not a health
+			// signal: the node is skipped regardless of probe results until it is
+			// manually released. It is checked before Healthy() so a quarantined
+			// node never re-enters routing on its own.
+			if member.entry.Quarantined() {
+				p.logger.Debug("跳过小黑屋节点：", member.tag)
+				continue
+			}
 			if member.entry.Suppressed() || !member.entry.Healthy() {
 				continue
 			}
@@ -538,6 +551,17 @@ func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf
 		result = append(result, member)
 	}
 	return result
+}
+
+// usableFallback reports whether a member may still serve as the degraded
+// fallback used when no healthy candidate exists. Quarantined nodes are never a
+// fallback: the operator deliberately parked them, so only a manual release may
+// bring them back into routing.
+func usableFallback(member *memberState) bool {
+	if member == nil {
+		return false
+	}
+	return member.entry == nil || !member.entry.Quarantined()
 }
 
 const stickyFallbackKey = "_global_"

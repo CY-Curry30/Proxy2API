@@ -48,3 +48,4 @@ coverage.html
 # AI tool artifacts
 .ace-tool/
 .codegraph/
+.workbuddy-ai

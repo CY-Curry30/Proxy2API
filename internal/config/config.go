@@ -56,6 +56,7 @@ type Config struct {
 	SelectedSubscriptions []string                  `yaml:"selected_subscriptions,omitempty"` // 项目选定的订阅子集，空表示全部选中
 	ExcludedSubscriptions []string                  `yaml:"excluded_subscriptions,omitempty"` // 项目排除的共享订阅
 	ExcludedNodes         []string                  `yaml:"excluded_nodes,omitempty"`         // 项目排除的共享节点稳定 ID
+	QuarantinedNodes      []string                  `yaml:"quarantined_nodes,omitempty"`      // 项目小黑屋：手动关入的节点稳定 ID，只能手动释放
 	ExternalIP            string                    `yaml:"external_ip"`                      // 外部 IP 地址，用于导出时替换 0.0.0.0
 	LogLevel              string                    `yaml:"log_level"`
 	SkipCertVerify        bool                      `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
@@ -434,6 +435,79 @@ func (c *Config) PruneDisabledSubscriptions() {
 	c.normalizeDisabledSubscriptions()
 }
 
+// normalizeQuarantinedNodes trims and de-duplicates the manual quarantine list
+// ("小黑屋") while preserving the operator's ordering. Quarantine entries are
+// stable node identities, so a missing node simply never matches instead of
+// corrupting the list.
+func (c *Config) normalizeQuarantinedNodes() {
+	if len(c.QuarantinedNodes) == 0 {
+		c.QuarantinedNodes = nil
+		return
+	}
+	seen := make(map[string]struct{}, len(c.QuarantinedNodes))
+	filtered := make([]string, 0, len(c.QuarantinedNodes))
+	for _, rawID := range c.QuarantinedNodes {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		filtered = append(filtered, id)
+	}
+	c.QuarantinedNodes = filtered
+}
+
+// NodeQuarantined reports whether the node with the given stable runtime
+// identity is currently held in this project's manual quarantine ("小黑屋").
+//
+// Quarantine is deliberately separate from the automatic failure blacklist: it
+// is always an explicit manual action, it belongs to a single project, and it
+// never expires on its own — only a manual release clears it.
+func (c *Config) NodeQuarantined(nodeID string) bool {
+	if c == nil || nodeID == "" {
+		return false
+	}
+	for _, id := range c.QuarantinedNodes {
+		if id == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+// QuarantineNode adds a stable node identity to the manual quarantine list.
+// It reports whether the list actually changed.
+func (c *Config) QuarantineNode(nodeID string) bool {
+	nodeID = strings.TrimSpace(nodeID)
+	if c == nil || nodeID == "" || c.NodeQuarantined(nodeID) {
+		return false
+	}
+	c.QuarantinedNodes = append(c.QuarantinedNodes, nodeID)
+	return true
+}
+
+// ReleaseQuarantinedNode removes a stable node identity from the manual
+// quarantine list. It reports whether the list actually changed.
+func (c *Config) ReleaseQuarantinedNode(nodeID string) bool {
+	if c == nil || nodeID == "" {
+		return false
+	}
+	filtered := make([]string, 0, len(c.QuarantinedNodes))
+	for _, id := range c.QuarantinedNodes {
+		if id != nodeID {
+			filtered = append(filtered, id)
+		}
+	}
+	if len(filtered) == len(c.QuarantinedNodes) {
+		return false
+	}
+	c.QuarantinedNodes = filtered
+	return true
+}
+
 // Load reads YAML config from disk and applies defaults/validation.
 func Load(path string) (*Config, error) {
 	return load(path, true)
@@ -789,6 +863,7 @@ func (c *Config) normalize() error {
 		c.Management.Enabled = &defaultEnabled
 	}
 	c.normalizeDisabledSubscriptions()
+	c.normalizeQuarantinedNodes()
 
 	// Subscription refresh defaults
 	if c.SubscriptionRefresh.Interval <= 0 {
@@ -2960,6 +3035,7 @@ func (c *Config) SaveSettings() error {
 	saveCfg.SelectedSubscriptions = c.SelectedSubscriptions
 	saveCfg.ExcludedSubscriptions = c.ExcludedSubscriptions
 	saveCfg.ExcludedNodes = c.ExcludedNodes
+	saveCfg.QuarantinedNodes = c.QuarantinedNodes
 	saveCfg.SubscriptionRefresh = c.SubscriptionRefresh
 	saveCfg.Mode = c.Mode
 	saveCfg.Listener = c.Listener

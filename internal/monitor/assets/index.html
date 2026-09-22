@@ -323,7 +323,9 @@
     /* Dashboard Grid */
     .overview-grid {
       display: grid;
-      grid-template-columns: repeat(6, 1fr);
+      /* auto-fit keeps every stat panel the same width when a panel is hidden
+         (e.g. 小黑屋 outside project scope) instead of leaving an empty cell. */
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 16px;
       margin-bottom: 24px;
     }
@@ -873,6 +875,11 @@
             <div class="stat-value" style="color: var(--error);" id="blacklistedNodes">0</div>
             <div class="stat-sub">不可用节点</div>
           </div>
+          <div class="stat-panel" id="quarantineStatPanel">
+            <div class="stat-title">小黑屋</div>
+            <div class="stat-value" style="color: var(--warning);" id="quarantinedNodes">0</div>
+            <div class="stat-sub">手动关入 · 需手动释放</div>
+          </div>
           <div class="stat-panel">
             <div class="stat-title" id="liveUpTitle">↑ 上行速率</div>
             <div class="stat-value" style="color: #3b82f6; font-size: 22px;" id="liveUpSpeed">0 B/s</div>
@@ -916,6 +923,8 @@
                 <button class="btn btn-sm btn-primary" onclick="batchProbeNodes()" title="批量探测选中节点">🔍 探测</button>
                 <button class="btn btn-sm btn-success" id="batchReleaseBtn" onclick="batchReleaseNodes()" title="批量解封选中节点">✅ 解封</button>
                 <button class="btn btn-sm" id="batchBlacklistBtn" onclick="batchBlacklistNodes()" style="background: var(--error); color: white;" title="批量拉黑选中节点">🚫 拉黑</button>
+                <button class="btn btn-sm" id="batchQuarantineBtn" onclick="batchQuarantineNodes()" style="background: var(--warning); color: #000;" title="批量关进小黑屋（手动，不参与调度）">🚪 小黑屋</button>
+                <button class="btn btn-sm" id="batchUnquarantineBtn" onclick="batchReleaseQuarantineNodes()" title="批量释放出小黑屋">🔓 出小黑屋</button>
                 <button class="btn btn-sm" onclick="clearNodeSelection()" title="取消选择">✖</button>
               </div>
               <select id="nodeStatusFilter" class="setting-input table-tool" onchange="applyNodeFilters()" title="状态筛选">
@@ -923,6 +932,7 @@
                 <option value="healthy">在线</option>
                 <option value="error">异常</option>
                 <option value="blocked">拉黑</option>
+                <option value="jailed">小黑屋</option>
                 <option value="unknown">未测试</option>
               </select>
               <select id="nodeLatencySort" class="setting-input table-tool" onchange="applyNodeFilters()" title="延迟排序">
@@ -1009,6 +1019,7 @@
               <option value="valid">有效</option>
               <option value="abnormal">异常</option>
               <option value="blacklisted">拉黑</option>
+              <option value="quarantined">小黑屋</option>
               <option value="unknown">未探测</option>
             </select>
             <input id="configNodeSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称或 URL" aria-label="搜索节点名称或 URL" oninput="renderConfigNodes()" />
@@ -2895,8 +2906,12 @@
     function updateDashboardStats(data) {
       const totalNodes = Number(data.total_nodes);
       document.getElementById('totalNodes').textContent = Number.isFinite(totalNodes) && totalNodes > 0 ? totalNodes : allNodesCache.length;
-      document.getElementById('healthyNodes').textContent = allNodesCache.filter(n => !n.blacklisted && n.initial_check_done && n.available).length;
+      document.getElementById('healthyNodes').textContent = allNodesCache.filter(n => !n.blacklisted && !n.quarantined && n.initial_check_done && n.available).length;
       document.getElementById('blacklistedNodes').textContent = allNodesCache.filter(n => n.blacklisted || (!n.available && n.initial_check_done)).length;
+      const quarantineCount = document.getElementById('quarantinedNodes');
+      if (quarantineCount) {
+        quarantineCount.textContent = allNodesCache.filter(n => n.quarantined).length;
+      }
       applyDashboardScopeLabels();
       if (currentProjectID) {
         document.getElementById('activeConnections').textContent = allNodesCache.reduce((s, n) => s + (n.active_connections||0), 0);
@@ -2919,6 +2934,9 @@
       document.getElementById('trafficChartTitle').textContent = globalView
         ? '项目总流量 (Project Total Traffic)'
         : '实时流量带宽 (Real-time Traffic)';
+      // 小黑屋属于具体项目：全局目录没有项目边界，因此隐藏该统计面板。
+      const quarantinePanel = document.getElementById('quarantineStatPanel');
+      if (quarantinePanel) quarantinePanel.style.display = globalView ? 'none' : '';
       if (scopeChanged) {
         document.getElementById('liveUpSpeed').textContent = globalView ? '-' : '0 B/s';
         document.getElementById('liveDownSpeed').textContent = globalView ? '-' : '0 B/s';
@@ -3452,6 +3470,8 @@
     }
 
     function getNodeStatus(n) {
+      // 小黑屋优先于拉黑：它是操作者显式的手动状态，也是唯一不会自行解除的状态。
+      if (n.quarantined) return 'jailed';
       if (n.blacklisted) return 'blocked';
       if (!n.initial_check_done) return 'unknown';
       return n.available ? 'healthy' : 'error';
@@ -3547,7 +3567,12 @@
           .map(port => `<span class="entry-port-badge" title="入口 ${escapeHtml(port)} 当前出口">${escapeHtml(port)}</span>`)
           .join('');
         let badge = '', statusText = '', statusTitle = '';
-        if (n.blacklisted) {
+        if (n.quarantined) {
+          badge = 'badge-warning';
+          statusText = '小黑屋 Jailed';
+          statusTitle = '已手动关进小黑屋，不参与调度；只能手动释放';
+          if (n.last_error) statusTitle += `\n最近探测：${n.last_error}`;
+        } else if (n.blacklisted) {
           badge = 'badge-error';
           statusText = '拉黑 Blocked';
           const unblockTime = n.blacklisted_until ? formatDateTime(n.blacklisted_until) : '';
@@ -3568,7 +3593,7 @@
           statusText = '在线 Healthy';
           statusTitle = '最近一次探测成功';
         }
-        const copyableError = !n.blacklisted && n.initial_check_done && !n.available && !!statusTitle;
+        const copyableError = !n.quarantined && !n.blacklisted && n.initial_check_done && !n.available && !!statusTitle;
         const statusCopyAttrs = copyableError
           ? ` oncontextmenu="copyStatusError(event, '${escapeAttrJs(statusTitle)}')"`
           : '';
@@ -3606,11 +3631,14 @@
               ? `<button class="btn btn-sm btn-primary" onclick="setStickyNode('')">取消指定</button>`
               : `<button class="btn btn-sm" onclick="setStickyNode('${escapeAttrJs(n.tag)}')" ${currentHealthy && stickyEnabled ? '' : 'disabled'} title="${stickyEnabled ? '指定为粘性代理出口' : '请先启用粘性代理'}">指定</button>`}
             ${n.blacklisted ? `<button class="btn btn-sm btn-primary" onclick="releaseNode('${escapeAttrJs(n.tag)}')">解封</button>` : `<button class="btn btn-sm btn-danger" onclick="blacklistNode('${escapeAttrJs(n.tag)}')">拉黑</button>`}
+            ${n.quarantined
+              ? `<button class="btn btn-sm btn-success" onclick="releaseQuarantineNode('${escapeAttrJs(n.tag)}')" title="手动释放出小黑屋">出小黑屋</button>`
+              : `<button class="btn btn-sm" style="background: var(--warning); color: #000;" onclick="quarantineNode('${escapeAttrJs(n.tag)}')" title="手动关进小黑屋，不参与调度">小黑屋</button>`}
           </td>
         </tr>`;
       }).join('');
       if (isSharedCatalogMode()) {
-        tbody.querySelectorAll('button[onclick^="setStickyNode"], button[onclick^="releaseNode"], button[onclick^="blacklistNode"]').forEach(button => button.remove());
+        tbody.querySelectorAll('button[onclick^="setStickyNode"], button[onclick^="releaseNode"], button[onclick^="blacklistNode"], button[onclick^="quarantineNode"], button[onclick^="releaseQuarantineNode"]').forEach(button => button.remove());
       }
       renderBatchSelectionState();
       if (hint) {
@@ -3726,6 +3754,28 @@
         const d = await r.json();
         if (d.error) showToast(d.error, 'error'); else { showToast('已拉黑 ' + label); refresh(); }
       } catch (e) { showToast('拉黑失败', 'error'); }
+    }
+
+    // 小黑屋：与拉黑完全独立的手动状态，只存在于当前项目，且不会自动解除。
+    async function quarantineNode(tag) {
+      if (!confirm('确定把该节点关进小黑屋？\n关入后该节点不参与调度，只能手动释放。')) return;
+      try {
+        const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/quarantine', {method:'POST'});
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) { showToast(d.error || '关入小黑屋失败', 'error'); return; }
+        showToast('已关进小黑屋，需手动释放');
+        refresh();
+      } catch (e) { showToast('关入小黑屋失败', 'error'); }
+    }
+
+    async function releaseQuarantineNode(tag) {
+      try {
+        const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/unquarantine', {method:'POST'});
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) { showToast(d.error || '释放失败', 'error'); return; }
+        showToast('已释放出小黑屋');
+        refresh();
+      } catch (e) { showToast('释放失败', 'error'); }
     }
 
     // Probe All
@@ -4398,6 +4448,7 @@
         case 'valid': return '<span class="badge badge-healthy">有效</span>';
         case 'abnormal': return '<span class="badge badge-error">异常</span>';
         case 'blacklisted': return '<span class="badge badge-offline" title="该节点当前处于拉黑状态">拉黑</span>';
+        case 'quarantined': return '<span class="badge badge-warning" title="该节点已被手动关进小黑屋，不参与调度，需手动释放">小黑屋</span>';
         default: return '<span class="badge badge-neutral" title="尚未探测">未探测</span>';
       }
     }
@@ -4975,6 +5026,11 @@
       const blacklistButton = document.getElementById('batchBlacklistBtn');
       if (releaseButton) releaseButton.style.display = allowRuntimeMutation ? '' : 'none';
       if (blacklistButton) blacklistButton.style.display = allowRuntimeMutation ? '' : 'none';
+      // 小黑屋只存在于具体项目，全局目录下不提供入口。
+      const quarantineButton = document.getElementById('batchQuarantineBtn');
+      const unquarantineButton = document.getElementById('batchUnquarantineBtn');
+      if (quarantineButton) quarantineButton.style.display = allowRuntimeMutation ? '' : 'none';
+      if (unquarantineButton) unquarantineButton.style.display = allowRuntimeMutation ? '' : 'none';
     }
 
     function toggleAllNodes(checked) {
@@ -5137,6 +5193,50 @@
       } catch (error) {
         showToast(error.message, 'error');
       }
+    }
+
+    // 批量小黑屋操作：与批量拉黑/解封完全独立的两套动作。
+    async function batchSetQuarantine(quarantined) {
+      if (selectedNodeTags.size === 0) {
+        showToast(quarantined ? '请先选择要关进小黑屋的节点' : '请先选择要释放出小黑屋的节点', 'error');
+        return;
+      }
+      const tags = Array.from(selectedNodeTags);
+      const prompt = quarantined
+        ? `确定把选中的 ${tags.length} 个节点关进小黑屋吗？\n关入后这些节点不参与调度，只能手动释放。`
+        : `确定把选中的 ${tags.length} 个节点释放出小黑屋吗？`;
+      if (!confirm(prompt)) return;
+
+      showToast(quarantined ? '开始关进小黑屋...' : '开始释放...');
+
+      try {
+        const response = await fetch('/api/nodes/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: quarantined ? 'quarantine' : 'unquarantine', tags })
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || '批量操作失败');
+        }
+
+        const failed = Number(result.failed) || 0;
+        showToast(result.message || '批量操作完成', failed > 0 ? 'error' : 'success');
+        clearNodeSelection();
+        await refresh();
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    }
+
+    function batchQuarantineNodes() {
+      return batchSetQuarantine(true);
+    }
+
+    function batchReleaseQuarantineNodes() {
+      return batchSetQuarantine(false);
     }
 
     // ========== 订阅批量操作功能 ==========

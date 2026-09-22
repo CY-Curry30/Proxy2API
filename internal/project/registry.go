@@ -474,7 +474,7 @@ func (r *Registry) ProjectHealthSummaries() []monitor.ProjectHealthSummary {
 			health.NodeCount = len(snapshots)
 			health.MonitoredNodes = len(snapshots)
 			for _, snapshot := range snapshots {
-				if snapshot.InitialCheckDone && snapshot.Available && !snapshot.Blacklisted {
+				if snapshot.InitialCheckDone && snapshot.Available && !snapshot.Blacklisted && !snapshot.Quarantined {
 					health.HealthyNodes++
 				}
 			}
@@ -612,7 +612,7 @@ func projectSummary(id string, spec config.ProjectSpec, runtime *Runtime) monito
 		snapshots := mgr.SnapshotVisible()
 		summary.MonitoredNodeCount = len(snapshots)
 		for _, snapshot := range snapshots {
-			if snapshot.InitialCheckDone && snapshot.Available && !snapshot.Blacklisted {
+			if snapshot.InitialCheckDone && snapshot.Available && !snapshot.Blacklisted && !snapshot.Quarantined {
 				summary.HealthyNodeCount++
 			}
 		}

@@ -52,6 +52,10 @@ type NodeInfo struct {
 	SubscriptionURL string `json:"-"`
 	Source          string `json:"-"`
 	Suppressed      bool   `json:"-"`
+	// Quarantined marks a node the operator manually moved into the project's
+	// "小黑屋". It is applied from the project config on every reload and is
+	// never set automatically. Snapshot re-exposes it as `quarantined`.
+	Quarantined bool `json:"-"`
 }
 
 // TimelineEvent represents a single usage event for debug tracking.
@@ -86,6 +90,7 @@ type Snapshot struct {
 	Available         bool            `json:"available"`
 	InitialCheckDone  bool            `json:"initial_check_done"`
 	Suppressed        bool            `json:"suppressed,omitempty"`
+	Quarantined       bool            `json:"quarantined"` // 小黑屋：手动关入，只能手动释放
 	Timeline          []TimelineEvent `json:"timeline,omitempty"`
 }
 
@@ -133,6 +138,7 @@ type entry struct {
 	initialCheckDone  bool
 	available         bool
 	suppressed        bool
+	quarantined       bool
 	store             *state.Store
 	mu                sync.RWMutex
 }
@@ -786,10 +792,11 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 	e, ok := m.nodes[info.Tag]
 	if !ok {
 		e = &entry{
-			info:       info,
-			suppressed: info.Suppressed,
-			timeline:   make([]TimelineEvent, 0, maxTimelineSize),
-			store:      m.stateStore,
+			info:        info,
+			suppressed:  info.Suppressed,
+			quarantined: info.Quarantined,
+			timeline:    make([]TimelineEvent, 0, maxTimelineSize),
+			store:       m.stateStore,
 		}
 		if restored, found := m.restoredNodes[info.ID]; found {
 			e.restore(restored)
@@ -801,6 +808,16 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 		e.info = info
 		e.suppressed = info.Suppressed
 		e.store = m.stateStore
+		// e.quarantined is deliberately NOT re-derived from info here.
+		//
+		// Pool metadata is a build-time snapshot of the project config, and in
+		// multi-port/hybrid mode the per-node pools are initialized lazily —
+		// long after an operator may have moved a node in or out of the black
+		// room through the API. Re-applying that stale value would silently undo
+		// a manual decision, which is exactly what a manual-only feature must
+		// never do. Config-driven changes still reach the runtime because every
+		// reload clears the entries (ClearNodes) before re-registering them, and
+		// a stopped project builds its entries from a freshly loaded config.
 		e.persistLocked(false)
 		e.mu.Unlock()
 	}
@@ -905,8 +922,10 @@ func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 		// When onlyAvailable is true, apply the same strict filter as the
 		// "healthy online" statistic: InitialCheckDone && Available. This
 		// excludes unchecked nodes (which the old logic optimistically included)
-		// so export count matches the WebUI display.
-		if onlyAvailable && (snap.Suppressed || !snap.InitialCheckDone || !snap.Available || snap.Blacklisted) {
+		// so export count matches the WebUI display. Manually quarantined nodes
+		// are excluded too: they are healthy but deliberately out of routing, so
+		// they must not leak into exports or "online" listings.
+		if onlyAvailable && (snap.Suppressed || snap.Quarantined || !snap.InitialCheckDone || !snap.Available || snap.Blacklisted) {
 			continue
 		}
 		snapshots = append(snapshots, snap)
@@ -1194,6 +1213,22 @@ func (m *Manager) ManualBlacklist(tag string, duration time.Duration) error {
 	return nil
 }
 
+// SetQuarantined moves a node into or out of this project's manual quarantine
+// ("小黑屋").
+//
+// The project config owns the persisted state; this only mirrors it onto the
+// live entry so routing and the WebUI react immediately, without waiting for a
+// reload. Unlike the failure blacklist there is no timer and no duration: a
+// quarantined node stays out of the pool until it is manually released.
+func (m *Manager) SetQuarantined(tag string, quarantined bool) error {
+	e, err := m.entry(tag)
+	if err != nil {
+		return err
+	}
+	e.setQuarantined(quarantined)
+	return nil
+}
+
 func (m *Manager) entry(tag string) (*entry, error) {
 	m.mu.RLock()
 	e, ok := m.nodes[tag]
@@ -1241,6 +1276,7 @@ func (e *entry) snapshot() Snapshot {
 		Available:         e.available,
 		InitialCheckDone:  e.initialCheckDone,
 		Suppressed:        e.suppressed,
+		Quarantined:       e.quarantined,
 		Timeline:          timelineCopy,
 	}
 }
@@ -1449,6 +1485,22 @@ func (e *entry) clearBlacklist() {
 	e.available = false
 }
 
+// setQuarantined mirrors the project's manual quarantine state onto the entry.
+//
+// Probe-derived health is intentionally left untouched: a node in the black
+// room keeps being probed so the operator can still see whether it recovered
+// before releasing it. Routing exclusion and status display read the flag
+// directly, so no availability epoch is bumped here either.
+func (e *entry) setQuarantined(quarantined bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.quarantined == quarantined {
+		return
+	}
+	e.quarantined = quarantined
+	e.persistLocked(true)
+}
+
 func (e *entry) incActive() {
 	e.active.Add(1)
 }
@@ -1586,9 +1638,22 @@ func (h *EntryHandle) Suppressed() bool {
 	return h.ref.suppressed
 }
 
+// Quarantined reports whether the node is held in the project's manual
+// quarantine ("小黑屋"). The pool uses it to keep the node out of routing until
+// it is manually released.
+func (h *EntryHandle) Quarantined() bool {
+	if h == nil || h.ref == nil {
+		return false
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return h.ref.quarantined
+}
+
 // Healthy reports whether the node has completed a probe and both required
 // checks succeeded. Blacklist eligibility is maintained by the pool's shared
-// state and is checked separately during member selection.
+// state and is checked separately during member selection, and the manual
+// quarantine flag is checked separately as well.
 func (h *EntryHandle) Healthy() bool {
 	if h == nil || h.ref == nil {
 		return false
