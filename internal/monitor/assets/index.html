@@ -418,26 +418,6 @@
       line-height: 1;
     }
     .cell-trunc-uri { max-width: 360px; }
-    /* 节点来源标记：节点监控列表里“订阅来源”筛选结果的可见依据 */
-    .node-sub-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
-    .node-sub-line .cell-trunc { min-width: 0; }
-    .node-source-tag {
-      flex: 0 0 auto;
-      display: inline-block;
-      max-width: 140px;
-      height: 16px;
-      padding: 0 5px;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      background: var(--bg-hover);
-      color: var(--text-muted);
-      font-size: 10px;
-      line-height: 14px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .node-source-tag-sub { border-color: var(--warning); color: var(--warning); }
     .config-node-source { display: flex; align-items: center; gap: 7px; min-width: 0; }
     .config-node-source-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
     .config-node-header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -2807,9 +2787,11 @@
         th.textContent = label;
         header.insertBefore(th, header.children[index] || null);
       };
+      // 节点监控表比调试表多一列复选框，列序为 复选框 / 状态 / Region / Exit IP，
+      // 所以这里要插到索引 2、3，插完是「状态」之后、名称之前，与表体一致。
       const nodeHeader = document.querySelector('#nodesTableBody')?.closest('table')?.querySelector('thead tr');
-      addColumn(nodeHeader, 'region', 'Region', 1);
-      addColumn(nodeHeader, 'ip', 'Exit IP', 2);
+      addColumn(nodeHeader, 'region', 'Region', 2);
+      addColumn(nodeHeader, 'ip', 'Exit IP', 3);
       const debugHeader = document.querySelector('#debugNodesTableBody')?.closest('table')?.querySelector('thead tr');
       addColumn(debugHeader, 'region', 'Region', 1);
       addColumn(debugHeader, 'ip', 'Exit IP', 2);
@@ -3546,6 +3528,15 @@
       return '__non_subscription__';
     }
 
+    // 来源的人类可读描述，只用于名称的悬停提示（列表里不额外占位）。
+    function nodeSourceLabel(n) {
+      const source = String(n.source || '');
+      if (source === 'subscription') return `订阅「${nodeSourceKey(n)}」`;
+      if (source === 'nodes_file') return '节点文件';
+      if (source === 'inline') return '配置内联';
+      return '';
+    }
+
     function filterByNodeSource(value) {
       currentNodeSourceFilter = value || 'all';
       applyNodeFilters();
@@ -3669,17 +3660,11 @@
           ? ` oncontextmenu="copyStatusError(event, '${escapeAttrJs(statusTitle)}')"`
           : '';
         const nodeDisplayName = n.name || n.tag;
-        const nodeNameTitle = n.subscription_name
-          ? `${nodeDisplayName}\n订阅来源：${n.subscription_name}`
+        // 来源不单独占位，只在名称的悬停提示里体现。
+        const nodeSourceText = nodeSourceLabel(n);
+        const nodeNameTitle = nodeSourceText
+          ? `${nodeDisplayName}\n来源：${nodeSourceText}`
           : nodeDisplayName;
-        // 来源标记：让“订阅来源”筛选的结果可被肉眼核对，避免只能靠悬浮提示。
-        const nodeSourceBadge = n.source === 'subscription'
-          ? `<span class="node-source-tag node-source-tag-sub" title="订阅来源：${escapeHtml(nodeSourceKey(n))}">${escapeHtml(nodeSourceKey(n))}</span>`
-          : n.source === 'nodes_file'
-            ? '<span class="node-source-tag" title="来源：节点文件">节点文件</span>'
-            : n.source === 'inline'
-              ? '<span class="node-source-tag" title="来源：配置内联">手动</span>'
-              : '';
 
         const checked = selectedNodeTags.has(String(n.tag)) ? ' checked' : '';
         return `<tr>
@@ -3692,10 +3677,7 @@
               <div class="cell-trunc" style="font-weight: 500" title="${escapeHtml(nodeNameTitle)}">${escapeHtml(nodeDisplayName)}</div>
               ${entryPortBadges ? `<span class="entry-port-badges">${entryPortBadges}</span>` : ''}
             </div>
-            <div class="node-sub-line">
-              ${nodeSourceBadge}
-              <span class="cell-trunc" style="font-size: 11px; color: var(--text-muted)" title="${escapeHtml(n.tag)}">${escapeHtml(n.tag)}</span>
-            </div>
+            <div class="cell-trunc" style="font-size: 11px; color: var(--text-muted)" title="${escapeHtml(n.tag)}">${escapeHtml(n.tag)}</div>
           </td>
           <td class="tt-mono">${n.port || '-'}</td>
           <td>
