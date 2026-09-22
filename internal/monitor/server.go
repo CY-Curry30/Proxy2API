@@ -4154,6 +4154,11 @@ func (s *Server) configNodeStatusFor(node config.NodeConfig, index map[string]co
 type snapshotNodeView struct {
 	Snapshot
 	SubscriptionName string `json:"subscription_name,omitempty"`
+	// Source is re-exposed here because NodeInfo hides it from JSON with
+	// `json:"-"`. The dashboard node list needs it to filter nodes by origin
+	// (subscription / nodes_file / inline), and a field declared on this struct
+	// shadows the embedded one during marshalling.
+	Source string `json:"source,omitempty"`
 }
 
 func (s *Server) subscriptionDisplayNames() map[string]string {
@@ -4173,7 +4178,7 @@ func (s *Server) snapshotNodeViews(nodes []Snapshot) []snapshotNodeView {
 	subscriptionNames := s.subscriptionDisplayNames()
 	views := make([]snapshotNodeView, 0, len(nodes))
 	for _, node := range nodes {
-		view := snapshotNodeView{Snapshot: node}
+		view := snapshotNodeView{Snapshot: node, Source: node.Source}
 		if node.Source == string(config.NodeSourceSubscription) {
 			view.SubscriptionName = subscriptionNames[strings.TrimSpace(node.SubscriptionURL)]
 			if view.SubscriptionName == "" {
