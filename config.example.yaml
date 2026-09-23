@@ -141,9 +141,20 @@ dns:
 # subscriptions:
 #   - "https://example.com/subscribe?token=xxx"
 #   - "https://another.com/api/v1/client/subscribe?token=yyy"
-# 暂停的订阅仍保留本地节点缓存，但不更新、不探测、不展示
+# 关闭的订阅仍保留本地节点缓存，但不更新、不探测、不展示。
+# 关闭分两级作用域：
+#   - 本文件（shared.yaml）里的 disabled_subscriptions 是「全局关闭」，
+#     所有项目的该订阅一起关闭；只能手动重新开启，任何项目的自动刷新都
+#     不会把它打开。全局目录本身不自动刷新，所以这里永远是手动操作。
+#   - 项目自己的 projects/<id>/project.yaml 里的 disabled_subscriptions
+#     只关闭当前项目，其他项目不受影响，同样只能手动开启。
 # disabled_subscriptions:
 #   - "https://example.com/subscribe?token=xxx"
+# 由「到期 / 流量用尽」规则自动关闭的订阅记录在这里，不要手工维护：
+# 订阅更新后如果流量已重置或已续期，会自动重新开启。
+# 手动关闭优先于自动关闭：手动关闭的订阅不会被自动重新打开。
+# auto_disabled_subscriptions:
+#   - "https://another.com/api/v1/client/subscribe?token=yyy"
 
 # ───────────────────────────────────────────────────────────────
 # 方式 2: 节点文件（每行一个代理 URI）

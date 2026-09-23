@@ -3957,7 +3957,8 @@
       return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
     }
 
-    function subscriptionStatusView(status, globalView=false) {
+    function subscriptionStatusView(status, globalView=false, globalDisabled=false) {
+      if (globalDisabled) return ['badge-offline', '全局已关闭'];
       if (globalView && status === 'not_in_project') return ['badge-offline', '已配置'];
       switch (status) {
         case 'disabled': return ['badge-offline', '已关闭'];
@@ -4084,12 +4085,20 @@
       empty.style.display = visibleItems.length ? 'none' : 'block';
       document.getElementById('subscriptionVisibleCount').textContent = visibleItems.length;
       tbody.innerHTML = visibleItems.map(item => {
-        const [badge, label] = subscriptionStatusView(item.status, globalView);
+        // A close owned by the shared catalog is inherited by every project, so
+        // the project view can only explain it — not undo it.
+        const globalDisabled = !globalView && item.global_disabled === true;
+        const [badge, label] = subscriptionStatusView(item.status, globalView, globalDisabled);
         const blockReason = item.block_reason || '';
         const blocked = blockReason !== '';
         const blockHint = blocked ? `订阅已${blockReason}，无法开启，请先更新订阅` : '';
+        const globalHint = '该订阅已在全局关闭，请先在全局视图开启';
+        const enableBlocked = !item.enabled && (blocked || globalDisabled);
+        const enableHint = globalDisabled ? globalHint : blockHint;
         const modifyLabel = globalView ? '修改' : '全局修改';
-        const toggleLabel = `${globalView ? '' : '全局'}${item.enabled ? '关闭' : '开启'}`;
+        // The toggle follows the current view: the global view closes the
+        // subscription for every project, a project view only for itself.
+        const toggleLabel = `${globalView ? '全局' : ''}${item.enabled ? '关闭' : '开启'}`;
 		const deleteLabel = globalView ? '删除' : '移出项目';
         const traffic = item.total_bytes > 0
           ? `${formatBytes(item.used_bytes)} / ${formatBytes(item.total_bytes)}`
@@ -4111,11 +4120,11 @@
           <td>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               <button class="btn btn-sm" onclick="showSubscriptionModal('${escapeAttrJs(item.url)}')">${modifyLabel}</button>
-              <button class="btn btn-sm ${item.enabled ? '' : 'btn-primary'}" onclick="toggleSubscription('${escapeAttrJs(item.url)}', ${item.enabled ? 'false' : 'true'})" ${blocked && !item.enabled ? `title="${escapeHtml(blockHint)}"` : ''}>${toggleLabel}</button>
+              <button class="btn btn-sm ${item.enabled ? '' : 'btn-primary'}" onclick="toggleSubscription('${escapeAttrJs(item.url)}', ${item.enabled ? 'false' : 'true'})" ${enableBlocked ? 'disabled' : ''} ${enableHint ? `title="${escapeHtml(enableHint)}"` : ''}>${toggleLabel}</button>
               <button class="btn btn-sm" onclick="refreshManagedSubscription('${escapeAttrJs(item.url)}')">更新</button>
               <button class="btn btn-sm btn-danger" onclick="deleteSubscription('${escapeAttrJs(item.url)}')">${deleteLabel}</button>
             </div>
-            ${blocked && !item.enabled ? `<div class="subscription-block-hint">${escapeHtml(blockHint)}</div>` : ''}
+            ${enableBlocked ? `<div class="subscription-block-hint">${escapeHtml(enableHint)}</div>` : ''}
           </td>
         </tr>`;
       }).join('');
@@ -4285,27 +4294,41 @@
     async function toggleSubscription(rawURL, enabled) {
       // 开启已关闭的订阅前先看后端下发的闸门原因：流量用尽或到期都会让开启
       // 必然失败，这里直接把原因说清楚，不再发起注定被拒绝的请求。
+      const targetItem = subscriptionsCache.find(entry => String(entry.url || '') === String(rawURL));
       if (enabled) {
-        const blockedItem = subscriptionsCache.find(entry => String(entry.url || '') === String(rawURL));
-        const reason = blockedItem && blockedItem.block_reason ? blockedItem.block_reason : '';
+        const reason = targetItem && targetItem.block_reason ? targetItem.block_reason : '';
         if (reason) {
           showToast(`开启失败：订阅已${reason}，无法开启，请先更新订阅`, 'error');
           return;
         }
+        if (currentProjectID && targetItem && targetItem.global_disabled) {
+          showToast('开启失败：该订阅已在全局关闭，请先在全局视图开启', 'error');
+          return;
+        }
       }
-      if (currentProjectID && !confirm(`确定在全局${enabled ? '开启' : '关闭'}该订阅？\n\n此操作会影响所有项目。`)) return;
-      showFullscreenLoading(enabled ? '开启订阅中...' : '关闭订阅中...', currentProjectID ? (enabled ? '正在恢复缓存节点并启动探测' : '正在暂停更新并屏蔽节点') : '正在更新全局目录（不会自动探测）');
+      // 项目视图下的开关只作用于当前项目；全局视图下的开关作用于所有项目。
+      const scope = currentProjectID ? 'project' : 'global';
+      const actionLabel = enabled ? '开启' : '关闭';
+      const confirmText = scope === 'project'
+        ? `确定在本项目${actionLabel}该订阅？\n\n只影响当前项目，其他项目不受影响。`
+        : `确定在全局${actionLabel}该订阅？\n\n此操作会影响所有项目。`;
+      if (!confirm(confirmText)) return;
+      const loadingText = scope === 'project'
+        ? (enabled ? '正在恢复本项目缓存节点并启动探测' : '正在暂停本项目更新并屏蔽节点')
+        : (enabled ? '正在恢复缓存节点并启动探测' : '正在暂停更新并屏蔽节点');
+      showFullscreenLoading(`${actionLabel}订阅中...`, loadingText);
       try {
         const response = await fetch(globalScopePath('/api/subscriptions'), {
           method: 'PATCH',
           headers: {'Content-Type':'application/json'},
-          // The toggle controls the shared subscription itself, even when the
-          // table is currently filtered to one project.
-          body: JSON.stringify({url: rawURL, enabled, scope: 'global'})
+          // 项目视图写项目自己的关闭列表，全局视图写共享目录的关闭列表。
+          body: JSON.stringify({url: rawURL, enabled, scope})
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || '操作失败');
-        showToast(enabled ? '订阅已开启' : '订阅已关闭');
+        showToast(scope === 'project'
+          ? `本项目订阅已${actionLabel}`
+          : `全局订阅已${actionLabel}`);
         await loadSubscriptionsPage();
         refresh();
       } catch (error) {

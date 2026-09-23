@@ -44,11 +44,11 @@ projects/<project-id>/.subscription-cache.json
 projects/<project-id>/.proxy2api-state.db
 ```
 
-全局配置包括管理面板的 `enabled`、`listen`、`password`、日志输出和轮转策略，以及项目名称、启用状态和自动启动策略。共享源配置包括 `nodes` / `nodes_file`、`subscriptions` 和订阅启用状态。代理模式、入口端口和认证、节点池、粘性入口、`probe`、订阅刷新周期、外部 IP 与证书策略均跟随项目。
+全局配置包括管理面板的 `enabled`、`listen`、`password`、日志输出和轮转策略，以及项目名称、启用状态和自动启动策略。共享源配置包括 `nodes` / `nodes_file`、`subscriptions` 和**全局**订阅关闭状态。代理模式、入口端口和认证、节点池、粘性入口、`probe`、订阅刷新周期、外部 IP 与证书策略，以及项目自己的订阅关闭状态，均跟随项目。
 
 管理面板仅在新建/编辑项目时显示项目 ID，其他页面使用项目名称。各项目的探测目标、探测间隔、探测超时和并发数统一在“节点配置”页面管理；自动订阅更新开关和更新间隔统一在“订阅配置”页面管理。
 
-订阅 URL 和节点定义只维护一份；每个项目独立保存订阅缓存、订阅最后刷新/下次刷新时间、节点健康状态和黑名单计时器。仅在管理面板中切换项目不会抓取订阅或触发探测。修改共享节点/订阅定义后，运行中的项目会重载共享目录；各项目仍使用自己的状态数据库和项目刷新周期。显式重启项目时会在恢复本项目状态后重新验证节点，但探测结果绝不会跨项目复用。
+订阅 URL 和节点定义只维护一份；每个项目独立保存订阅缓存、订阅最后刷新/下次刷新时间、订阅关闭状态、节点健康状态和黑名单计时器。仅在管理面板中切换项目不会抓取订阅或触发探测。修改共享节点/订阅定义后，运行中的项目会重载共享目录；各项目仍使用自己的状态数据库和项目刷新周期。显式重启项目时会在恢复本项目状态后重新验证节点，但探测结果绝不会跨项目复用。
 
 项目 ID 只能包含小写字母、数字、`-` 和 `_`。所有代理入口及项目内部流量 API 端口都会统一检查；冲突时只拒绝当前项目操作，不会调整或停止其他项目。通过管理面板删除任意项目（包括默认项目）时，可以选择仅将其移出清单并保留数据，或同时删除标准项目目录；默认保留本地文件。`shared.yaml` 位于项目目录之外，两种删除方式都不会删除共享节点和订阅。项目清单允许为空；空清单中新建的第一个项目会自动成为新的默认项目。
 
@@ -166,6 +166,11 @@ dns:
   - 通过 WebUI 的“更新”按钮或刷新 API 手动抓取订阅；只有显式开启 `subscription_refresh.enabled` 后才会定时刷新
   - `nodes_file` 作为手动/定时订阅更新后的节点写入路径
   - 可通过 `subscription_refresh.fetch_concurrency` 调整订阅抓取并发数（默认 16，最大 32）
+- **订阅开关的两级作用域**：
+  - `shared.yaml` 的 `disabled_subscriptions` 是**全局关闭**：在订阅配置页切到「全局」后关闭，所有项目的该订阅一起关闭。全局关闭只能手动重新开启，任何项目的自动刷新都不会把它打开。
+  - 项目自己的 `disabled_subscriptions`（写入 `projects/<id>/project.yaml`）只关闭**当前项目**，其他项目不受影响，同样只能手动开启。
+  - `auto_disabled_subscriptions` 记录由「到期 / 流量用尽」规则自动关闭的订阅。这类关闭无需手动干预：订阅更新后若流量已重置或已续期，会自动重新开启。
+  - 手动关闭优先于自动关闭：手动关闭的订阅即使元数据已到期，也不会被自动重新打开。
 - `nodes`（内联节点）只要存在就会参与运行。
 - **多来源节点合并**：当同时配置 `nodes` 和 `subscriptions` 时：
   - 内联节点（`shared.yaml` 中的 `nodes`）和订阅节点会合并使用
@@ -200,7 +205,7 @@ dns:
 - `POST /api/projects/{project_id}/start|stop|reload`
 - `/api/projects/{project_id}/...`（项目级状态、探测、黑名单、设置、流量和日志接口）
 - `GET|POST|PUT|DELETE /api/nodes/config[...]`（共享节点定义；任一项目的写操作都落到 `shared.yaml`）
-- `GET|POST|PUT|PATCH|DELETE /api/subscriptions`（共享订阅定义；`PATCH` 用于开启/关闭订阅）
+- `GET|POST|PUT|PATCH|DELETE /api/subscriptions`（共享订阅定义；`PATCH` 用于开启/关闭订阅，`scope: "global"` 关闭所有项目，`scope: "project"` 只关闭当前项目）
 - `GET|PUT /api/system/settings`（全局管理面板和日志配置）
 - `GET|PUT /api/settings`（当前项目运行配置的兼容 API）
 - `GET /api/nodes`

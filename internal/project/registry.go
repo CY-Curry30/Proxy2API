@@ -194,6 +194,14 @@ func migrateSharedSources(workspace *config.Workspace) error {
 					changed = true
 				}
 			}
+			// The legacy layout had a single close list per project, so a
+			// rule-driven close recorded there becomes a catalog-level one too.
+			for _, rawURL := range projectCfg.AutoDisabledSubscriptions {
+				if !containsString(shared.AutoDisabledSubscriptions, rawURL) {
+					shared.AutoDisabledSubscriptions = append(shared.AutoDisabledSubscriptions, rawURL)
+					changed = true
+				}
+			}
 			// A project that participates in any subscription does not own its
 			// nodes file: subscription refreshes rewrite nodes.txt wholesale. Only
 			// nodes written by hand into the project YAML may become shared inline

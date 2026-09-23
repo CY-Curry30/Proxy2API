@@ -409,6 +409,7 @@ func NewSharedConfig(path string, source *Config) *Config {
 	shared.NodesFile = source.NodesFile
 	shared.Subscriptions = append([]string(nil), source.Subscriptions...)
 	shared.DisabledSubscriptions = append([]string(nil), source.DisabledSubscriptions...)
+	shared.AutoDisabledSubscriptions = append([]string(nil), source.AutoDisabledSubscriptions...)
 	return shared
 }
 
@@ -435,6 +436,8 @@ func WriteRuntimeProjectConfig(path string, source *Config) error {
 	runtime.NodesFile = ""
 	runtime.Subscriptions = nil
 	runtime.DisabledSubscriptions = nil
+	runtime.AutoDisabledSubscriptions = nil
+	runtime.inheritedDisabledSubscriptions = nil
 	runtime.filePath = ""
 	runtime.sourcesShared = false
 	runtime.sourcesOnly = false

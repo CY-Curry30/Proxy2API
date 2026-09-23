@@ -154,9 +154,8 @@ func (m *Manager) restorePersistentState() {
 		configured[rawURL] = struct{}{}
 	}
 	// Re-apply a close performed by the traffic/expiry rule in an earlier run.
-	// A project whose subscription sources come from the shared catalog cannot
-	// persist DisabledSubscriptions itself, so without this the subscription
-	// would come back enabled after every restart until the next refresh.
+	// It is recorded as a rule-driven close, not as an operator pause, so a
+	// later refresh can reopen the subscription once its traffic is renewed.
 	for _, item := range stored.Items {
 		if _, ok := configured[item.URL]; !ok {
 			continue
@@ -164,9 +163,7 @@ func (m *Manager) restorePersistentState() {
 		if item.Status != "expired" && item.Status != "quota_exhausted" {
 			continue
 		}
-		if m.baseCfg.SubscriptionEnabled(item.URL) {
-			m.baseCfg.SetSubscriptionEnabled(item.URL, false)
-		}
+		m.baseCfg.SetSubscriptionAutoDisabled(item.URL, true)
 	}
 	m.status.LastRefresh = stored.LastRefresh
 	m.status.NextRefresh = stored.NextRefresh
@@ -675,6 +672,12 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 		m.mu.Unlock()
 		return fmt.Errorf("订阅不存在")
 	}
+	if enabled && m.baseCfg.SubscriptionGloballyDisabled(rawURL) {
+		// The shared catalog is the owner of this close. Letting a project
+		// override it would silently contradict the operator's global decision.
+		m.mu.Unlock()
+		return fmt.Errorf("订阅已在全局关闭，请先在全局视图开启")
+	}
 	if enabled {
 		// A subscription that has been observed as expired or exhausted can only
 		// become usable after a successful refresh updates its metadata and cache.
@@ -684,7 +687,16 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 			return fmt.Errorf("订阅已%s，请先更新订阅", reason)
 		}
 	}
-	if m.baseCfg.SubscriptionEnabled(rawURL) == enabled {
+	// Compare against the state this call actually owns. A manual close lives in
+	// the manual list, so it must be recorded even when the subscription is
+	// already off for another reason: pausing an auto-closed (expired or
+	// exhausted) subscription has to outrank the rule, otherwise the next
+	// refresh would reopen what the operator just closed.
+	alreadyApplied := m.baseCfg.SubscriptionManuallyDisabled(rawURL)
+	if enabled {
+		alreadyApplied = m.baseCfg.SubscriptionEnabled(rawURL)
+	}
+	if alreadyApplied {
 		// Keep the in-memory item aligned even when the requested operation is
 		// idempotent (for example after restoring a stale persisted snapshot).
 		m.reconcileSubscriptionStateLocked(m.baseCfg.Subscriptions)
@@ -1199,7 +1211,7 @@ func (m *Manager) applySharedFetch(rawURL string) {
 		m.nodeCache[rawURL] = append([]config.NodeConfig(nil), result.nodes...)
 	} else if result.info.Status == "expired" || result.info.Status == "quota_exhausted" {
 		delete(m.nodeCache, rawURL)
-		m.baseCfg.SetSubscriptionEnabled(rawURL, false)
+		m.baseCfg.SetSubscriptionAutoDisabled(rawURL, true)
 		result.info.Enabled = false
 	} else {
 		m.mu.Unlock()
@@ -1477,15 +1489,22 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 	// A subscription closed by the traffic/expiry rule is no longer active, yet
 	// it must stay refreshable or its metadata could never recover and the
 	// enable toggle would stay blocked forever. Collect those so both the timed
-	// refresh and an explicit request can still contact them. The decision reads
-	// the quota/expiry metadata rather than the status, because a failed refresh
-	// replaces the status with "error" while keeping the metadata.
+	// refresh and an explicit request can still contact them.
+	//
+	// Only rule-driven closes qualify. A subscription the operator paused by hand
+	// must never be reopened by a refresh, and a close inherited from the shared
+	// catalog is not this project's decision to undo. The quota/expiry metadata
+	// stays part of the test so a close recorded by an older version — which had
+	// no rule-driven list — still recovers on its own.
 	autoClosed := make(map[string]struct{})
 	for _, rawURL := range configured {
 		if m.baseCfg.SubscriptionEnabled(rawURL) {
 			continue
 		}
-		if subscriptionInactiveReason(m.items[rawURL]) != "" {
+		if m.baseCfg.SubscriptionManuallyDisabled(rawURL) || m.baseCfg.SubscriptionGloballyDisabled(rawURL) {
+			continue
+		}
+		if m.baseCfg.SubscriptionAutoDisabled(rawURL) || subscriptionInactiveReason(m.items[rawURL]) != "" {
 			autoClosed[rawURL] = struct{}{}
 		}
 	}
@@ -1581,15 +1600,14 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 			}
 		} else if result.info.Status == "active" {
 			m.nodeCache[result.url] = append([]config.NodeConfig(nil), result.nodes...)
-			// A subscription the traffic/expiry rule had closed recovers
-			// automatically on the timed refresh (forceFetch == false), so a
-			// renewed subscription comes back without a manual re-enable. A manual
-			// refresh only updates the data: the subscription stays closed until
-			// the user enables it. One the user paused by hand is never in
-			// autoClosed, so it stays paused either way.
-			if _, wasAutoClosed := autoClosed[result.url]; wasAutoClosed && !forceFetch {
-				m.baseCfg.SetSubscriptionEnabled(result.url, true)
-				result.info.Enabled = true
+			// A subscription the traffic/expiry rule had closed recovers as soon
+			// as a refresh shows it usable again: a renewed quota or a new expiry
+			// date reopens it without a manual step. A subscription the operator
+			// paused by hand is never in autoClosed, so it stays paused no matter
+			// how often it is refreshed.
+			if _, wasAutoClosed := autoClosed[result.url]; wasAutoClosed {
+				m.baseCfg.SetSubscriptionAutoDisabled(result.url, false)
+				result.info.Enabled = m.baseCfg.SubscriptionEnabled(result.url)
 				autoRecovered = true
 			}
 		} else {
@@ -1598,8 +1616,8 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 			result.nodes = nil
 			result.info.Included = false
 			if result.info.Status == "expired" || result.info.Status == "quota_exhausted" {
-				m.baseCfg.SetSubscriptionEnabled(result.url, false)
-				result.info.Enabled = false
+				m.baseCfg.SetSubscriptionAutoDisabled(result.url, true)
+				result.info.Enabled = m.baseCfg.SubscriptionEnabled(result.url)
 				autoDisabled = true
 			}
 		}
@@ -1657,6 +1675,7 @@ func (m *Manager) createNewConfig(nodes []config.NodeConfig) *config.Config {
 	newCfg := *currentCfg
 	newCfg.Subscriptions = append([]string(nil), m.baseCfg.Subscriptions...)
 	newCfg.DisabledSubscriptions = append([]string(nil), m.baseCfg.DisabledSubscriptions...)
+	newCfg.AutoDisabledSubscriptions = append([]string(nil), m.baseCfg.AutoDisabledSubscriptions...)
 	newCfg.SubscriptionRefresh = m.baseCfg.SubscriptionRefresh
 
 	// Mark all subscription nodes with proper source

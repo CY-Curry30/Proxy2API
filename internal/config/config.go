@@ -52,15 +52,19 @@ type Config struct {
 	Nodes                 []NodeConfig              `yaml:"nodes"`
 	NodesFile             string                    `yaml:"nodes_file"`                       // 节点文件路径，每行一个 URI
 	Subscriptions         []string                  `yaml:"subscriptions"`                    // 订阅链接列表
-	DisabledSubscriptions []string                  `yaml:"disabled_subscriptions,omitempty"` // 已暂停但保留缓存的订阅
-	SelectedSubscriptions []string                  `yaml:"selected_subscriptions,omitempty"` // 项目选定的订阅子集，空表示全部选中
-	ExcludedSubscriptions []string                  `yaml:"excluded_subscriptions,omitempty"` // 项目排除的共享订阅
-	ExcludedNodes         []string                  `yaml:"excluded_nodes,omitempty"`         // 项目排除的共享节点稳定 ID
-	QuarantinedNodes      []string                  `yaml:"quarantined_nodes,omitempty"`      // 项目小黑屋：手动关入的节点稳定 ID，只能手动释放
-	ExternalIP            string                    `yaml:"external_ip"`                      // 外部 IP 地址，用于导出时替换 0.0.0.0
-	LogLevel              string                    `yaml:"log_level"`
-	SkipCertVerify        bool                      `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
-	ClashAPIPort          uint16                    `yaml:"-" json:"-"`       // Runtime-only, assigned by the project registry.
+	DisabledSubscriptions []string                  `yaml:"disabled_subscriptions,omitempty"` // 手动关闭的订阅（只能手动开启）
+	// AutoDisabledSubscriptions holds subscriptions closed by the traffic/expiry
+	// rule. They are kept apart from the manual list so a renewal can reopen them
+	// automatically while an operator's own pause is never undone by a refresh.
+	AutoDisabledSubscriptions []string `yaml:"auto_disabled_subscriptions,omitempty"`
+	SelectedSubscriptions     []string `yaml:"selected_subscriptions,omitempty"` // 项目选定的订阅子集，空表示全部选中
+	ExcludedSubscriptions     []string `yaml:"excluded_subscriptions,omitempty"` // 项目排除的共享订阅
+	ExcludedNodes             []string `yaml:"excluded_nodes,omitempty"`         // 项目排除的共享节点稳定 ID
+	QuarantinedNodes          []string `yaml:"quarantined_nodes,omitempty"`      // 项目小黑屋：手动关入的节点稳定 ID，只能手动释放
+	ExternalIP                string   `yaml:"external_ip"`                      // 外部 IP 地址，用于导出时替换 0.0.0.0
+	LogLevel                  string   `yaml:"log_level"`
+	SkipCertVerify            bool     `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
+	ClashAPIPort              uint16   `yaml:"-" json:"-"`       // Runtime-only, assigned by the project registry.
 
 	filePath              string `yaml:"-"` // 配置文件路径，用于保存
 	recoveredStateCatalog bool   `yaml:"-"`
@@ -68,6 +72,10 @@ type Config struct {
 	sourcesShared         bool `yaml:"-"`
 	sourcesOnly           bool `yaml:"-"`
 	skipRuntimeRecovery   bool `yaml:"-"`
+	// inheritedDisabledSubscriptions mirrors the shared catalog's close list.
+	// It is never persisted: a project must not be able to reopen a subscription
+	// the operator closed globally, and it must not own that decision either.
+	inheritedDisabledSubscriptions []string `yaml:"-"`
 }
 
 // LogConfig controls log output and rotation.
@@ -299,14 +307,48 @@ func stableNodeKey(uri string) string {
 }
 
 // SubscriptionEnabled reports whether a configured subscription participates
-// in refreshes and the active node pool.
+// in refreshes and the active node pool. A subscription is closed when it is
+// paused manually in this scope, closed by the traffic/expiry rule, or closed
+// in the shared catalog (which every project inherits and cannot override).
 func (c *Config) SubscriptionEnabled(rawURL string) bool {
-	for _, disabledURL := range c.DisabledSubscriptions {
-		if disabledURL == rawURL {
-			return false
+	return !c.SubscriptionManuallyDisabled(rawURL) &&
+		!c.SubscriptionAutoDisabled(rawURL) &&
+		!c.SubscriptionGloballyDisabled(rawURL)
+}
+
+// SubscriptionManuallyDisabled reports whether this scope holds an explicit
+// operator pause for the subscription. Such a pause can only be lifted by
+// another explicit toggle.
+func (c *Config) SubscriptionManuallyDisabled(rawURL string) bool {
+	return containsStringValue(c.DisabledSubscriptions, rawURL)
+}
+
+// SubscriptionAutoDisabled reports whether the traffic/expiry rule closed the
+// subscription in this scope. It is cleared automatically once a refresh shows
+// the subscription is usable again.
+func (c *Config) SubscriptionAutoDisabled(rawURL string) bool {
+	return containsStringValue(c.AutoDisabledSubscriptions, rawURL)
+}
+
+// SubscriptionGloballyDisabled reports whether the shared catalog closed the
+// subscription. Projects inherit this gate and may not reopen it locally.
+func (c *Config) SubscriptionGloballyDisabled(rawURL string) bool {
+	return containsStringValue(c.inheritedDisabledSubscriptions, rawURL)
+}
+
+// SetInheritedDisabledSubscriptions installs the shared catalog's close list on
+// a project config. The values stay out of the YAML document.
+func (c *Config) SetInheritedDisabledSubscriptions(urls []string) {
+	c.inheritedDisabledSubscriptions = append([]string(nil), urls...)
+}
+
+func containsStringValue(values []string, value string) bool {
+	for _, existing := range values {
+		if existing == value {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // ActiveSubscriptions returns configured subscriptions that are not paused.
@@ -389,36 +431,101 @@ func (c *Config) NodeExcluded(node NodeConfig) bool {
 	return false
 }
 
-// SetSubscriptionEnabled updates the persisted pause list without removing the
-// subscription URL or its cached nodes.
+// SetSubscriptionEnabled applies an explicit operator toggle. It updates the
+// persisted pause list without removing the subscription URL or its cached
+// nodes. Enabling clears the rule-driven close too, because an explicit action
+// is the strongest statement about this subscription.
 func (c *Config) SetSubscriptionEnabled(rawURL string, enabled bool) {
-	disabled := make([]string, 0, len(c.DisabledSubscriptions)+1)
-	found := false
-	for _, existing := range c.DisabledSubscriptions {
-		if existing == rawURL {
-			found = true
-			if enabled {
-				continue
-			}
+	c.AutoDisabledSubscriptions = removeStringValue(c.AutoDisabledSubscriptions, rawURL)
+	if enabled {
+		c.DisabledSubscriptions = removeStringValue(c.DisabledSubscriptions, rawURL)
+		return
+	}
+	if !containsStringValue(c.DisabledSubscriptions, rawURL) {
+		c.DisabledSubscriptions = append(c.DisabledSubscriptions, rawURL)
+	}
+}
+
+// SetSubscriptionAutoDisabled applies a rule-driven (traffic/expiry) close or
+// recovery. A manual pause always wins: the rule never undoes what the operator
+// decided by hand, in either direction.
+func (c *Config) SetSubscriptionAutoDisabled(rawURL string, disabled bool) {
+	if !disabled {
+		c.AutoDisabledSubscriptions = removeStringValue(c.AutoDisabledSubscriptions, rawURL)
+		return
+	}
+	if c.SubscriptionManuallyDisabled(rawURL) {
+		return
+	}
+	if !containsStringValue(c.AutoDisabledSubscriptions, rawURL) {
+		c.AutoDisabledSubscriptions = append(c.AutoDisabledSubscriptions, rawURL)
+	}
+}
+
+func removeStringValue(values []string, value string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	filtered := make([]string, 0, len(values))
+	for _, existing := range values {
+		if existing != value {
+			filtered = append(filtered, existing)
 		}
-		disabled = append(disabled, existing)
 	}
-	if !enabled && !found {
-		disabled = append(disabled, rawURL)
+	if len(filtered) == 0 {
+		return nil
 	}
-	c.DisabledSubscriptions = disabled
+	return filtered
 }
 
 func (c *Config) normalizeDisabledSubscriptions() {
-	configured := make(map[string]struct{}, len(c.Subscriptions))
-	for _, rawURL := range c.Subscriptions {
-		configured[rawURL] = struct{}{}
+	// Entries are filtered against the subscription list only when this config
+	// actually owns one. A project config read on its own carries no subscription
+	// URLs — they live in the shared catalog — so filtering against an empty list
+	// would erase the project's pause state on the next save.
+	var configured map[string]struct{}
+	if len(c.Subscriptions) > 0 {
+		configured = make(map[string]struct{}, len(c.Subscriptions))
+		for _, rawURL := range c.Subscriptions {
+			configured[rawURL] = struct{}{}
+		}
 	}
-	seen := make(map[string]struct{}, len(c.DisabledSubscriptions))
-	filtered := make([]string, 0, len(c.DisabledSubscriptions))
+	c.DisabledSubscriptions = filterConfiguredSubscriptions(c.DisabledSubscriptions, configured)
+	c.AutoDisabledSubscriptions = filterConfiguredSubscriptions(c.AutoDisabledSubscriptions, configured)
+	// A manual pause subsumes a rule-driven close for the same URL. Keeping both
+	// would make the rule reopen a subscription the operator paused by hand as
+	// soon as its traffic was renewed.
+	manual := make(map[string]struct{}, len(c.DisabledSubscriptions))
 	for _, rawURL := range c.DisabledSubscriptions {
-		if _, ok := configured[rawURL]; !ok {
+		manual[rawURL] = struct{}{}
+	}
+	auto := make([]string, 0, len(c.AutoDisabledSubscriptions))
+	for _, rawURL := range c.AutoDisabledSubscriptions {
+		if _, paused := manual[rawURL]; paused {
 			continue
+		}
+		auto = append(auto, rawURL)
+	}
+	if len(auto) == 0 {
+		auto = nil
+	}
+	c.AutoDisabledSubscriptions = auto
+}
+
+// filterConfiguredSubscriptions keeps the operator's ordering and drops
+// duplicates. A nil configured set means the caller cannot tell which entries
+// are stale, so every entry is kept.
+func filterConfiguredSubscriptions(values []string, configured map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	filtered := make([]string, 0, len(values))
+	for _, rawURL := range values {
+		if configured != nil {
+			if _, ok := configured[rawURL]; !ok {
+				continue
+			}
 		}
 		if _, duplicate := seen[rawURL]; duplicate {
 			continue
@@ -426,7 +533,10 @@ func (c *Config) normalizeDisabledSubscriptions() {
 		seen[rawURL] = struct{}{}
 		filtered = append(filtered, rawURL)
 	}
-	c.DisabledSubscriptions = filtered
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 // PruneDisabledSubscriptions removes pause entries for subscriptions that no
@@ -693,7 +803,13 @@ func loadProjectWithSharedOptions(path string, shared *Config, persistPorts, rec
 	project.skipRuntimeRecovery = !recoverRuntimeState
 	project.sourcesShared = true
 	project.Subscriptions = append([]string(nil), shared.Subscriptions...)
-	project.DisabledSubscriptions = append([]string(nil), shared.DisabledSubscriptions...)
+	// The catalog's close list is a gate, not project state: a project must not
+	// be able to reopen a subscription the operator closed globally, and it must
+	// not persist that decision into its own file either. The project keeps its
+	// own manual and rule-driven lists, which decodeConfig already loaded.
+	inherited := append([]string(nil), shared.DisabledSubscriptions...)
+	inherited = append(inherited, shared.AutoDisabledSubscriptions...)
+	project.SetInheritedDisabledSubscriptions(inherited)
 	// Apply per-project subscription selection and exclusion filters. When both
 	// lists are empty, the project uses all shared subscriptions for backward
 	// compatibility.
@@ -3030,8 +3146,13 @@ func (c *Config) SaveSettings() error {
 	saveCfg.Log = c.Log
 	if !c.sourcesShared {
 		saveCfg.Subscriptions = c.Subscriptions
-		saveCfg.DisabledSubscriptions = c.DisabledSubscriptions
 	}
+	// Pause state belongs to the scope that owns it: a shared-source project
+	// must not copy the catalog's URL list, but its own manual and rule-driven
+	// closes have to survive a restart or the project would silently reopen a
+	// subscription the operator (or the traffic rule) closed.
+	saveCfg.DisabledSubscriptions = c.DisabledSubscriptions
+	saveCfg.AutoDisabledSubscriptions = c.AutoDisabledSubscriptions
 	saveCfg.SelectedSubscriptions = c.SelectedSubscriptions
 	saveCfg.ExcludedSubscriptions = c.ExcludedSubscriptions
 	saveCfg.ExcludedNodes = c.ExcludedNodes
@@ -3063,10 +3184,11 @@ func (c *Config) SaveSettings() error {
 }
 
 type sharedSourcesDocument struct {
-	NodesFile             string       `yaml:"nodes_file,omitempty"`
-	Subscriptions         []string     `yaml:"subscriptions,omitempty"`
-	DisabledSubscriptions []string     `yaml:"disabled_subscriptions,omitempty"`
-	Nodes                 []NodeConfig `yaml:"nodes,omitempty"`
+	NodesFile                 string       `yaml:"nodes_file,omitempty"`
+	Subscriptions             []string     `yaml:"subscriptions,omitempty"`
+	DisabledSubscriptions     []string     `yaml:"disabled_subscriptions,omitempty"`
+	AutoDisabledSubscriptions []string     `yaml:"auto_disabled_subscriptions,omitempty"`
+	Nodes                     []NodeConfig `yaml:"nodes,omitempty"`
 }
 
 func (c *Config) loadSharedDocument() (sharedSourcesDocument, error) {
@@ -3112,6 +3234,7 @@ func (c *Config) saveSharedSettings() error {
 	c.normalizeDisabledSubscriptions()
 	doc.Subscriptions = append([]string(nil), c.Subscriptions...)
 	doc.DisabledSubscriptions = append([]string(nil), c.DisabledSubscriptions...)
+	doc.AutoDisabledSubscriptions = append([]string(nil), c.AutoDisabledSubscriptions...)
 	return c.saveSharedDocument(doc)
 }
 

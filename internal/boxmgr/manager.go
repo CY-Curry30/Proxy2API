@@ -1270,6 +1270,9 @@ func (m *Manager) copyConfigLocked() *config.Config {
 	if len(m.cfg.DisabledSubscriptions) > 0 {
 		cloned.DisabledSubscriptions = append([]string(nil), m.cfg.DisabledSubscriptions...)
 	}
+	if len(m.cfg.AutoDisabledSubscriptions) > 0 {
+		cloned.AutoDisabledSubscriptions = append([]string(nil), m.cfg.AutoDisabledSubscriptions...)
+	}
 	if len(m.cfg.SelectedSubscriptions) > 0 {
 		cloned.SelectedSubscriptions = append([]string(nil), m.cfg.SelectedSubscriptions...)
 	}

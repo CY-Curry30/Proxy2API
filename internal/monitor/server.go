@@ -169,9 +169,13 @@ type SubscriptionInfo struct {
 	// BlockReason is non-empty while the traffic/expiry rule forbids enabling
 	// this subscription, even if the visible status was replaced by a transient
 	// refresh error. The panel uses it to keep the enable toggle disabled.
-	BlockReason string    `json:"block_reason,omitempty"`
-	LastRefresh time.Time `json:"last_refresh"`
-	LastError   string    `json:"last_error,omitempty"`
+	BlockReason string `json:"block_reason,omitempty"`
+	// GlobalDisabled reports that the shared catalog closed this subscription.
+	// Every project inherits the close and cannot override it, so the project
+	// view uses this to explain why the subscription cannot be enabled locally.
+	GlobalDisabled bool      `json:"global_disabled,omitempty"`
+	LastRefresh    time.Time `json:"last_refresh"`
+	LastError      string    `json:"last_error,omitempty"`
 }
 
 // Server exposes HTTP endpoints for monitoring.
@@ -464,6 +468,60 @@ func (s *Server) setCurrentProjectSubscriptionIncluded(rawURL string, included b
 		s.cfgSrc.SelectedSubscriptions = previousSelected
 		s.cfgSrc.ExcludedSubscriptions = previousExcluded
 		return fmt.Errorf("保存项目订阅关联: %w", err)
+	}
+	return nil
+}
+
+// subscriptionGloballyDisabled reports whether the shared catalog closed this
+// subscription. Projects inherit that gate and cannot reopen it locally.
+func (s *Server) subscriptionGloballyDisabled(rawURL string) bool {
+	sharedLock := s.sharedSourceLock()
+	sharedLock.RLock()
+	defer sharedLock.RUnlock()
+	shared := s.sharedSourceConfig()
+	return shared != nil && !shared.SubscriptionEnabled(rawURL)
+}
+
+// patchProjectSubscriptionEnabled pauses or restores one subscription for the
+// current project only. The shared catalog is left untouched, so sibling
+// projects keep their own state, and a subscription the catalog closed stays
+// closed here too.
+//
+// A close applied this way is a manual one: it survives every refresh and can
+// only be lifted by another explicit toggle. Subscriptions closed by the
+// traffic/expiry rule are managed by the subscription manager instead and
+// reopen on their own once a refresh shows them usable again.
+func (s *Server) patchProjectSubscriptionEnabled(rawURL string, enabled bool) error {
+	if !s.hasProjectScope() {
+		return errors.New("当前没有项目作用域")
+	}
+	if s.cfgSrc == nil {
+		return errors.New("配置管理未启用")
+	}
+	if enabled && s.subscriptionGloballyDisabled(rawURL) {
+		return errors.New("订阅已在全局关闭，请先在全局视图开启")
+	}
+	if s.subRefresher != nil {
+		// The running subscription manager owns the pause state: it persists it,
+		// rewrites the project's node file and applies the change to the live
+		// node pool without waiting for a restart.
+		if err := s.subRefresher.SetSubscriptionEnabled(rawURL, enabled); err != nil {
+			return err
+		}
+	}
+	s.cfgMu.Lock()
+	// Mirror the same intent onto the config instance the settings API writes
+	// through, so a later settings save cannot resurrect the previous state.
+	s.cfgSrc.SetSubscriptionEnabled(rawURL, enabled)
+	var saveErr error
+	if s.subRefresher == nil {
+		// Without a running subscription manager the project config is the only
+		// owner of the new state, so it has to be persisted here.
+		saveErr = s.cfgSrc.SaveSettings()
+	}
+	s.cfgMu.Unlock()
+	if saveErr != nil {
+		return fmt.Errorf("保存订阅状态失败: %w", saveErr)
 	}
 	return nil
 }
@@ -3644,28 +3702,6 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 		}
 	}
 	usage := s.subscriptionUsageByURL(urls)
-	for index := range items {
-		items[index].UsedByProjects = append([]string(nil), usage[items[index].URL]...)
-		// The gate is derived from the metadata rather than from Status, because
-		// a failed refresh replaces the visible status with "error" while the
-		// traffic/expiry facts stay known.
-		items[index].BlockReason = SubscriptionInactiveReason(items[index])
-		// Sync probe results onto the per-subscription node count. When no node
-		// has been probed yet, ValidNodeCount stays 0 and the UI shows only the
-		// total. A negative sentinel would be misleading, so 0 simply means
-		// "not yet counted" here (and is indistinguishable from "zero valid"),
-		// which the UI handles by showing total-only until probing starts.
-		if stats, ok := nodeStats[items[index].URL]; ok {
-			items[index].ValidNodeCount = stats.valid
-			items[index].ProbedNodeCount = stats.probed
-		}
-	}
-	runtimeItems := make(map[string]SubscriptionInfo, len(items))
-	if s.catalogOnly {
-		for _, item := range items {
-			runtimeItems[item.URL] = item
-		}
-	}
 	// The shared catalog keeps no subscription state of its own, so after a
 	// restart it cannot explain a close until it refreshes. Project runtimes
 	// persist that state, so borrow their answer for the global view.
@@ -3676,6 +3712,45 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 	sharedLock := s.sharedSourceLock()
 	sharedLock.RLock()
 	shared := s.sharedSourceConfig()
+	for index := range items {
+		items[index].UsedByProjects = append([]string(nil), usage[items[index].URL]...)
+		// The gate is derived from the metadata rather than from Status, because
+		// a failed refresh replaces the visible status with "error" while the
+		// traffic/expiry facts stay known.
+		items[index].BlockReason = SubscriptionInactiveReason(items[index])
+		// A close owned by the shared catalog is inherited by every project and
+		// cannot be lifted locally. The project view names the owner instead of
+		// showing a generic pause, and keeps its own toggle disabled.
+		globalEnabled := shared == nil || shared.SubscriptionEnabled(items[index].URL)
+		items[index].GlobalDisabled = !globalEnabled
+		if s.catalogOnly {
+			// The catalog runtime snapshot its config when it started, so its own
+			// manager cannot report a close the shared list received later. The
+			// shared config owns this scope, so it decides here; otherwise the
+			// global view would keep offering a toggle that is already closed.
+			items[index].Enabled = globalEnabled
+			if !globalEnabled && !subscriptionLifecycleClosed(items[index].Status) {
+				items[index].Status = "disabled"
+			}
+		}
+		// Sync probe results onto the per-subscription node count. When no node
+		// has been probed yet, ValidNodeCount stays 0 and the UI shows only the
+		// total. A negative sentinel would be misleading, so 0 simply means
+		// "not yet counted" here (and is indistinguishable from "zero valid"),
+		// which the UI handles by showing total-only until probing starts.
+		if stats, ok := nodeStats[items[index].URL]; ok {
+			items[index].ValidNodeCount = stats.valid
+			items[index].ProbedNodeCount = stats.probed
+		}
+	}
+	// Build the runtime index after the decoration above, so the global list
+	// inherits the corrections instead of a pre-correction copy.
+	runtimeItems := make(map[string]SubscriptionInfo, len(items))
+	if s.catalogOnly {
+		for _, item := range items {
+			runtimeItems[item.URL] = item
+		}
+	}
 	for _, rawURL := range urls {
 		item := SubscriptionInfo{
 			ID:       subscriptionNameFromURL(rawURL),
@@ -3888,11 +3963,6 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, map[string]any{"error": "缺少订阅地址或启用状态"})
 				return
 			}
-			if s.subRefresher == nil && !(globalScope && s.projects != nil) {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				writeJSON(w, map[string]any{"error": "订阅管理器未启用"})
-				return
-			}
 			// Enabling a subscription must honour the traffic/expiry rule on
 			// every scope. A global toggle writes the shared catalog directly,
 			// so it cannot rely on the project manager's own enable path to
@@ -3905,7 +3975,34 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			if !(globalScope && s.projects != nil && !s.catalogOnly) {
+			if !globalScope {
+				// A project-scoped toggle belongs to this project alone. It must
+				// not touch the shared catalog, or a sibling project would be
+				// affected by a decision that was never about it.
+				if err := s.patchProjectSubscriptionEnabled(req.URL, *req.Enabled); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					writeJSON(w, map[string]any{"error": err.Error()})
+					return
+				}
+				writeJSON(w, s.subscriptionManagementPayload())
+				return
+			}
+			if s.subRefresher == nil && s.projects == nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				writeJSON(w, map[string]any{"error": "订阅管理器未启用"})
+				return
+			}
+			// Only a runtime that owns a node pool can validate this toggle
+			// against its local cache. In single-project compatibility mode there
+			// is no registry, so the refresher is the only owner and has to apply
+			// the pause to its live box.
+			//
+			// The shared catalog is deliberately excluded: it owns the metadata
+			// and the close state, but never the nodes, so its manager has no
+			// local cache and would reject a re-open with "订阅没有本地节点缓存".
+			// The shared config written below is the owner for this scope, and
+			// reloadSharedSources propagates it to every project.
+			if !s.catalogOnly && s.projects == nil {
 				if err := s.subRefresher.SetSubscriptionEnabled(req.URL, *req.Enabled); err != nil {
 					w.WriteHeader(http.StatusBadRequest)
 					writeJSON(w, map[string]any{"error": err.Error()})
@@ -3915,6 +4012,8 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 			sharedLock := s.sharedSourceLock()
 			sharedLock.Lock()
 			if shared := s.sharedSourceConfig(); shared != nil {
+				// The shared list is a manual close by definition: the catalog has
+				// no automatic refresh, so nothing may reopen it on its own.
 				shared.SetSubscriptionEnabled(req.URL, *req.Enabled)
 				if err := shared.SaveSettings(); err != nil {
 					sharedLock.Unlock()
@@ -3926,6 +4025,8 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 			sharedLock.Unlock()
 			payload := s.subscriptionManagementPayload()
 			if s.projects != nil {
+				// Every running project restarts so it inherits the new gate and
+				// its node pool stops carrying the closed subscription's nodes.
 				s.reloadSharedSources(r.Context(), payload)
 			}
 			writeJSON(w, payload)
