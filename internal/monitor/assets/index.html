@@ -1368,6 +1368,33 @@
     </div>
   </div>
 
+  <!-- 拉黑节点模态框：拉黑时长可修改，默认取项目配置的 pool.blacklist_duration -->
+  <div class="modal-overlay" id="blacklistModalOverlay">
+    <div class="modal">
+      <div class="modal-header" id="blacklistModalTitle">拉黑节点</div>
+      <div class="modal-body">
+        <div id="blacklistModalDesc" style="font-size:13px; color:var(--text-muted); line-height:1.6;"></div>
+        <div class="form-group">
+          <label for="blacklistDurationInput">拉黑时长</label>
+          <input type="text" id="blacklistDurationInput" class="setting-input" placeholder="30m" autocomplete="off"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();submitBlacklist();}else if(event.key==='Escape'){event.preventDefault();closeBlacklistModal();}" />
+          <em style="font-size:11px;color:var(--text-muted);" id="blacklistDurationHint"></em>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('30m')">30 分钟</button>
+          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('1h')">1 小时</button>
+          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('6h')">6 小时</button>
+          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('24h')">24 小时</button>
+          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('168h')">7 天</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" onclick="closeBlacklistModal()">取消</button>
+        <button type="button" class="btn btn-danger" id="blacklistSubmitBtn" onclick="submitBlacklist()">确定拉黑</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="projectModalOverlay">
     <div class="modal modal-project">
       <div class="modal-header" id="projectModalTitle">新建项目</div>
@@ -3805,19 +3832,101 @@
       return s;
     }
 
-    async function blacklistNode(tag) {
-      const duration = await getBlacklistDuration();
-      const label = formatDurationLabel(duration);
-      if (!confirm('确定拉黑该节点 ' + label + '？')) return;
+    // 待拉黑节点：由单个 / 批量入口写入，拉黑时长在模态框中确认（默认取项目配置值）。
+    let pendingBlacklistTags = [];
+
+    // 打开拉黑模态框。单个节点传 [tag]，批量传选中的 tags。
+    async function openBlacklistModal(tags) {
+      const list = (Array.isArray(tags) ? tags : [tags]).filter(Boolean);
+      if (list.length === 0) return;
+      pendingBlacklistTags = list;
+
+      const title = document.getElementById('blacklistModalTitle');
+      const desc = document.getElementById('blacklistModalDesc');
+      if (list.length === 1) {
+        title.textContent = '拉黑节点';
+        desc.textContent = '即将拉黑节点：' + list[0];
+      } else {
+        title.textContent = `批量拉黑 ${list.length} 个节点`;
+        desc.textContent = `即将拉黑选中的 ${list.length} 个节点。`;
+      }
+
+      // 默认值 = 项目配置的 pool.blacklist_duration（项目页取项目设置，全局页取默认项目）。
+      const def = await getBlacklistDuration();
+      const input = document.getElementById('blacklistDurationInput');
+      const hint = document.getElementById('blacklistDurationHint');
+      input.value = def;
+      hint.textContent = `默认使用项目配置的拉黑时长：${formatDurationLabel(def)}（可修改，支持 30m / 1h / 1h30m / 24h 等格式）`;
+
+      document.getElementById('blacklistModalOverlay').classList.add('show');
+      setTimeout(() => { input.focus(); input.select(); }, 0);
+    }
+
+    function closeBlacklistModal() {
+      pendingBlacklistTags = [];
+      document.getElementById('blacklistModalOverlay').classList.remove('show');
+    }
+
+    function setBlacklistPreset(dur) {
+      const input = document.getElementById('blacklistDurationInput');
+      if (!input) return;
+      input.value = dur;
+      input.focus();
+    }
+
+    // 校验 Go time.Duration 风格字符串（如 "30m"、"1h30m"、"1.5h"）。
+    function isValidDurationString(value) {
+      const s = String(value || '').trim();
+      if (!s) return false;
+      return /^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))*$/.test(s);
+    }
+
+    async function submitBlacklist() {
+      const tags = pendingBlacklistTags.slice();
+      if (tags.length === 0) return;
+
+      const input = document.getElementById('blacklistDurationInput');
+      const duration = String(input.value || '').trim();
+      if (!isValidDurationString(duration)) {
+        showToast('拉黑时长格式无效，示例：30m、1h、24h', 'error');
+        input.focus();
+        return;
+      }
+
+      const btn = document.getElementById('blacklistSubmitBtn');
+      if (btn) btn.disabled = true;
       try {
-        const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/blacklist', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({duration: duration})
-        });
-        const d = await r.json();
-        if (d.error) showToast(d.error, 'error'); else { showToast('已拉黑 ' + label); refresh(); }
-      } catch (e) { showToast('拉黑失败', 'error'); }
+        if (tags.length === 1) {
+          const r = await fetch('/api/nodes/'+encodeURIComponent(tags[0])+'/blacklist', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({duration})
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || d.error) throw new Error(d.error || '拉黑失败');
+          showToast('已拉黑 ' + formatDurationLabel(d.duration || duration));
+        } else {
+          const r = await fetch('/api/nodes/batch', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'blacklist', tags, duration})
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || d.error) throw new Error(d.error || '批量拉黑失败');
+          showToast(d.message || '批量拉黑完成');
+          clearNodeSelection();
+        }
+        closeBlacklistModal();
+        refresh();
+      } catch (e) {
+        showToast(e.message || '拉黑失败', 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function blacklistNode(tag) {
+      await openBlacklistModal([tag]);
     }
 
     // 小黑屋：与拉黑完全独立的手动状态，只存在于当前项目，且不会自动解除。
@@ -5254,32 +5363,7 @@
         showToast('请先选择要拉黑的节点', 'error');
         return;
       }
-
-      const tags = Array.from(selectedNodeTags);
-      const duration = prompt(`确定要拉黑选中的 ${tags.length} 个节点吗？\n请输入拉黑时长（如: 1h, 30m, 24h）:`, '1h');
-      if (!duration) return;
-
-      showToast('开始批量拉黑...');
-
-      try {
-        const response = await fetch('/api/nodes/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'blacklist', tags, duration })
-        });
-
-        const result = await response.json();
-
-        if (!response.ok) {
-          throw new Error(result.error || '批量拉黑失败');
-        }
-
-        showToast(result.message, 'success');
-        clearNodeSelection();
-        await refresh();
-      } catch (error) {
-        showToast(error.message, 'error');
-      }
+      await openBlacklistModal(Array.from(selectedNodeTags));
     }
 
     // 批量小黑屋操作：与批量拉黑/解封完全独立的两套动作。
