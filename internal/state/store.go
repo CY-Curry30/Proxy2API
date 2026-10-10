@@ -90,6 +90,7 @@ type SubscriptionInfo struct {
 	ExpiresAt      int64     `json:"expires_at"`
 	LastRefresh    time.Time `json:"last_refresh"`
 	LastError      string    `json:"last_error,omitempty"`
+	FetchChannel   string    `json:"fetch_channel,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 

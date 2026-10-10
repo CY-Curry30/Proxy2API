@@ -53,6 +53,20 @@ func WithFetchOwner(owner string) Option {
 	return func(m *Manager) { m.fetchOwner = owner }
 }
 
+// WithSystemProxyURL registers a provider for the workspace-wide proxy from the
+// system settings. It is consulted only after the direct fetch and the
+// project's own proxy entry have both failed.
+func WithSystemProxyURL(provider func() string) Option {
+	return func(m *Manager) { m.systemProxyURL = provider }
+}
+
+// WithProjectProxyURL registers a provider for the proxy entry owned by the
+// project this manager belongs to (its own listener). The shared catalog passes
+// none, because it has no project to borrow a proxy from.
+func WithProjectProxyURL(provider func() string) Option {
+	return func(m *Manager) { m.projectProxyURL = provider }
+}
+
 // Manager handles periodic subscription refresh.
 type Manager struct {
 	mu sync.RWMutex
@@ -79,6 +93,11 @@ type Manager struct {
 	fetchCallbackMu   sync.Mutex
 	fetchCallbackWG   sync.WaitGroup
 	fetchCallbacksOff bool
+
+	// Proxy providers used by the fetch fallback chain. Both are read on every
+	// refresh so a settings change takes effect without restarting the project.
+	systemProxyURL  func() string
+	projectProxyURL func() string
 
 	// Track nodes.txt content hash to detect modifications
 	lastSubHash      string    // Hash of nodes.txt content after last subscription refresh
@@ -195,6 +214,7 @@ func (m *Manager) restorePersistentState() {
 			UsedBytes: item.UsedBytes, TotalBytes: item.TotalBytes,
 			RemainingBytes: item.RemainingBytes, ExpiresAt: item.ExpiresAt,
 			LastRefresh: item.LastRefresh, LastError: item.LastError,
+			FetchChannel: item.FetchChannel,
 		}
 	}
 	for rawURL, definitions := range stored.NodeCache {
@@ -242,6 +262,7 @@ func (m *Manager) persistentState() state.SubscriptionState {
 			UsedBytes: item.UsedBytes, TotalBytes: item.TotalBytes,
 			RemainingBytes: item.RemainingBytes, ExpiresAt: item.ExpiresAt,
 			LastRefresh: item.LastRefresh, LastError: item.LastError,
+			FetchChannel: item.FetchChannel,
 		})
 		definitions := make([]state.NodeDefinition, 0, len(m.nodeCache[rawURL]))
 		for _, node := range m.nodeCache[rawURL] {
@@ -1112,10 +1133,11 @@ func (m *Manager) MarkNodesModified() {
 }
 
 type subscriptionFetchResult struct {
-	url   string
-	nodes []config.NodeConfig
-	info  monitor.SubscriptionInfo
-	err   error
+	url     string
+	nodes   []config.NodeConfig
+	info    monitor.SubscriptionInfo
+	err     error
+	channel string
 }
 
 func parseSubscriptionUserInfo(header string, info *monitor.SubscriptionInfo) {
@@ -1312,10 +1334,98 @@ func (m *Manager) restoreSharedFetchState(cache map[string][]config.NodeConfig, 
 	m.persistState(true)
 }
 
+// fetchSubscriptionDirect fetches one subscription using the default rule
+// (a direct request that only honours the process environment), then retries
+// through the project's own proxy entry and finally through the workspace-wide
+// system proxy. The result records which channel produced it so the refresh
+// summary can report how every subscription was obtained.
 func (m *Manager) fetchSubscriptionDirect(ctx context.Context, rawURL string, timeout time.Duration) subscriptionFetchResult {
+	direct := m.fetchSubscriptionOnce(ctx, rawURL, timeout, m.httpClient, FetchChannelDirect)
+	if !subscriptionFetchFailed(direct) {
+		return direct
+	}
+
+	result := direct
+	failures := []string{fmt.Sprintf("直连: %v", direct.err)}
+
+	// Stage 2: the project's own proxy entry. It routes through the nodes this
+	// project already has, so it can reach a provider that blocks the host.
+	// The shared catalog has no project, so it skips straight to the system
+	// proxy below.
+	if proxyURL := m.currentProjectProxyURL(); proxyURL != "" {
+		result, failures = m.retrySubscriptionViaProxy(ctx, rawURL, timeout, proxyURL, FetchChannelProjectProxy, failures, result)
+		if !subscriptionFetchFailed(result) {
+			return result
+		}
+	}
+	// Stage 3: the proxy configured in the system settings.
+	if proxyURL := m.currentSystemProxyURL(); proxyURL != "" {
+		result, failures = m.retrySubscriptionViaProxy(ctx, rawURL, timeout, proxyURL, FetchChannelSystemProxy, failures, result)
+		if !subscriptionFetchFailed(result) {
+			return result
+		}
+	}
+
+	// Every channel failed. Report the direct error first and keep the retry
+	// errors as context, so the panel explains why the fallback did not help.
+	combined := strings.Join(failures, "；")
+	result.err = fmt.Errorf("%s", combined)
+	result.channel = ""
+	result.info.Status = "error"
+	result.info.LastError = combined
+	result.info.FetchChannel = ""
+	return result
+}
+
+// retrySubscriptionViaProxy performs one proxied attempt. A failed attempt is
+// returned as the new "latest" result so a following stage reports its own
+// error, while the accumulated failure list keeps the whole story.
+func (m *Manager) retrySubscriptionViaProxy(
+	ctx context.Context,
+	rawURL string,
+	timeout time.Duration,
+	proxyURL string,
+	channel string,
+	failures []string,
+	previous subscriptionFetchResult,
+) (subscriptionFetchResult, []string) {
+	label := FetchChannelLabel(channel)
+	client, err := config.NewProxyHTTPClient(proxyURL, timeout)
+	if err != nil {
+		m.logger.Warnf("订阅 %s 的%s不可用: %v", config.RedactURL(rawURL), label, err)
+		return previous, append(failures, fmt.Sprintf("%s(%s): %v", label, config.RedactURL(proxyURL), err))
+	}
+	attempt := m.fetchSubscriptionOnce(ctx, rawURL, timeout, client, channel)
+	client.CloseIdleConnections()
+	if !subscriptionFetchFailed(attempt) {
+		m.logger.Infof("订阅 %s 直连失败，已改用%s %s 更新成功", config.RedactURL(rawURL), label, config.RedactURL(proxyURL))
+		return attempt, failures
+	}
+	m.logger.Warnf("订阅 %s 经%s %s 更新仍失败: %v", config.RedactURL(rawURL), label, config.RedactURL(proxyURL), attempt.err)
+	return attempt, append(failures, fmt.Sprintf("%s(%s): %v", label, config.RedactURL(proxyURL), attempt.err))
+}
+
+func (m *Manager) currentProjectProxyURL() string {
+	if m.projectProxyURL == nil {
+		return ""
+	}
+	return strings.TrimSpace(m.projectProxyURL())
+}
+
+func (m *Manager) currentSystemProxyURL() string {
+	if m.systemProxyURL == nil {
+		return ""
+	}
+	return strings.TrimSpace(m.systemProxyURL())
+}
+
+// fetchSubscriptionOnce performs a single fetch attempt with the given client
+// and records which channel it belongs to.
+func (m *Manager) fetchSubscriptionOnce(ctx context.Context, rawURL string, timeout time.Duration, client *http.Client, channel string) subscriptionFetchResult {
 	info := newSubscriptionInfo(rawURL)
 	info.LastRefresh = time.Now()
-	result := subscriptionFetchResult{url: rawURL, info: info}
+	info.FetchChannel = channel
+	result := subscriptionFetchResult{url: rawURL, info: info, channel: channel}
 
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -1336,7 +1446,7 @@ func (m *Manager) fetchSubscriptionDirect(ctx context.Context, rawURL string, ti
 	}
 	config.ApplySubscriptionRequestHeaders(req)
 
-	resp, err := m.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		result.err = fmt.Errorf("获取订阅失败: %w", err)
 		result.info.Status = "error"
@@ -1579,11 +1689,22 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 	wg.Wait()
 
 	failed := 0
+	directCount := 0
+	proxyCount := 0
 	autoDisabled := false
 	autoRecovered := false
 	var lastErr error
 	m.mu.Lock()
 	for _, result := range results {
+		if result.err == nil {
+			// Count how each subscription was actually obtained so the refresh
+			// summary can show how much the proxy fallback was needed.
+			if result.channel == FetchChannelProjectProxy || result.channel == FetchChannelSystemProxy {
+				proxyCount++
+			} else {
+				directCount++
+			}
+		}
 		if result.err != nil {
 			failed++
 			lastErr = result.err
@@ -1623,9 +1744,17 @@ func (m *Manager) fetchSubscriptions(requestedURLs []string, forceFetch bool) ([
 		}
 		m.items[result.url] = result.info
 	}
+	if len(results) > 0 {
+		m.status.LastFetchDirect = directCount
+		m.status.LastFetchProxy = proxyCount
+		m.status.LastFetchFailed = failed
+	}
 	allNodes := m.cachedNodesForConfigLocked()
 	cacheSnapshot := cloneSubscriptionNodeCache(m.nodeCache)
 	m.mu.Unlock()
+	if len(results) > 0 {
+		m.logger.Infof("订阅更新结果: 直连成功 %d，经代理成功 %d，失败 %d", directCount, proxyCount, failed)
+	}
 	m.saveNodeCache(cacheSnapshot)
 	if autoDisabled || autoRecovered {
 		if err := m.baseCfg.SaveSettings(); err != nil {

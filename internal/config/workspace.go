@@ -27,6 +27,28 @@ type ControlManagementConfig struct {
 	Password string `yaml:"password,omitempty" json:"password,omitempty"`
 }
 
+// LatencyTestConfig is the workspace-wide latency / health-check destination.
+// While enabled it overrides every project's probe.target, so one place decides
+// what all projects dial; disabling it restores per-project control.
+type LatencyTestConfig struct {
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Target  string `yaml:"target,omitempty" json:"target"`
+}
+
+// EnabledOrDefault reports whether the workspace target overrides projects.
+func (c LatencyTestConfig) EnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// EffectiveTarget returns the destination that overrides every project, or an
+// empty string when each project keeps its own probe.target.
+func (c LatencyTestConfig) EffectiveTarget() string {
+	if !c.EnabledOrDefault() {
+		return ""
+	}
+	return strings.TrimSpace(c.Target)
+}
+
 // ProjectSpec is the process-wide catalog entry for one project runtime.
 type ProjectSpec struct {
 	Name         string `yaml:"name" json:"name"`
@@ -41,6 +63,8 @@ type ProjectSpec struct {
 // -config file is retained as the migration source for existing deployments.
 type Workspace struct {
 	Management            ControlManagementConfig `yaml:"management" json:"management"`
+	Proxy                 SystemProxyConfig       `yaml:"proxy,omitempty" json:"proxy"`
+	LatencyTest           LatencyTestConfig       `yaml:"latency_test,omitempty" json:"latency_test"`
 	Log                   LogConfig               `yaml:"log" json:"log"`
 	ProjectsDir           string                  `yaml:"projects_dir" json:"projects_dir"`
 	DefaultProject        string                  `yaml:"default_project" json:"default_project"`
@@ -166,6 +190,15 @@ func (w *Workspace) normalize() {
 		w.ProjectsDir = "projects"
 	}
 	w.DefaultProject = strings.TrimSpace(w.DefaultProject)
+	w.Proxy.URL = strings.TrimSpace(w.Proxy.URL)
+	w.Proxy.TestTarget = strings.TrimSpace(w.Proxy.TestTarget)
+	w.LatencyTest.Target = strings.TrimSpace(w.LatencyTest.Target)
+	if w.LatencyTest.Target == "" {
+		// A fresh manifest enables the workspace-wide latency target by
+		// default; clearing the field in the panel keeps the value so the
+		// switch can be turned back on without retyping the address.
+		w.LatencyTest.Target = DefaultProbeTarget
+	}
 	if w.Management.Enabled == nil {
 		enabled := true
 		w.Management.Enabled = &enabled

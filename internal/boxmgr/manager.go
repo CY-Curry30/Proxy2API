@@ -509,6 +509,22 @@ func (m *Manager) MonitorServer() *monitor.Server {
 	return m.monitorServer
 }
 
+// SetProbeTarget hot-applies a new health-check destination. The live config is
+// updated in place and the long-lived monitor manager re-derives its probe
+// request, so a workspace-wide latency target change does not need a restart.
+func (m *Manager) SetProbeTarget(target string, skipCertVerify bool) {
+	m.mu.Lock()
+	cfg := m.cfg
+	mgr := m.monitorMgr
+	if cfg != nil {
+		cfg.Probe.Target = target
+	}
+	m.mu.Unlock()
+	if mgr != nil {
+		mgr.SetProbeTarget(target, skipCertVerify)
+	}
+}
+
 // newBoxRecover wraps box.New and converts panics into errors. Some malformed
 // subscription nodes make the sing-box library panic during outbound
 // initialization (e.g. stringifying an unexpected *string while formatting its

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,12 +35,27 @@ type CatalogRuntime struct {
 	subMgr      *subscription.Manager
 	subView     monitor.SubscriptionRefresher
 	cancel      context.CancelFunc
+	// systemProxyURL resolves the workspace-wide proxy from the system
+	// settings. The catalog has no project, so this is the only proxy a global
+	// subscription update may fall back to.
+	systemProxyURL func() string
+	// globalProbeTarget resolves the workspace-wide latency target so the global
+	// directory probes nodes exactly like the projects do.
+	globalProbeTarget func() string
 }
 
 type CatalogOption func(*CatalogRuntime)
 
 func WithCatalogProbeCoordinator(coordinator *monitor.ProbeCoordinator) CatalogOption {
 	return func(r *CatalogRuntime) { r.probeCoordinator = coordinator }
+}
+
+func WithCatalogSystemProxyURL(provider func() string) CatalogOption {
+	return func(r *CatalogRuntime) { r.systemProxyURL = provider }
+}
+
+func WithCatalogGlobalProbeTarget(provider func() string) CatalogOption {
+	return func(r *CatalogRuntime) { r.globalProbeTarget = provider }
 }
 
 func NewCatalogRuntime(parent context.Context, shared *config.Config, sharedMu *sync.RWMutex, ports *PortRegistry, syncShared func() error, opts ...CatalogOption) *CatalogRuntime {
@@ -128,7 +144,7 @@ func (r *CatalogRuntime) Start() error {
 	// Use the catalog clone so its refresh flag is always false. The shared
 	// config pointer remains the source owner for CRUD, but project fetches must
 	// never drive the catalog's runtime state.
-	subMgr := subscription.New(cfg, boxMgr)
+	subMgr := subscription.New(cfg, boxMgr, subscription.WithSystemProxyURL(r.systemProxyURL))
 	subMgr.Start()
 	view := monitor.SubscriptionRefresher(subMgr)
 	if r.syncShared != nil {
@@ -252,6 +268,11 @@ func (r *CatalogRuntime) catalogConfig(listenerPort, clashPort uint16) *config.C
 	cloned.SubscriptionRefresh.Enabled = false
 	if cloned.SubscriptionRefresh.Interval <= 0 {
 		cloned.SubscriptionRefresh.Interval = time.Hour
+	}
+	if r.globalProbeTarget != nil {
+		if target := strings.TrimSpace(r.globalProbeTarget()); target != "" {
+			cloned.Probe.Target = target
+		}
 	}
 	disabled := false
 	cloned.Management.Enabled = &disabled

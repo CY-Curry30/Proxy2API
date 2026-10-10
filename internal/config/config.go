@@ -1679,7 +1679,7 @@ func (c *Config) normalizeProbeConfig() error {
 		c.Probe.Concurrency = c.Management.ProbeConcurrency
 	}
 	if c.Probe.Target == "" {
-		c.Probe.Target = "http://cp.cloudflare.com/generate_204"
+		c.Probe.Target = DefaultProbeTarget
 	}
 	if c.Probe.Interval <= 0 {
 		c.Probe.Interval = 1 * time.Hour
@@ -1735,12 +1735,36 @@ func (c *Config) ProbeTimeoutOrDefault() time.Duration {
 // ProbeTargetOrDefault returns this project's health-check destination.
 func (c *Config) ProbeTargetOrDefault() string {
 	if strings.TrimSpace(c.Probe.Target) == "" {
-		return "http://cp.cloudflare.com/generate_204"
+		return DefaultProbeTarget
 	}
 	return c.Probe.Target
 }
 
+// ValidateProbeTarget accepts the http/https endpoint used for latency checks.
+func ValidateProbeTarget(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return errors.New("延迟测试链接不能为空")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("延迟测试链接无法解析: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("延迟测试链接必须以 http:// 或 https:// 开头")
+	}
+	if parsed.Host == "" {
+		return errors.New("延迟测试链接缺少主机名")
+	}
+	return nil
+}
+
 const (
+	// DefaultProbeTarget is the health-check destination used when neither the
+	// workspace nor the project configures one. A 204 endpoint keeps the check
+	// independent of any real page content.
+	DefaultProbeTarget = "https://www.google.com/generate_204"
+
 	DefaultProbeTimeout = 110 * time.Second
 	MinimumProbeTimeout = 25 * time.Second
 	probeTimeoutStep    = 5 * time.Second

@@ -103,7 +103,7 @@ management:
   password: ""
 
 probe:
-  target: http://cp.cloudflare.com/generate_204
+  target: https://www.google.com/generate_204
   interval: 1h
   timeout: 1m50s
   concurrency: 32

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,13 @@ type Runtime struct {
 	logger           *runtimeLogger
 	fetchCoordinator *subscription.FetchCoordinator
 	probeCoordinator *monitor.ProbeCoordinator
+	// systemProxyURL resolves the workspace-wide proxy from the system
+	// settings. It is read on every subscription refresh so a settings change
+	// applies without restarting the project.
+	systemProxyURL func() string
+	// globalProbeTarget resolves the workspace-wide latency target. A non-empty
+	// value overrides this project's probe.target on every load.
+	globalProbeTarget func() string
 }
 
 type RuntimeOption func(*Runtime)
@@ -61,6 +69,39 @@ func WithFetchCoordinator(coordinator *subscription.FetchCoordinator) RuntimeOpt
 
 func WithProbeCoordinator(coordinator *monitor.ProbeCoordinator) RuntimeOption {
 	return func(r *Runtime) { r.probeCoordinator = coordinator }
+}
+
+func WithSystemProxyURL(provider func() string) RuntimeOption {
+	return func(r *Runtime) { r.systemProxyURL = provider }
+}
+
+func WithGlobalProbeTarget(provider func() string) RuntimeOption {
+	return func(r *Runtime) { r.globalProbeTarget = provider }
+}
+
+// applyGlobalProbeTarget lets the workspace-wide latency target win over the
+// project's own probe.target. An empty value keeps the project's choice.
+func (r *Runtime) applyGlobalProbeTarget(cfg *config.Config) {
+	if r == nil || cfg == nil || r.globalProbeTarget == nil {
+		return
+	}
+	if target := strings.TrimSpace(r.globalProbeTarget()); target != "" {
+		cfg.Probe.Target = target
+	}
+}
+
+// SetProbeTarget hot-applies a latency target to a running project. A stopped
+// project needs nothing: the override is applied whenever its config is loaded.
+func (r *Runtime) SetProbeTarget(target string) {
+	r.mu.RLock()
+	boxMgr := r.boxMgr
+	cfg := r.cfg
+	r.mu.RUnlock()
+	if boxMgr == nil {
+		return
+	}
+	skipCertVerify := cfg != nil && cfg.SkipCertVerify
+	boxMgr.SetProbeTarget(target, skipCertVerify)
 }
 
 func NewRuntime(parent context.Context, id, configPath, sharedPath string, sharedCfg *config.Config, sharedMu *sync.RWMutex, clashAPIPort uint16, ports *PortRegistry, opts ...RuntimeOption) *Runtime {
@@ -113,6 +154,8 @@ func (r *Runtime) Start() error {
 		return fmt.Errorf("加载项目 %q 的配置失败: %w", r.id, err)
 	}
 	cfg.ClashAPIPort = r.clashAPIPort
+	// The workspace-wide latency target wins over the project's own probe.target.
+	r.applyGlobalProbeTarget(cfg)
 	// Reconcile restored node ports against the process-wide registry before
 	// claiming this project. The OS may report a port as free while another
 	// stopped project still has it assigned in its persisted state, so node-port
@@ -160,6 +203,13 @@ func (r *Runtime) Start() error {
 		subscription.WithStateStore(store),
 		subscription.WithFetchCoordinator(r.fetchCoordinator),
 		subscription.WithFetchOwner(r.id),
+		subscription.WithSystemProxyURL(r.systemProxyURL),
+		// The fallback borrows this project's own proxy entry, read from the
+		// live config so a reload (mode, listener port, credentials) is picked
+		// up without recreating the subscription manager.
+		subscription.WithProjectProxyURL(func() string {
+			return subscription.ProjectProxyURL(boxMgr.CurrentConfigSnapshot())
+		}),
 	)
 	subMgr.Start()
 	trafficDone := make(chan struct{})

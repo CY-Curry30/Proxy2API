@@ -70,6 +70,8 @@ func NewRegistry(parent context.Context, workspace *config.Workspace) (*Registry
 	}
 	r.catalog = NewCatalogRuntime(parent, sharedCfg, r.sharedMu, r.ports, r.reloadSharedConfigFromDisk,
 		WithCatalogProbeCoordinator(r.probeCoordinator),
+		WithCatalogSystemProxyURL(r.systemProxyURL),
+		WithCatalogGlobalProbeTarget(r.probeTargetOverride),
 	)
 	catalogChanged := false
 	for _, id := range workspace.SortedProjectIDs() {
@@ -107,6 +109,8 @@ func NewRegistry(parent context.Context, workspace *config.Workspace) (*Registry
 		r.runtimes[id] = NewRuntime(parent, id, path, sharedPath, sharedCfg, r.sharedMu, spec.ClashAPIPort, r.ports,
 			WithFetchCoordinator(r.fetchCoordinator),
 			WithProbeCoordinator(r.probeCoordinator),
+			WithSystemProxyURL(r.systemProxyURL),
+			WithGlobalProbeTarget(r.probeTargetOverride),
 		)
 	}
 	if catalogChanged && workspace.Persisted() {
@@ -326,9 +330,94 @@ func (r *Registry) SystemSettings() monitor.SystemSettings {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return monitor.SystemSettings{
-		Management: r.workspace.Management,
-		Log:        r.workspace.Log,
+		Management:  r.workspace.Management,
+		Proxy:       r.workspace.Proxy,
+		LatencyTest: r.workspace.LatencyTest,
+		Log:         r.workspace.Log,
 	}
+}
+
+// systemProxyURL resolves the workspace-wide proxy used by the subscription
+// fallback. It returns an empty string while the proxy is disabled or not
+// configured, so callers can treat "no proxy" and "proxy off" alike.
+func (r *Registry) systemProxyURL() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.workspace.Proxy.EffectiveURL()
+}
+
+// probeTargetOverride resolves the workspace-wide latency target. An empty
+// string means every project keeps its own probe.target.
+func (r *Registry) probeTargetOverride() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.workspace.LatencyTest.EffectiveTarget()
+}
+
+// applyProbeTargetOverride lets the workspace-wide latency target win over a
+// project's own probe.target. An empty value keeps the project's choice.
+func (r *Registry) applyProbeTargetOverride(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if target := r.probeTargetOverride(); target != "" {
+		cfg.Probe.Target = target
+	}
+}
+
+// applyProbeTargetToProjects hot-applies a new workspace latency target to every
+// project that is currently running. Stopped projects pick it up on their next
+// start, because the override is applied whenever their config is loaded.
+func (r *Registry) applyProbeTargetToProjects(target string) {
+	r.mu.RLock()
+	runtimes := make(map[string]*Runtime, len(r.runtimes))
+	for id, runtime := range r.runtimes {
+		runtimes[id] = runtime
+	}
+	r.mu.RUnlock()
+	for _, runtime := range runtimes {
+		effective := target
+		if effective == "" {
+			// The override was switched off, so the project has to go back to the
+			// value in its own project.yaml instead of keeping the old override.
+			effective = r.projectOwnProbeTarget(runtime)
+		}
+		runtime.SetProbeTarget(effective)
+	}
+	if r.catalog != nil {
+		// The catalog rebuilds its config from the workspace on reload, so a
+		// reload is enough to move the global directory onto the new target.
+		if err := r.catalog.ReloadIfRunning(); err != nil {
+			log.Printf("[共享目录] 应用全局延迟测试链接失败: %v", err)
+		}
+	}
+}
+
+// projectOwnProbeTarget re-reads a project's own probe.target from disk. It is
+// only needed when the workspace override is switched off and a running project
+// must stop using the previously forced value.
+func (r *Registry) projectOwnProbeTarget(runtime *Runtime) string {
+	runtime.mu.RLock()
+	path, shared, sharedMu := runtime.configPath, runtime.sharedCfg, runtime.sharedMu
+	runtime.mu.RUnlock()
+	if sharedMu != nil {
+		sharedMu.RLock()
+	}
+	cfg, err := config.LoadProjectSettingsWithShared(path, shared)
+	if sharedMu != nil {
+		sharedMu.RUnlock()
+	}
+	if err != nil {
+		log.Printf("重新读取项目 %q 的探测目标失败，回退到内置默认值: %v", runtime.id, err)
+		return config.DefaultProbeTarget
+	}
+	return cfg.ProbeTargetOrDefault()
 }
 
 func (r *Registry) UpdateSystemSettings(ctx context.Context, settings monitor.SystemSettings) error {
@@ -347,14 +436,41 @@ func (r *Registry) UpdateSystemSettings(ctx context.Context, settings monitor.Sy
 	if settings.Log.Output != "stdout" && settings.Log.Output != "file" {
 		return errors.New("日志输出必须是 stdout 或 file")
 	}
+	proxy := config.SystemProxyConfig{
+		Enabled:    settings.Proxy.Enabled,
+		URL:        strings.TrimSpace(settings.Proxy.URL),
+		TestTarget: strings.TrimSpace(settings.Proxy.TestTarget),
+	}
+	if proxy.Enabled {
+		if err := config.ValidateProxyURL(proxy.URL); err != nil {
+			return err
+		}
+	}
+	latencyTest := config.LatencyTestConfig{
+		Enabled: settings.LatencyTest.Enabled,
+		Target:  strings.TrimSpace(settings.LatencyTest.Target),
+	}
+	if latencyTest.EnabledOrDefault() && latencyTest.Target == "" {
+		latencyTest.Target = config.DefaultProbeTarget
+	}
+	if target := latencyTest.EffectiveTarget(); target != "" {
+		if err := config.ValidateProbeTarget(target); err != nil {
+			return err
+		}
+	}
 	r.mu.Lock()
 	previousManagement := r.workspace.Management
 	previousLog := r.workspace.Log
+	previousProxy := r.workspace.Proxy
+	previousLatency := r.workspace.LatencyTest
+	previousOverride := previousLatency.EffectiveTarget()
 	r.workspace.Management.Listen = strings.TrimSpace(settings.Management.Listen)
 	r.workspace.Management.Password = settings.Management.Password
 	if settings.Management.Enabled != nil {
 		r.workspace.Management.Enabled = settings.Management.Enabled
 	}
+	r.workspace.Proxy = proxy
+	r.workspace.LatencyTest = latencyTest
 	r.workspace.Log.Output = settings.Log.Output
 	if settings.Log.File != "" {
 		r.workspace.Log.File = settings.Log.File
@@ -372,10 +488,16 @@ func (r *Registry) UpdateSystemSettings(ctx context.Context, settings monitor.Sy
 	if err := r.workspace.Save(); err != nil {
 		r.workspace.Management = previousManagement
 		r.workspace.Log = previousLog
+		r.workspace.Proxy = previousProxy
+		r.workspace.LatencyTest = previousLatency
 		r.mu.Unlock()
 		return err
 	}
 	r.mu.Unlock()
+
+	if target := latencyTest.EffectiveTarget(); target != previousOverride {
+		r.applyProbeTargetToProjects(target)
+	}
 	return nil
 }
 
@@ -425,7 +547,7 @@ func (r *Registry) ListProjects() []monitor.ProjectSummary {
 	})
 	result := make([]monitor.ProjectSummary, 0, len(ids))
 	for _, id := range ids {
-		result = append(result, projectSummary(id, specs[id], runtimes[id]))
+		result = append(result, r.projectSummary(id, specs[id], runtimes[id]))
 	}
 	return result
 }
@@ -569,7 +691,7 @@ func (r *Registry) ProjectPortHints() monitor.ProjectPortHints {
 	}
 }
 
-func projectSummary(id string, spec config.ProjectSpec, runtime *Runtime) monitor.ProjectSummary {
+func (r *Registry) projectSummary(id string, spec config.ProjectSpec, runtime *Runtime) monitor.ProjectSummary {
 	summary := monitor.ProjectSummary{
 		ID:           id,
 		Name:         spec.Name,
@@ -601,6 +723,13 @@ func projectSummary(id string, spec config.ProjectSpec, runtime *Runtime) monito
 		}
 	}
 	if cfg != nil {
+		// The workspace-wide latency target wins over the project's own value.
+		// Mirror it here so a stopped project still previews what it will use
+		// and the panel can explain that the input is controlled elsewhere.
+		probeOverride := r.probeTargetOverride()
+		if probeOverride != "" {
+			cfg.Probe.Target = probeOverride
+		}
 		summary.Mode = cfg.Mode
 		summary.ListenerAddress = cfg.Listener.Address
 		summary.ListenerPort = cfg.Listener.Port
@@ -612,6 +741,7 @@ func projectSummary(id string, spec config.ProjectSpec, runtime *Runtime) monito
 			summary.ClashAPIPort = cfg.ClashAPIPort
 		}
 		summary.Settings = runtimeSettings(cfg)
+		summary.Settings.Probe.GlobalOverride = probeOverride != ""
 	} else if mgr := runtime.MonitorManager(); mgr != nil {
 		summary.NodeCount = len(mgr.Snapshot())
 	}
@@ -777,6 +907,8 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 
 	projectCfg := defaultProjectConfig(mode, listenerPort, multiPortBase)
 	projectCfg.ClashAPIPort = clashAPIPort
+	// A new project inherits the workspace-wide latency target.
+	r.applyProbeTargetOverride(projectCfg)
 	if request.Settings != nil {
 		settings := *request.Settings
 		if settings.Listener.Port == 0 {
@@ -829,6 +961,8 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 	runtime := NewRuntime(r.parentCtx, id, projectPath, r.sharedPath, r.sharedCfg, r.sharedMu, clashAPIPort, r.ports,
 		WithFetchCoordinator(r.fetchCoordinator),
 		WithProbeCoordinator(r.probeCoordinator),
+		WithSystemProxyURL(r.systemProxyURL),
+		WithGlobalProbeTarget(r.probeTargetOverride),
 	)
 	r.mu.Lock()
 	r.workspace.Projects[id] = spec
@@ -850,7 +984,7 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 		if ctx != nil {
 			select {
 			case <-ctx.Done():
-				return projectSummary(id, spec, runtime), ctx.Err()
+				return r.projectSummary(id, spec, runtime), ctx.Err()
 			default:
 			}
 		}
@@ -858,7 +992,7 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 			log.Printf("[项目:%s] 已创建但启动失败: %v", id, err)
 		}
 	}
-	return projectSummary(id, spec, runtime), nil
+	return r.projectSummary(id, spec, runtime), nil
 }
 
 func defaultProjectConfig(mode string, listenerPort, multiPortBase uint16) *config.Config {
@@ -884,7 +1018,7 @@ func defaultProjectConfig(mode string, listenerPort, multiPortBase uint16) *conf
 		Sticky:     config.StickyConfig{Enabled: true},
 		Management: config.ManagementConfig{Enabled: &enabled},
 		Probe: config.ProbeConfig{
-			Target:      "http://cp.cloudflare.com/generate_204",
+			Target:      config.DefaultProbeTarget,
 			Interval:    time.Hour,
 			Timeout:     config.DefaultProbeTimeout,
 			Concurrency: 32,
@@ -944,8 +1078,16 @@ func (r *Registry) UpdateProject(ctx context.Context, id string, request monitor
 		previousCopy := *cfg
 		previousCfg = &previousCopy
 		previousCfg.ClashAPIPort = runtime.clashAPIPort
+		// Remember the project's own probe.target. While the workspace override is
+		// active, an unrelated settings save (interval, concurrency, …) must not
+		// overwrite it: the panel locks that input, so the stored value is the only
+		// record of what this project should dial once the override is switched off.
+		ownProbeTarget := cfg.Probe.Target
 		if err := applyRuntimeSettings(cfg, *request.Settings); err != nil {
 			return monitor.ProjectSummary{}, err
+		}
+		if r.probeTargetOverride() != "" {
+			cfg.Probe.Target = ownProbeTarget
 		}
 		cfg.ClashAPIPort = runtime.clashAPIPort
 		if err := r.ports.Reserve(id, cfg); err != nil {
@@ -975,22 +1117,22 @@ func (r *Registry) UpdateProject(ctx context.Context, id string, request monitor
 	if request.Enabled != nil && previous.Enabled != spec.Enabled {
 		if !*request.Enabled {
 			if err := runtime.Stop(); err != nil {
-				return projectSummary(id, spec, runtime), err
+				return r.projectSummary(id, spec, runtime), err
 			}
 		} else if spec.Autostart {
 			if err := runtime.Start(); err != nil {
-				return projectSummary(id, spec, runtime), err
+				return r.projectSummary(id, spec, runtime), err
 			}
 		}
 	} else if request.Settings != nil {
 		status, _, _ := runtime.Status()
 		if status == StatusRunning {
 			if err := runtime.Restart(); err != nil {
-				return projectSummary(id, spec, runtime), err
+				return r.projectSummary(id, spec, runtime), err
 			}
 		}
 	}
-	return projectSummary(id, spec, runtime), nil
+	return r.projectSummary(id, spec, runtime), nil
 }
 
 func applyRuntimeSettings(cfg *config.Config, settings monitor.ProjectRuntimeSettings) error {

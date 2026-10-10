@@ -1000,6 +1000,9 @@
               <thead><tr><th>项目</th><th>探测目标</th><th>探测间隔</th><th>探测超时</th><th>并发数</th><th>操作</th></tr></thead>
               <tbody id="projectProbeSettingsTableBody"></tbody>
             </table>
+            <div id="projectProbeGlobalHint" style="display:none; padding:10px 16px; font-size:11px; color:var(--text-muted);">
+              探测目标当前由「系统设置 → 延迟测试」统一控制；取消那里的「统一覆盖所有项目」即可恢复按项目配置。
+            </div>
           </div>
         </div>
 
@@ -1072,6 +1075,7 @@
               <span>订阅 <strong id="subscriptionTotalCount">0</strong></span>
               <span>有效节点 <strong id="subscriptionActiveNodes">0</strong></span>
               <span>下次刷新 <strong id="subscriptionNextRefresh">-</strong></span>
+              <span>上次更新 <strong id="subscriptionFetchStats">-</strong></span>
               <span>显示 <strong id="subscriptionVisibleCount">0</strong></span>
             </div>
           </div>
@@ -1198,6 +1202,54 @@
               <div class="settings-form-grid" style="padding:16px;">
                 <div class="form-group"><label>监听地址</label><input type="text" id="settingMgmtListen" class="setting-input" placeholder="0.0.0.0:8080" /></div>
                 <div class="form-group"><label>访问密码</label><input type="password" id="settingMgmtPassword" class="setting-input" /></div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">代理设置 (订阅更新回退)</div></div>
+              <div style="padding: 16px;">
+                <div class="settings-form-grid">
+                  <div class="form-group">
+                    <label>代理地址</label>
+                    <input type="text" id="settingProxyURL" class="setting-input" placeholder="http://127.0.0.1:7890 或 socks5://user:pass@host:port" autocomplete="off" />
+                  </div>
+                  <div class="form-group" style="justify-content:flex-end;">
+                    <label>&nbsp;</label>
+                    <div class="checkbox-row"><input type="checkbox" id="settingProxyEnabled" /><label for="settingProxyEnabled">启用代理</label></div>
+                  </div>
+                  <div class="form-group">
+                    <label>连通性测试目标</label>
+                    <input type="text" id="settingProxyTestTarget" class="setting-input" placeholder="https://www.google.com/generate_204" autocomplete="off" />
+                  </div>
+                </div>
+                <div style="display:flex; align-items:center; gap:12px; margin-top:12px; flex-wrap:wrap;">
+                  <button type="button" class="btn btn-sm" id="proxyTestBtn" onclick="testSystemProxy()">测试连通性</button>
+                  <span id="proxyTestResult" style="font-size:12px; color:var(--text-muted);"></span>
+                </div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">
+                  更新订阅时先按当前规则直连；直连失败后先走项目自身的代理入口，仍失败再走此代理。
+                  仅在没有项目代理可用时（例如全局目录）才会直接使用此代理。保存后立即生效，无需重启。
+                </div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">延迟测试 (节点探测目标)</div></div>
+              <div style="padding: 16px;">
+                <div class="settings-form-grid">
+                  <div class="form-group">
+                    <label>延迟测试链接</label>
+                    <input type="text" id="settingProbeTarget" class="setting-input" placeholder="https://www.google.com/generate_204" autocomplete="off" />
+                  </div>
+                  <div class="form-group" style="justify-content:flex-end;">
+                    <label>&nbsp;</label>
+                    <div class="checkbox-row"><input type="checkbox" id="settingProbeOverride" /><label for="settingProbeOverride">统一覆盖所有项目</label></div>
+                  </div>
+                </div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">
+                  勾选后所有项目（含全局目录）都用这个链接做延迟与连通性探测，项目管理页的「探测目标」将不再单独生效；
+                  取消勾选则各项目恢复使用自己的 probe.target。保存后立即生效，无需重启。
+                </div>
               </div>
             </div>
 
@@ -1335,7 +1387,7 @@
                 <!-- Populated dynamically -->
               </div>
             </div>
-            <em id="subscriptionProjectHint" style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;">选中的项目将使用该订阅</em>
+            <em id="subscriptionProjectHint" style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;">仅列出已启动的项目；选中的项目将使用该订阅</em>
           </div>
         </div>
         <div class="modal-footer">
@@ -1359,7 +1411,7 @@
         <div class="checkbox-grid" id="batchApplyProjectCheckboxes" style="max-height:300px; overflow-y:auto; border:1px solid var(--border); padding:8px; border-radius:4px;">
           <!-- Populated dynamically -->
         </div>
-        <em style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;">选中的项目将使用所有选中的订阅</em>
+        <em style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;">仅列出已启动的项目；选中的项目将使用所有选中的订阅</em>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn" onclick="document.getElementById('batchApplyModalOverlay').classList.remove('show')">取消</button>
@@ -2080,13 +2132,23 @@
       const panel = document.getElementById('projectProbeSettingsPanel');
       if (panel) panel.style.display = currentProject() ? 'block' : 'none';
       const projects = currentProject() ? [currentProject()] : [];
+      const globalHint = document.getElementById('projectProbeGlobalHint');
+      if (globalHint) {
+        globalHint.style.display = projects.some(item => projectScheduleSettings(item).probe.globalOverride === true)
+          ? 'block' : 'none';
+      }
       tbody.innerHTML = projects.map(project => {
         const probe = projectScheduleSettings(project).probe;
         const projectID = escapeAttrJs(project.id);
         const inputID = escapeHtml(project.id);
+        // 系统设置里的全局延迟链接生效时，这个输入框改了也会被覆盖，直接禁用并说明原因。
+        const lockedByGlobal = probe.globalOverride === true;
+        const targetAttrs = lockedByGlobal
+          ? 'disabled title="当前由系统设置的全局延迟测试链接统一控制"'
+          : '';
         return `<tr>
           <td class="project-schedule-name">${escapeHtml(project.name)}</td>
-          <td><input class="setting-input schedule-target" id="probeTarget-${inputID}" type="text" value="${escapeHtml(probe.target)}" /></td>
+          <td><input class="setting-input schedule-target" id="probeTarget-${inputID}" type="text" value="${escapeHtml(probe.target)}" ${targetAttrs} /></td>
           <td><input class="setting-input schedule-duration" id="probeInterval-${inputID}" type="text" value="${escapeHtml(probe.interval)}" placeholder="3h" /></td>
           <td><input class="setting-input schedule-duration" id="probeTimeout-${inputID}" type="text" value="${escapeHtml(probe.timeout)}" placeholder="110s" /></td>
           <td><input class="setting-input schedule-number" id="probeConcurrency-${inputID}" type="number" min="1" max="1024" value="${Number(probe.concurrency) || 32}" /></td>
@@ -2303,10 +2365,11 @@
       const subscription = settings.subscription_refresh || {};
       return {
         probe: {
-          target: probe.target || 'http://cp.cloudflare.com/generate_204',
+          target: probe.target || 'https://www.google.com/generate_204',
           interval: probe.interval || '1h0m0s',
           timeout: probe.timeout || '1m50s',
-          concurrency: Number(probe.concurrency) || 32
+          concurrency: Number(probe.concurrency) || 32,
+          globalOverride: probe.global_override === true
         },
         subscription_refresh: {
           enabled: project ? subscription.enabled !== false : true,
@@ -4112,7 +4175,28 @@
       }
       document.getElementById('subscriptionActiveNodes').textContent = probed > 0 ? `${valid} / ${total}` : String(total);
       document.getElementById('subscriptionNextRefresh').textContent = globalView ? '-' : (data.enabled ? formatDateTime(data.next_refresh) : '-');
+      updateSubscriptionFetchStats(data, globalView);
       renderSubscriptions();
+    }
+
+    // updateSubscriptionFetchStats shows how the latest refresh obtained each
+    // subscription: direct, through a proxy fallback, or not at all.
+    function updateSubscriptionFetchStats(data, globalView) {
+      const el = document.getElementById('subscriptionFetchStats');
+      if (!el) return;
+      const direct = Number(data.last_fetch_direct) || 0;
+      const viaProxy = Number(data.last_fetch_proxy) || 0;
+      const failed = Number(data.last_fetch_failed) || 0;
+      if (globalView || direct + viaProxy + failed === 0) { el.textContent = '-'; return; }
+      el.textContent = `直连 ${direct} · 代理 ${viaProxy} · 失败 ${failed}`;
+      el.title = '最近一次更新中，各订阅分别通过直连 / 代理回退 / 失败获得结果的数量';
+    }
+
+    function subscriptionFetchChannelLabel(channel) {
+      if (channel === 'project_proxy') return '项目代理';
+      if (channel === 'system_proxy') return '系统代理';
+      if (channel === 'direct') return '直连';
+      return '';
     }
 
     function clearCurrentProjectSubscriptions() {
@@ -4121,6 +4205,8 @@
       document.getElementById('subscriptionTotalCount').textContent = '0';
       document.getElementById('subscriptionActiveNodes').textContent = '0';
       document.getElementById('subscriptionNextRefresh').textContent = '-';
+      const statsEl = document.getElementById('subscriptionFetchStats');
+      if (statsEl) statsEl.textContent = '-';
       renderSubscriptions();
     }
 
@@ -4216,10 +4302,16 @@
         const usedByProjects = (item.used_by_projects || []).filter(Boolean);
         const usedByText = usedByProjects.length ? usedByProjects.join('、') : '-';
         const statusTitle = item.last_error || (item.included ? '节点已加入节点池' : '节点未加入节点池');
+        // Show how the last successful update was obtained, so an operator can
+        // see at a glance that a subscription only works through the fallback.
+        const channelLabel = subscriptionFetchChannelLabel(item.fetch_channel);
+        const channelBadge = channelLabel
+          ? `<span class="badge badge-neutral" style="margin-left:6px;" title="最近一次成功更新使用的通道">${channelLabel}</span>`
+          : '';
         const checked = selectedSubscriptionURLs.has(String(item.url)) ? ' checked' : '';
         return `<tr>
           <td><input type="checkbox" class="subscription-checkbox" data-url="${escapeHtml(item.url)}" onchange="updateSubscriptionSelection()"${checked} /></td>
-          <td><span class="badge ${badge}" title="${escapeHtml(statusTitle)}">${label}</span></td>
+          <td><span class="badge ${badge}" title="${escapeHtml(statusTitle)}">${label}</span>${channelBadge}</td>
           <td><div class="cell-trunc" style="max-width:300px;font-weight:500" title="${escapeHtml(item.url)}">${escapeHtml(item.name || item.url)}</div><div class="cell-trunc tt-mono" style="max-width:300px;font-size:11px;color:var(--text-muted)" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</div></td>
           ${globalView ? `<td><div class="cell-trunc" style="max-width:220px" title="${escapeHtml(usedByText)}">${escapeHtml(usedByText)}</div></td>` : ''}
           <td class="tt-mono">${renderSubscriptionNodeCount(item)}</td>
@@ -4269,37 +4361,75 @@
       document.getElementById('subscriptionModalOverlay').classList.add('show');
     }
 
+    // 项目选择框只列出已启动（running）的项目：停止的项目拉不到订阅，
+    // 勾选它只会留下一个永远不会生效的关联。
+    function selectableProjects() {
+      const projects = Array.isArray(projectsCache) ? projectsCache : [];
+      return projects.filter(project => project.status === 'running');
+    }
+
+    function projectPickerEmptyHint() {
+      const projects = Array.isArray(projectsCache) ? projectsCache : [];
+      return projects.length ? '暂无已启动的项目，请先在项目管理中启动' : '暂无项目';
+    }
+
+    // used_by_projects 里存的是项目名（名称为空时才是 ID），这里换回项目 ID，
+    // 用来判断某个项目是否已经关联了该订阅。
+    function projectIdsUsedBySubscription(rawURL) {
+      const subscription = subscriptionsCache.find(s => s.url === rawURL);
+      const used = (subscription ? (subscription.used_by_projects || []) : []).filter(Boolean);
+      const all = Array.isArray(projectsCache) ? projectsCache : [];
+      const ids = [];
+      used.forEach(value => {
+        const lowered = value.toLowerCase();
+        const match = all.find(project =>
+          project.id === value ||
+          (project.name || '') === value ||
+          project.id.toLowerCase() === lowered ||
+          (project.name || '').toLowerCase() === lowered
+        );
+        if (match && !ids.includes(match.id)) ids.push(match.id);
+      });
+      return ids;
+    }
+
     function populateSubscriptionProjectCheckboxes(rawURL='') {
       const grid = document.getElementById('subscriptionProjectCheckboxes');
-      const projects = Array.isArray(projectsCache) ? projectsCache : [];
+      const projects = selectableProjects();
       if (!projects.length) {
-        grid.innerHTML = '<em style="font-size:12px;color:var(--text-muted);">暂无项目</em>';
+        grid.innerHTML = `<em style="font-size:12px;color:var(--text-muted);">${projectPickerEmptyHint()}</em>`;
         return;
       }
 
-      // 找到该订阅已关联的项目
-      const subscription = subscriptionsCache.find(s => s.url === rawURL);
-      const usedByProjects = subscription ? (subscription.used_by_projects || []) : [];
+      // 已关联该订阅的项目（可能包含未启动、因而不在选择框里的项目）
+      const usedProjectIds = projectIdsUsedBySubscription(rawURL);
 
       grid.innerHTML = projects.map((project, index) => {
         const id = `subproj-${index}`;
         const name = project.name || project.id;
         // 在项目视图下自动选中当前项目，在编辑时选中已使用该订阅的项目
         const isCurrentProject = project.id === currentProjectID;
-        // used_by_projects 可能包含项目ID或项目名称，需要同时匹配
-        const isUsedByProject = usedByProjects.some(p =>
-          p === project.id ||
-          p === project.name ||
-          p.toLowerCase() === project.id.toLowerCase() ||
-          (project.name && p.toLowerCase() === project.name.toLowerCase())
-        );
-        const shouldCheck = (isCurrentProject && !rawURL) || isUsedByProject;
+        const shouldCheck = (isCurrentProject && !rawURL) || usedProjectIds.includes(project.id);
 
         return `<div class="checkbox-row" title="${escapeHtml(project.id)}">
           <input type="checkbox" id="${id}" value="${escapeHtml(project.id)}" ${shouldCheck ? 'checked' : ''} />
           <label for="${id}">${escapeHtml(name)}</label>
         </div>`;
       }).join('');
+    }
+
+    // 提交给服务端的项目列表 = 选择框里勾选的已启动项目 + 因未启动而不在选择框里、
+    // 但本来就关联着该订阅的项目。服务端把「未列出」的项目视为 exclude，少了后半段
+    // 就会让一次编辑把未启动项目的关联静默取消。
+    function selectedSubscriptionProjectIds(rawURL) {
+      const selected = Array.from(
+        document.querySelectorAll('#subscriptionProjectCheckboxes input[type="checkbox"]')
+      ).filter(checkbox => checkbox.checked).map(checkbox => checkbox.value);
+      const selectable = new Set(selectableProjects().map(project => project.id));
+      projectIdsUsedBySubscription(rawURL)
+        .filter(projectId => !selectable.has(projectId))
+        .forEach(projectId => { if (!selected.includes(projectId)) selected.push(projectId); });
+      return selected;
     }
 
     function toggleSubscriptionProjectPicker() {
@@ -4334,9 +4464,7 @@
       const globalView = !currentProjectID;
       const section = document.getElementById('subscriptionProjectSection');
       if (section.style.display !== 'none') {
-        payload.projects = Array.from(
-          document.querySelectorAll('#subscriptionProjectCheckboxes input[type="checkbox"]')
-        ).filter(checkbox => checkbox.checked).map(checkbox => checkbox.value);
+        payload.projects = selectedSubscriptionProjectIds(originalURL || url);
       }
 
       try {
@@ -4974,9 +5102,18 @@
         if (!response.ok) throw new Error(`加载系统设置失败: HTTP ${response.status}`);
         const system = await response.json();
         const management = system.management || {};
+        const proxy = system.proxy || {};
+        const latencyTest = system.latency_test || {};
         const logCfg = system.log || {};
         document.getElementById('settingMgmtListen').value = management.listen || '';
         document.getElementById('settingMgmtPassword').value = management.password || '';
+        document.getElementById('settingProxyURL').value = proxy.url || '';
+        document.getElementById('settingProxyEnabled').checked = !!proxy.enabled;
+        document.getElementById('settingProxyTestTarget').value = proxy.test_target || '';
+        document.getElementById('settingProbeTarget').value = latencyTest.target || '';
+        document.getElementById('settingProbeOverride').checked = latencyTest.enabled !== false;
+        const proxyResultEl = document.getElementById('proxyTestResult');
+        if (proxyResultEl) { proxyResultEl.textContent = ''; proxyResultEl.style.color = 'var(--text-muted)'; }
         document.getElementById('settingLogOutput').value = logCfg.output || 'stdout';
         document.getElementById('settingLogMaxSize').value = logCfg.max_size || 50;
         document.getElementById('settingLogMaxBackups').value = logCfg.max_backups || 3;
@@ -4993,6 +5130,11 @@
       return JSON.stringify({
         mgmt_listen: document.getElementById('settingMgmtListen').value,
         mgmt_password: document.getElementById('settingMgmtPassword').value,
+        proxy_enabled: document.getElementById('settingProxyEnabled').checked,
+        proxy_url: document.getElementById('settingProxyURL').value,
+        proxy_test_target: document.getElementById('settingProxyTestTarget').value,
+        probe_override: document.getElementById('settingProbeOverride').checked,
+        probe_target: document.getElementById('settingProbeTarget').value,
         log_output: document.getElementById('settingLogOutput').value,
         log_max_size: document.getElementById('settingLogMaxSize').value,
         log_max_backups: document.getElementById('settingLogMaxBackups').value,
@@ -5003,6 +5145,41 @@
     function toggleLogFileSettings() {
       const output = document.getElementById('settingLogOutput').value;
       document.getElementById('logFileSettings').style.display = output === 'file' ? 'grid' : 'none';
+    }
+
+    // testSystemProxy verifies the address currently typed in the field, so an
+    // operator can validate a proxy before saving it.
+    async function testSystemProxy() {
+      const btn = document.getElementById('proxyTestBtn');
+      const resultEl = document.getElementById('proxyTestResult');
+      const url = document.getElementById('settingProxyURL').value.trim();
+      if (!url) { showToast('请先填写代理地址', 'error'); return; }
+      const originalText = btn.textContent;
+      btn.disabled = true; btn.textContent = '测试中...';
+      resultEl.textContent = ''; resultEl.style.color = 'var(--text-muted)';
+      try {
+        const body = {url};
+        const target = document.getElementById('settingProxyTestTarget').value.trim();
+        if (target) body.target = target;
+        const response = await nativeFetch('/api/system/proxy/test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        if (data.ok) {
+          resultEl.style.color = 'var(--success)';
+          resultEl.textContent = `✅ 连通正常 · ${data.latency_ms} ms · HTTP ${data.status_code}`;
+        } else {
+          resultEl.style.color = 'var(--error)';
+          resultEl.textContent = `❌ 连通失败：${data.error || '未知错误'}`;
+        }
+      } catch (error) {
+        resultEl.style.color = 'var(--error)';
+        resultEl.textContent = `❌ ${error.message}`;
+      }
+      btn.disabled = false; btn.textContent = originalText;
     }
 
     async function handleSettingsSave(e) {
@@ -5019,6 +5196,15 @@
         management: {
           listen: document.getElementById('settingMgmtListen').value.trim(),
           password: document.getElementById('settingMgmtPassword').value,
+        },
+        proxy: {
+          enabled: document.getElementById('settingProxyEnabled').checked,
+          url: document.getElementById('settingProxyURL').value.trim(),
+          test_target: document.getElementById('settingProxyTestTarget').value.trim(),
+        },
+        latency_test: {
+          enabled: document.getElementById('settingProbeOverride').checked,
+          target: document.getElementById('settingProbeTarget').value.trim(),
         },
         log: {
           output: document.getElementById('settingLogOutput').value,
@@ -5576,9 +5762,9 @@
 
     function populateBatchApplyProjects() {
       const grid = document.getElementById('batchApplyProjectCheckboxes');
-      const projects = Array.isArray(projectsCache) ? projectsCache : [];
+      const projects = selectableProjects();
       if (!projects.length) {
-        grid.innerHTML = '<em style="font-size:12px;color:var(--text-muted);">暂无项目</em>';
+        grid.innerHTML = `<em style="font-size:12px;color:var(--text-muted);">${projectPickerEmptyHint()}</em>`;
         return;
       }
 

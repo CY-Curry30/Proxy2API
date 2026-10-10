@@ -82,6 +82,10 @@ type ProjectProbeSettings struct {
 	Interval    string `json:"interval"`
 	Timeout     string `json:"timeout"`
 	Concurrency int    `json:"concurrency"`
+	// GlobalOverride reports that the workspace-wide latency target currently
+	// overrides this project's probe.target, so the panel can disable the input
+	// instead of letting an edit be silently replaced on the next load.
+	GlobalOverride bool `json:"global_override,omitempty"`
 }
 
 type ProjectSubscriptionSettings struct {
@@ -152,7 +156,13 @@ type TrafficHistory interface {
 
 type SystemSettings struct {
 	Management config.ControlManagementConfig `json:"management"`
-	Log        config.LogConfig               `json:"log"`
+	// Proxy is the workspace-wide upstream proxy used by the subscription
+	// fallback once a direct update and the project's own proxy have failed.
+	Proxy config.SystemProxyConfig `json:"proxy"`
+	// LatencyTest is the workspace-wide latency / health-check destination. While
+	// enabled it overrides every project's probe.target.
+	LatencyTest config.LatencyTestConfig `json:"latency_test"`
+	Log         config.LogConfig         `json:"log"`
 }
 
 // ProjectBinding contains the per-project dependencies used by the existing

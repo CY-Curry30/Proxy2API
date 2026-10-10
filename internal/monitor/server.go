@@ -106,6 +106,12 @@ type SubscriptionStatus struct {
 	RefreshCount  int       `json:"refresh_count"`
 	IsRefreshing  bool      `json:"is_refreshing"`
 	NodesModified bool      `json:"nodes_modified"` // True if nodes.txt was modified since last refresh
+	// Result of the most recent refresh pass, split by how each subscription
+	// was obtained. The counters stay from the previous pass when a refresh
+	// contacts no subscription at all.
+	LastFetchDirect int `json:"last_fetch_direct"`
+	LastFetchProxy  int `json:"last_fetch_proxy"`
+	LastFetchFailed int `json:"last_fetch_failed"`
 }
 
 // Subscription lifecycle statuses set by the traffic/expiry rule.
@@ -176,6 +182,10 @@ type SubscriptionInfo struct {
 	GlobalDisabled bool      `json:"global_disabled,omitempty"`
 	LastRefresh    time.Time `json:"last_refresh"`
 	LastError      string    `json:"last_error,omitempty"`
+	// FetchChannel records how the latest successful update was obtained:
+	// "direct", "project_proxy" or "system_proxy". It is empty while the last
+	// update failed or before the first update.
+	FetchChannel string `json:"fetch_channel,omitempty"`
 }
 
 // Server exposes HTTP endpoints for monitoring.
@@ -261,6 +271,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/projects/", s.withAuth(s.handleProjectRoute))
 	mux.HandleFunc("/api/dashboard/global", s.withAuth(s.handleGlobalDashboard))
 	mux.HandleFunc("/api/system/settings", s.withAuth(s.handleSystemSettings))
+	mux.HandleFunc("/api/system/proxy/test", s.withAuth(s.handleSystemProxyTest))
 	mux.HandleFunc("/api/system/ports", s.withAuth(s.handleSystemPorts))
 	mux.HandleFunc("/api/settings", s.withAuth(s.withDefaultProject((*Server).handleSettings)))
 	mux.HandleFunc("/api/nodes", s.withAuth(s.withDefaultProject((*Server).handleNodes)))
@@ -934,6 +945,17 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 				"listen":   settings.Management.Listen,
 				"password": settings.Management.Password,
 			},
+			"proxy": map[string]any{
+				"enabled":     settings.Proxy.Enabled,
+				"url":         settings.Proxy.URL,
+				"test_target": settings.Proxy.EffectiveTestTarget(),
+			},
+			"latency_test": map[string]any{
+				"enabled": settings.LatencyTest.EnabledOrDefault(),
+				// The stored value, not the effective one: the panel keeps it in
+				// the input so the switch can be turned back on without retyping.
+				"target": settings.LatencyTest.Target,
+			},
 			"log": settings.Log,
 		})
 	case http.MethodPut:
@@ -945,6 +967,7 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 		}, (*Server).handleSystemSettings) {
 			return
 		}
+		previous := s.projects.SystemSettings()
 		var settings SystemSettings
 		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -956,10 +979,91 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, map[string]any{"message": "系统设置已保存", "need_restart": true})
+		// The subscription proxy is read on every refresh, so it applies
+		// immediately; only the management listener and the log sink still
+		// require a restart.
+		writeJSON(w, map[string]any{"message": "系统设置已保存", "need_restart": systemSettingsNeedRestart(previous, settings)})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+// systemSettingsNeedRestart reports whether the saved settings only take effect
+// after a process restart. The subscription proxy and the latency target are
+// applied to the live runtimes, so they never require one. Fields the client
+// leaves out are treated as unchanged rather than as an empty value.
+func systemSettingsNeedRestart(previous, next SystemSettings) bool {
+	if previous.Management.Listen != strings.TrimSpace(next.Management.Listen) {
+		return true
+	}
+	if previous.Management.Password != next.Management.Password {
+		return true
+	}
+	if next.Management.Enabled != nil && !equalOptionalBool(previous.Management.Enabled, next.Management.Enabled) {
+		return true
+	}
+	if next.Log.Output != previous.Log.Output {
+		return true
+	}
+	if next.Log.File != "" && next.Log.File != previous.Log.File {
+		return true
+	}
+	if next.Log.MaxSize > 0 && next.Log.MaxSize != previous.Log.MaxSize {
+		return true
+	}
+	if next.Log.MaxBackups >= 0 && next.Log.MaxBackups != previous.Log.MaxBackups {
+		return true
+	}
+	if next.Log.MaxAge >= 0 && next.Log.MaxAge != previous.Log.MaxAge {
+		return true
+	}
+	return next.Log.Compress != previous.Log.Compress
+}
+
+func equalOptionalBool(left, right *bool) bool {
+	if left == nil || right == nil {
+		// An omitted flag means "keep the current value".
+		return true
+	}
+	return *left == *right
+}
+
+// handleSystemProxyTest dials the system proxy and reports whether it can
+// reach the test target. The body may carry an unsaved address so an operator
+// can verify a proxy before committing it to the system settings.
+func (s *Server) handleSystemProxyTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		URL    string `json:"url"`
+		Target string `json:"target"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "请求格式错误"})
+		return
+	}
+	proxyURL := strings.TrimSpace(req.URL)
+	target := strings.TrimSpace(req.Target)
+	if s.projects != nil {
+		settings := s.projects.SystemSettings()
+		if proxyURL == "" {
+			proxyURL = settings.Proxy.EffectiveURL()
+		}
+		if target == "" {
+			target = settings.Proxy.EffectiveTestTarget()
+		}
+	}
+	if proxyURL == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"error": "未配置代理地址"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	writeJSON(w, config.TestProxyConnectivity(ctx, proxyURL, target, 15*time.Second))
 }
 
 func (s *Server) handleSystemPorts(w http.ResponseWriter, r *http.Request) {
@@ -3800,6 +3904,11 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 		"is_refreshing": status.IsRefreshing,
 		"refresh_error": status.LastError,
 		"refresh_count": status.RefreshCount,
+		// Result of the latest refresh pass, split by how each subscription was
+		// obtained: direct, through a proxy fallback, or failed.
+		"last_fetch_direct": status.LastFetchDirect,
+		"last_fetch_proxy":  status.LastFetchProxy,
+		"last_fetch_failed": status.LastFetchFailed,
 	}
 }
 

@@ -103,10 +103,12 @@ management:
 # 项目健康探测配置
 # ───────────────────────────────────────────────────────────────
 probe:
-  target: http://cp.cloudflare.com/generate_204  # 延迟及连通性探测目标
+  target: https://www.google.com/generate_204   # 延迟及连通性探测目标
   interval: 1h                                   # 自动全量探测间隔
   timeout: 1m50s                                 # 总预算；必须至少 25 秒且为 5 秒的倍数
   concurrency: 32                                # 当前项目的并发探测节点数
+# 注意：projects.yaml（工作区）里的 latency_test 段可以统一覆盖所有项目的探测目标，
+# 系统设置 → 延迟测试 里修改；那里勾选「统一覆盖所有项目」时，本文件的 probe.target 不生效。
 
 # ───────────────────────────────────────────────────────────────
 # DNS 配置（用于节点域名解析，尤其是 VMess）
