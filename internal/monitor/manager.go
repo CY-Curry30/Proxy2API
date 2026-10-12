@@ -368,7 +368,7 @@ func (m *Manager) probeSchedule() (time.Duration, time.Duration) {
 
 // ProbeAttemptTimeout returns the timeout for one primary request or one
 // Trace attempt. The configured per-node budget is split into five equal
-// parts: one primary request plus four Trace attempts.
+// parts: two primary latency requests plus three Trace attempts.
 func (m *Manager) ProbeAttemptTimeout() time.Duration {
 	_, total := m.probeSchedule()
 	if total <= 0 {

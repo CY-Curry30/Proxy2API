@@ -791,6 +791,11 @@ const (
 	probeLocationPath     = "/cdn-cgi/trace"
 	probeTraceMaxRetries  = 3
 	probeTraceMaxAttempts = probeTraceMaxRetries + 1
+
+	// probeConnectivityAttempts is how many times the latency (generate_204)
+	// request is issued per probe. Two attempts smooth transient jitter; the
+	// measured latencies are averaged (see probeConnectivity).
+	probeConnectivityAttempts = 2
 )
 
 // probeLocation obtains exit metadata through the same upstream node using a
@@ -909,7 +914,42 @@ func watchProbeConnection(ctx context.Context, conn net.Conn) func() {
 
 // probeConnectivity performs the configurable generate_204 request. Its child
 // context caps the complete attempt, including dialing, TLS and response read.
+// The request runs up to probeConnectivityAttempts times to smooth transient
+// jitter: latencies are averaged when more than one attempt succeeds, and the
+// sole successful measurement is used when exactly one succeeds. Only when
+// every attempt fails is the error returned with a zero latency.
 func (p *poolOutbound) probeConnectivity(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool, requestTimeout time.Duration) (time.Duration, error) {
+	var (
+		attemptErrs []error
+		latencies   []time.Duration
+	)
+	for attempt := 0; attempt < probeConnectivityAttempts; attempt++ {
+		if attempt > 0 && ctx.Err() != nil {
+			// The overall budget is exhausted; keep the results already gathered.
+			break
+		}
+		duration, err := p.probeConnectivityOnce(ctx, member, destination, host, path, useTLS, tlsInsecure, requestTimeout)
+		if err != nil {
+			attemptErrs = append(attemptErrs, err)
+			continue
+		}
+		latencies = append(latencies, duration)
+	}
+	if len(latencies) == 0 {
+		if len(attemptErrs) == 1 {
+			return 0, attemptErrs[0]
+		}
+		return 0, errors.Join(attemptErrs...)
+	}
+	var total time.Duration
+	for _, latency := range latencies {
+		total += latency
+	}
+	return total / time.Duration(len(latencies)), nil
+}
+
+// probeConnectivityOnce runs a single generate_204 request and returns its TTFB.
+func (p *poolOutbound) probeConnectivityOnce(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool, requestTimeout time.Duration) (time.Duration, error) {
 	start := time.Now()
 	rawConn, err := dialProbeTarget(ctx, member, destination)
 	if err != nil {
@@ -943,7 +983,7 @@ func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, des
 	result := monitor.ProbeResult{}
 	var probeErrors []error
 
-	requestCtx, requestCancel := context.WithTimeout(ctx, attemptTimeout)
+	requestCtx, requestCancel := context.WithTimeout(ctx, time.Duration(probeConnectivityAttempts)*attemptTimeout)
 	duration, connectivityErr := p.probeConnectivity(requestCtx, member, destination, host, path, useTLS, tlsInsecure, attemptTimeout)
 	requestCancel()
 	if connectivityErr != nil {
