@@ -503,6 +503,8 @@ func (r *Registry) UpdateSystemSettings(ctx context.Context, settings monitor.Sy
 
 // StartAutostartProjects starts projects deterministically. A failed project is
 // recorded but does not prevent the control plane or other projects starting.
+// Projects the operator left stopped are skipped so a restart reproduces the
+// previous runtime state.
 func (r *Registry) StartAutostartProjects() {
 	r.mu.RLock()
 	ids := r.workspace.SortedProjectIDs()
@@ -513,7 +515,7 @@ func (r *Registry) StartAutostartProjects() {
 	r.mu.RUnlock()
 	for _, id := range ids {
 		spec := specs[id]
-		if !spec.Enabled || !spec.Autostart {
+		if !spec.ShouldAutostart() {
 			continue
 		}
 		if err := r.StartProject(r.parentCtx, id); err != nil {
@@ -1119,10 +1121,12 @@ func (r *Registry) UpdateProject(ctx context.Context, id string, request monitor
 			if err := runtime.Stop(); err != nil {
 				return r.projectSummary(id, spec, runtime), err
 			}
+			r.persistProjectRunning(id, false)
 		} else if spec.Autostart {
 			if err := runtime.Start(); err != nil {
 				return r.projectSummary(id, spec, runtime), err
 			}
+			r.persistProjectRunning(id, true)
 		}
 	} else if request.Settings != nil {
 		status, _, _ := runtime.Status()
@@ -1340,7 +1344,11 @@ func (r *Registry) StartProject(ctx context.Context, id string) error {
 		default:
 		}
 	}
-	return runtime.Start()
+	if err := runtime.Start(); err != nil {
+		return err
+	}
+	r.persistProjectRunning(id, true)
+	return nil
 }
 
 func (r *Registry) StopProject(ctx context.Context, id string) error {
@@ -1357,7 +1365,33 @@ func (r *Registry) StopProject(ctx context.Context, id string) error {
 		default:
 		}
 	}
-	return runtime.Stop()
+	if err := runtime.Stop(); err != nil {
+		return err
+	}
+	r.persistProjectRunning(id, false)
+	return nil
+}
+
+// persistProjectRunning records an explicit start/stop in projects.yaml so the
+// project comes back in the same state after a restart. The check compares the
+// effective value (an unset field means running), so autostarting a project that
+// predates the field never rewrites the workspace file: only a real state change
+// is persisted.
+func (r *Registry) persistProjectRunning(id string, running bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	spec, ok := r.workspace.Projects[id]
+	if !ok || spec.DesiredRunning() == running || !r.workspace.Persisted() {
+		return
+	}
+	previous := spec
+	value := running
+	spec.Running = &value
+	r.workspace.Projects[id] = spec
+	if err := r.workspace.Save(); err != nil {
+		r.workspace.Projects[id] = previous
+		log.Printf("[项目:%s] 保存运行状态失败: %v", id, err)
+	}
 }
 
 func (r *Registry) ReloadProject(ctx context.Context, id string) error {

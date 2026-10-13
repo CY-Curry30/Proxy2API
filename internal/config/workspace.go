@@ -51,11 +51,29 @@ func (c LatencyTestConfig) EffectiveTarget() string {
 
 // ProjectSpec is the process-wide catalog entry for one project runtime.
 type ProjectSpec struct {
-	Name         string `yaml:"name" json:"name"`
-	Enabled      bool   `yaml:"enabled" json:"enabled"`
-	Autostart    bool   `yaml:"autostart" json:"autostart"`
+	Name      string `yaml:"name" json:"name"`
+	Enabled   bool   `yaml:"enabled" json:"enabled"`
+	Autostart bool   `yaml:"autostart" json:"autostart"`
+	// Running remembers the operator's last explicit start/stop decision so a
+	// project that was stopped stays stopped across restarts. Nil means the
+	// project predates this field and is treated as running.
+	Running      *bool  `yaml:"running,omitempty" json:"running,omitempty"`
 	Config       string `yaml:"config" json:"-"`
 	ClashAPIPort uint16 `yaml:"clash_api_port,omitempty" json:"-"`
+}
+
+// DesiredRunning reports whether the last explicit start/stop left the project
+// running. A missing value is treated as running so the boot behaviour of
+// projects written before this field existed does not change.
+func (s ProjectSpec) DesiredRunning() bool {
+	return s.Running == nil || *s.Running
+}
+
+// ShouldAutostart reports whether the project should come up with the process:
+// it must be enabled, opted into autostart, and not left stopped by the
+// operator.
+func (s ProjectSpec) ShouldAutostart() bool {
+	return s.Enabled && s.Autostart && s.DesiredRunning()
 }
 
 // Workspace describes the global control plane and project catalog. Shared

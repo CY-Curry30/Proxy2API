@@ -1940,12 +1940,14 @@
       const select = document.getElementById('projectSelect');
       select.replaceChildren();
       select.add(new Option('全局', ''));
-      projectsCache.forEach(project => {
+      // 已停止的项目没有实时数据，不作为可切换的作用域出现在下拉框里。
+      const runningProjects = projectsCache.filter(project => project.status === 'running');
+      runningProjects.forEach(project => {
         const option = new Option(project.name, project.id);
         select.add(option);
       });
-      select.value = currentProjectID;
-      select.disabled = projectsCache.length === 0;
+      select.value = runningProjects.some(project => project.id === currentProjectID) ? currentProjectID : '';
+      select.disabled = runningProjects.length === 0;
       syncRuntimeControls();
     }
 
@@ -2085,13 +2087,14 @@
       projectsCache = data.items || [];
       projectPortHintsCache = data.port_hints || {occupied: [], recommended: {}};
       defaultProjectID = data.default_project || '';
-      if ((!projectScopeInitialized || currentProjectID) && !projectsCache.some(project => project.id === currentProjectID)) {
-        currentProjectID = defaultProjectID || projectsCache[0]?.id || '';
-        if (currentProjectID) {
-          localStorage.setItem('proxy2apiProject', currentProjectID);
-        } else {
-          localStorage.setItem('proxy2apiProject', '__all__');
-        }
+      // 只有运行中的项目能作为当前作用域：项目被停止（或删除）后回落到默认项目
+      // （仅当它仍在运行），否则回到全局。
+      const runningProjects = projectsCache.filter(project => project.status === 'running');
+      const scopeSelectable = runningProjects.some(project => project.id === currentProjectID);
+      if ((!projectScopeInitialized || currentProjectID) && !scopeSelectable) {
+        const fallback = runningProjects.find(project => project.id === defaultProjectID);
+        currentProjectID = fallback ? fallback.id : '';
+        localStorage.setItem('proxy2apiProject', currentProjectID || '__all__');
       }
       projectScopeInitialized = true;
       renderProjectSelector();
@@ -2327,6 +2330,13 @@
 
     async function switchProject(projectID) {
       if (projectID === currentProjectID) {
+        renderProjectManagement();
+        return;
+      }
+      const target = projectsCache.find(item => item.id === projectID);
+      if (projectID && (!target || target.status !== 'running')) {
+        showToast('已停止的项目不能作为当前项目，请先启动', 'error');
+        renderProjectSelector();
         renderProjectManagement();
         return;
       }
@@ -2608,14 +2618,16 @@
       const project = projectsCache.find(item => item.id === projectID);
       if (!project) return;
       const action = project.status === 'running' ? 'stop' : 'start';
+      // loadProjects() 会把「已停止的当前项目」回落到全局，所以先记住原来的作用域。
+      const wasCurrent = project.id === currentProjectID;
       try {
         const response = await nativeFetch(`/api/projects/${encodeURIComponent(project.id)}/${action}`, {method:'POST'});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || (action === 'start' ? '启动项目失败' : '停止项目失败'));
         await loadProjects();
-        if (project.id === currentProjectID) {
+        if (wasCurrent) {
           resetProjectView();
-          if (action === 'start') await refresh();
+          await refresh();
         }
         renderProjectManagement();
         showToast(action === 'start' ? '项目已启动' : '项目已停止');
