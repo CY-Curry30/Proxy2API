@@ -1631,6 +1631,8 @@ func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
 			"last_success":       snap.LastSuccess,
 			"last_failure":       snap.LastFailure,
 			"last_error":         snap.LastError,
+			"last_trace_at":      snap.LastTraceAt,
+			"last_trace_error":   snap.LastTraceError,
 			"blacklisted":        snap.Blacklisted,
 			"timeline":           snap.Timeline,
 		})
@@ -1662,7 +1664,9 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		action = parts[1]
 	}
-	if s.catalogOnly && action != "probe" {
+	// 全局目录只允许「探测」和「取出口位置」这两个只读诊断动作，
+	// 它们不改动节点的运行状态。
+	if s.catalogOnly && action != "probe" && action != "trace" {
 		w.WriteHeader(http.StatusConflict)
 		writeJSON(w, map[string]any{"error": "全局目录只允许探测节点，不能修改节点运行状态"})
 		return
@@ -1705,6 +1709,37 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			payload["message"] = "探测未通过"
+			payload["error"] = err.Error()
+			w.WriteHeader(http.StatusBadRequest)
+		}
+		writeJSON(w, payload)
+	case "trace":
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if s.enqueueAsyncMutation(w, r, TaskSpec{
+			Kind:              "node.trace",
+			Message:           "正在获取节点出口位置 " + tag,
+			SkipWorkspaceLock: true,
+		}, (*Server).handleNodeAction) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), s.currentProbeTimeout())
+		defer cancel()
+		result, err := s.mgr.TraceNode(ctx, tag)
+		payload := map[string]any{
+			"tag":            tag,
+			"message":        "出口位置已更新",
+			"trace_ok":       result.TraceOK,
+			"trace_ip":       result.IP,
+			"trace_region":   result.Region,
+			"trace_country":  result.Country,
+			"trace_error":    result.TraceError,
+			"trace_attempts": result.TraceAttempts,
+		}
+		if err != nil {
+			payload["message"] = "出口位置获取失败"
 			payload["error"] = err.Error()
 			w.WriteHeader(http.StatusBadRequest)
 		}

@@ -3769,11 +3769,18 @@
           : nodeDisplayName;
 
         const checked = selectedNodeTags.has(String(n.tag)) ? ' checked' : '';
+        // 出口位置由 Trace 单独负责，缺失或失败时用悬停提示说明原因。
+        const locationTitle = [
+          n.ip ? `出口 IP：${n.ip}` : '尚无出口 IP',
+          n.region || n.country ? `地区：${formatRegion(n)}` : '',
+          n.last_trace_at ? `位置更新时间：${formatDateTime(n.last_trace_at)}` : '',
+          n.last_trace_error ? `最近一次 Trace 失败：${n.last_trace_error}` : ''
+        ].filter(Boolean).join('\n');
         return `<tr>
           <td><input type="checkbox" class="node-checkbox" data-tag="${escapeHtml(n.tag)}" onchange="updateBatchSelection()"${checked} /></td>
           <td><span class="badge ${badge}${copyableError ? ' badge-copyable' : ''}" title="${escapeHtml(statusTitle)}"${statusCopyAttrs}>${statusText}</span></td>
-          <td class="tt-mono">${escapeHtml(formatRegion(n))}</td>
-          <td class="tt-mono">${escapeHtml(n.ip || '-')}</td>
+          <td class="tt-mono" title="${escapeHtml(locationTitle)}">${escapeHtml(formatRegion(n))}</td>
+          <td class="tt-mono" title="${escapeHtml(locationTitle)}">${escapeHtml(n.ip || '-')}</td>
           <td>
             <div class="node-name-line">
               <div class="cell-trunc" style="font-weight: 500" title="${escapeHtml(nodeNameTitle)}">${escapeHtml(nodeDisplayName)}</div>
@@ -3793,6 +3800,7 @@
           <td class="tt-mono" style="white-space:nowrap" title="${escapeHtml(formatDateTime(n.last_probed_at))}">${escapeHtml(formatDateTime(n.last_probed_at))}</td>
           <td>
             <button class="btn btn-sm" onclick="probeNode('${escapeAttrJs(n.tag)}')">探测</button>
+            <button class="btn btn-sm" onclick="traceNode('${escapeAttrJs(n.tag)}')" title="只重新获取出口 IP / 地区，不改动状态与延迟">Trace</button>
             ${stickyNodeTag === n.tag
               ? `<button class="btn btn-sm btn-primary" onclick="setStickyNode('')">取消指定</button>`
               : `<button class="btn btn-sm" onclick="setStickyNode('${escapeAttrJs(n.tag)}')" ${currentHealthy && stickyEnabled ? '' : 'disabled'} title="${stickyEnabled ? '指定为粘性代理出口' : '请先启用粘性代理'}">指定</button>`}
@@ -3829,18 +3837,37 @@
       try {
         const r = await fetch(globalScopePath('/api/nodes/'+encodeURIComponent(tag)+'/probe'), {method:'POST'});
         const d = await r.json();
+        // 状态与延迟只看 generate_204；Trace 只补出口位置，失败不算探测失败。
         const details = [];
         if(d.connectivity_ok) {
           details.push(`延迟探测成功：${d.latency_ms}ms`);
         } else {
           details.push(`延迟探测失败：${d.connectivity_error || d.error || '未知错误'}`);
         }
-        if(d.trace_ok) {
-          details.push(`Trace 成功：IP ${d.trace_ip || '-'}，区域 ${d.trace_country || d.trace_region || '-'}`);
-        } else {
-          details.push(`Trace 失败：${d.trace_error || d.error || '未知错误'}`);
+        if(d.trace_attempts > 0) {
+          details.push(d.trace_ok
+            ? `出口位置已更新：IP ${d.trace_ip || '-'}，区域 ${d.trace_country || d.trace_region || '-'}`
+            : `出口位置获取失败：${d.trace_error || '未知错误'}`);
         }
-        showToast(details.join('；'), d.healthy ? undefined : 'error');
+        showToast(details.join('；'), d.connectivity_ok ? undefined : 'error');
+      } catch(e) { showToast(e.message, 'error'); }
+      finally {
+        clearInterval(partialRefreshTimer);
+        refresh();
+      }
+    }
+
+    // 只重新获取出口 IP / 地区：不跑 generate_204，也不影响状态与延迟。
+    async function traceNode(tag) {
+      showToast('正在获取出口位置...');
+      const partialRefreshTimer = setInterval(() => refresh(), 2000);
+      try {
+        const r = await fetch(globalScopePath('/api/nodes/'+encodeURIComponent(tag)+'/trace'), {method:'POST'});
+        const d = await r.json();
+        if(!r.ok || !d.trace_ok) {
+          throw new Error(d.trace_error || d.error || '出口位置获取失败');
+        }
+        showToast(`出口位置已更新：IP ${d.trace_ip || '-'}，区域 ${d.trace_country || d.trace_region || '-'}`);
       } catch(e) { showToast(e.message, 'error'); }
       finally {
         clearInterval(partialRefreshTimer);
@@ -4066,8 +4093,11 @@
                  } else if (d.type === 'complete') {
                    const traceSuccess = Number(d.trace_success) || 0;
                    const traceFailed = Number(d.trace_failed) || 0;
-                   const msg = `探测完成：延迟成功${d.success}，失败${d.failed}；Trace 成功${traceSuccess}，失败${traceFailed}`;
-                   showToast(msg, traceFailed > 0 ? 'error' : 'success');
+                   // Trace 只在节点还缺出口位置时才补测，所以它单独统计且不影响成败判定。
+                   const traceRuns = traceSuccess + traceFailed;
+                   const msg = `探测完成：延迟成功${d.success}，失败${d.failed}`
+                     + (traceRuns > 0 ? `；补测出口位置 ${traceRuns} 个（成功${traceSuccess}，失败${traceFailed}）` : '');
+                   showToast(msg, Number(d.failed) > 0 ? 'error' : 'success');
                  } else if (d.type === 'cancelled') {
                    showToast('探测已取消');
                  } else if (d.type === 'error') {

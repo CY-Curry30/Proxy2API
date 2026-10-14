@@ -189,6 +189,9 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 				if probeFn := p.makeProbeByTagFunc(memberTag); probeFn != nil {
 					entry.SetProbe(probeFn)
 				}
+				if traceFn := p.makeTraceByTagFunc(memberTag); traceFn != nil {
+					entry.SetTraceProbe(traceFn)
+				}
 				state.restore(entry)
 			} else {
 				logger.Warn("注册节点失败: ", memberTag)
@@ -301,6 +304,9 @@ func (p *poolOutbound) initializeMembersLocked() error {
 				entry.SetBlacklistFn(p.makeBlacklistByTagFunc(member.tag))
 				if probe := p.makeProbeFunc(member); probe != nil {
 					entry.SetProbe(probe)
+				}
+				if traceFn := p.makeTraceFunc(member); traceFn != nil {
+					entry.SetTraceProbe(traceFn)
 				}
 				state.restore(entry)
 			}
@@ -783,6 +789,11 @@ func httpProbe(conn net.Conn, host, path string, timeout time.Duration) (time.Du
 		return 0, fmt.Errorf("读取响应失败: %w", err)
 	}
 	defer resp.Body.Close()
+	// A proxy that returns an HTTP error page is not a successful connectivity
+	// probe. Keep redirects valid for custom probe targets, reject 4xx/5xx.
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusBadRequest {
+		return 0, fmt.Errorf("探测目标返回状态 %s", resp.Status)
+	}
 	return time.Since(start), nil
 }
 
@@ -799,9 +810,8 @@ const (
 )
 
 // probeLocation obtains exit metadata through the same upstream node using a
-// dedicated, fixed Cloudflare trace request. Trace is an independent required
-// part of the health check: its data is returned even when connectivity failed,
-// and its failure is returned even when latency was measured successfully.
+// dedicated, fixed Cloudflare trace request. It only supplies exit metadata and
+// is not a health check. Manager invokes it manually or when metadata is missing.
 func (p *poolOutbound) probeLocation(ctx context.Context, member *memberState, tlsInsecure bool, attemptTimeout time.Duration) (monitor.ProbeResult, error) {
 	var lastErr error
 	attempts := 0
@@ -975,20 +985,17 @@ func (p *poolOutbound) probeConnectivityOnce(ctx context.Context, member *member
 	return time.Since(start), nil
 }
 
-// probeMember always runs both independent checks. Each successful check returns
-// its own data, but the node is healthy only when both checks succeed. Neither
-// path changes client request counters.
+// probeMember only runs generate_204. Manager independently refreshes missing
+// exit metadata after committing health, outside the shared health cache.
 func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, destination M.Socksaddr, host, path string, useTLS, tlsInsecure bool, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
 	attemptTimeout := p.monitor.ProbeAttemptTimeout()
 	result := monitor.ProbeResult{}
-	var probeErrors []error
 
 	requestCtx, requestCancel := context.WithTimeout(ctx, time.Duration(probeConnectivityAttempts)*attemptTimeout)
 	duration, connectivityErr := p.probeConnectivity(requestCtx, member, destination, host, path, useTLS, tlsInsecure, attemptTimeout)
 	requestCancel()
 	if connectivityErr != nil {
 		result.ConnectivityError = connectivityErr.Error()
-		probeErrors = append(probeErrors, fmt.Errorf("generate_204 探测失败: %w", connectivityErr))
 	} else {
 		result.ConnectivityOK = true
 		result.Latency = duration
@@ -996,29 +1003,9 @@ func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, des
 	if report != nil {
 		report(result)
 	}
-
-	locationCtx, cancel := context.WithTimeout(ctx, time.Duration(probeTraceMaxAttempts)*attemptTimeout)
-	location, locationErr := p.probeLocation(locationCtx, member, tlsInsecure, attemptTimeout)
-	cancel()
-	result.TraceError = location.TraceError
-	result.TraceAttempts = location.TraceAttempts
-	if locationErr != nil {
-		if result.TraceError == "" {
-			result.TraceError = locationErr.Error()
-		}
-		probeErrors = append(probeErrors, fmt.Errorf("Trace 探测失败: %w", locationErr))
-	} else {
-		result.TraceOK = true
-		result.IP = location.IP
-		result.Region = location.Region
-		result.Country = location.Country
-	}
-	if report != nil {
-		report(result)
-	}
-
-	if len(probeErrors) > 0 {
-		return result, errors.Join(probeErrors...)
+	if connectivityErr != nil {
+		// Trace 走的是同一条链路，连通性都不通就没有必要再花一次请求。
+		return result, fmt.Errorf("generate_204 探测失败: %w", connectivityErr)
 	}
 
 	return result, nil
@@ -1084,30 +1071,69 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context, 
 		if !ok {
 			return monitor.ProbeResult{}, E.New("未配置探测目标")
 		}
-		// Ensure members are initialized
-		p.mu.Lock()
-		if len(p.members) == 0 {
-			if err := p.initializeMembersLocked(); err != nil {
-				p.mu.Unlock()
-				return monitor.ProbeResult{}, err
-			}
-		}
-
-		// Find the member by tag
-		var member *memberState
-		for _, m := range p.members {
-			if m.tag == tag {
-				member = m
-				break
-			}
-		}
-		p.mu.Unlock()
-
-		if member == nil {
-			return monitor.ProbeResult{}, E.New("节点池成员不存在: ", tag)
+		member, err := p.memberForTag(tag)
+		if err != nil {
+			return monitor.ProbeResult{}, err
 		}
 		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure, report)
 	}
+}
+
+// makeTraceFunc builds the on-demand exit-location probe for one member. It runs
+// Trace alone: no generate_204 request, and no effect on health or latency.
+func (p *poolOutbound) makeTraceFunc(member *memberState) func(ctx context.Context) (monitor.ProbeResult, error) {
+	if p.monitor == nil {
+		return nil
+	}
+	return func(ctx context.Context) (monitor.ProbeResult, error) {
+		_, _, _, _, tlsInsecure, ok := p.monitor.DestinationForProbe()
+		if !ok {
+			return monitor.ProbeResult{}, E.New("未配置探测目标")
+		}
+		attemptTimeout := p.monitor.ProbeAttemptTimeout()
+		locationCtx, cancel := context.WithTimeout(ctx, time.Duration(probeTraceMaxAttempts)*attemptTimeout)
+		defer cancel()
+		return p.probeLocation(locationCtx, member, tlsInsecure, attemptTimeout)
+	}
+}
+
+// makeTraceByTagFunc is makeTraceFunc for callers that only know the tag.
+func (p *poolOutbound) makeTraceByTagFunc(tag string) func(ctx context.Context) (monitor.ProbeResult, error) {
+	if p.monitor == nil {
+		return nil
+	}
+	return func(ctx context.Context) (monitor.ProbeResult, error) {
+		_, _, _, _, tlsInsecure, ok := p.monitor.DestinationForProbe()
+		if !ok {
+			return monitor.ProbeResult{}, E.New("未配置探测目标")
+		}
+		member, err := p.memberForTag(tag)
+		if err != nil {
+			return monitor.ProbeResult{}, err
+		}
+		attemptTimeout := p.monitor.ProbeAttemptTimeout()
+		locationCtx, cancel := context.WithTimeout(ctx, time.Duration(probeTraceMaxAttempts)*attemptTimeout)
+		defer cancel()
+		return p.probeLocation(locationCtx, member, tlsInsecure, attemptTimeout)
+	}
+}
+
+// memberForTag resolves a pool member, initializing the member list on demand so
+// probe functions registered before Start still work.
+func (p *poolOutbound) memberForTag(tag string) (*memberState, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.members) == 0 {
+		if err := p.initializeMembersLocked(); err != nil {
+			return nil, err
+		}
+	}
+	for _, m := range p.members {
+		if m.tag == tag {
+			return m, nil
+		}
+	}
+	return nil, E.New("节点池成员不存在: ", tag)
 }
 
 // makeReleaseByTagFunc creates a release function that works before member initialization

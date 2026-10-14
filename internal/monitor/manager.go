@@ -68,30 +68,35 @@ type TimelineEvent struct {
 
 const maxTimelineSize = 20
 
-const probeTimeoutParts = 5
+const probeTimeoutParts = 6
 
 // Snapshot is a runtime view of a proxy node.
 type Snapshot struct {
 	NodeInfo
-	IP                string          `json:"ip,omitempty"`
-	Region            string          `json:"region,omitempty"`
-	Country           string          `json:"country,omitempty"`
-	FailureCount      int             `json:"failure_count"` // client request connection failures
-	SuccessCount      int64           `json:"success_count"` // client request connection successes
-	Blacklisted       bool            `json:"blacklisted"`
-	BlacklistedUntil  time.Time       `json:"blacklisted_until"`
-	ActiveConnections int32           `json:"active_connections"`
-	LastError         string          `json:"last_error,omitempty"`
-	LastFailure       time.Time       `json:"last_failure,omitempty"`
-	LastSuccess       time.Time       `json:"last_success,omitempty"`
-	LastProbedAt      time.Time       `json:"last_probed_at,omitempty"`
-	LastProbeLatency  time.Duration   `json:"last_probe_latency,omitempty"`
-	LastLatencyMs     int64           `json:"last_latency_ms"`
-	Available         bool            `json:"available"`
-	InitialCheckDone  bool            `json:"initial_check_done"`
-	Suppressed        bool            `json:"suppressed,omitempty"`
-	Quarantined       bool            `json:"quarantined"` // 小黑屋：手动关入，只能手动释放
-	Timeline          []TimelineEvent `json:"timeline,omitempty"`
+	IP                string        `json:"ip,omitempty"`
+	Region            string        `json:"region,omitempty"`
+	Country           string        `json:"country,omitempty"`
+	FailureCount      int           `json:"failure_count"` // client request connection failures
+	SuccessCount      int64         `json:"success_count"` // client request connection successes
+	Blacklisted       bool          `json:"blacklisted"`
+	BlacklistedUntil  time.Time     `json:"blacklisted_until"`
+	ActiveConnections int32         `json:"active_connections"`
+	LastError         string        `json:"last_error,omitempty"`
+	LastFailure       time.Time     `json:"last_failure,omitempty"`
+	LastSuccess       time.Time     `json:"last_success,omitempty"`
+	LastProbedAt      time.Time     `json:"last_probed_at,omitempty"`
+	LastProbeLatency  time.Duration `json:"last_probe_latency,omitempty"`
+	LastLatencyMs     int64         `json:"last_latency_ms"`
+	// LastTraceAt is when the exit location was last refreshed successfully;
+	// LastTraceError carries the most recent Trace failure. Trace is decoupled
+	// from the health check, so neither field affects Available.
+	LastTraceAt      time.Time       `json:"last_trace_at,omitempty"`
+	LastTraceError   string          `json:"last_trace_error,omitempty"`
+	Available        bool            `json:"available"`
+	InitialCheckDone bool            `json:"initial_check_done"`
+	Suppressed       bool            `json:"suppressed,omitempty"`
+	Quarantined      bool            `json:"quarantined"` // 小黑屋：手动关入，只能手动释放
+	Timeline         []TimelineEvent `json:"timeline,omitempty"`
 }
 
 // ProbeResult contains connectivity information discovered by a probe.
@@ -107,7 +112,14 @@ type ProbeResult struct {
 	TraceAttempts     int
 }
 
+// probeFunc runs generate_204 only. Trace has its own function, deadline and
+// result application, so neither failures nor cached metadata can affect health.
 type probeFunc func(ctx context.Context, report func(ProbeResult)) (ProbeResult, error)
+
+// traceFunc runs only the exit-location (Trace) check. It is a separate function
+// because the location lookup is no longer part of the health check: it is
+// refreshed on demand instead of on every probe round.
+type traceFunc func(ctx context.Context) (ProbeResult, error)
 type releaseFunc func()
 
 type EntryHandle struct {
@@ -131,8 +143,12 @@ type entry struct {
 	lastOK            time.Time
 	lastProbedAt      time.Time
 	lastProbe         time.Duration
+	lastTraceAt       time.Time
+	lastTraceError    string
 	active            atomic.Int32
 	probe             probeFunc
+	trace             traceFunc
+	traceGate         chan struct{} // serialize location lookups with cancellable waits
 	release           releaseFunc
 	blacklistFn       func(time.Duration)
 	initialCheckDone  bool
@@ -367,8 +383,8 @@ func (m *Manager) probeSchedule() (time.Duration, time.Duration) {
 }
 
 // ProbeAttemptTimeout returns the timeout for one primary request or one
-// Trace attempt. The configured per-node budget is split into five equal
-// parts: two primary latency requests plus three Trace attempts.
+// Trace attempt. The per-node budget reserves two generate_204 requests and
+// four optional Trace attempts. Cached locations spend no Trace budget.
 func (m *Manager) ProbeAttemptTimeout() time.Duration {
 	_, total := m.probeSchedule()
 	if total <= 0 {
@@ -379,7 +395,7 @@ func (m *Manager) ProbeAttemptTimeout() time.Duration {
 
 // ProbeAfterRelease verifies a node after its blacklist expires or is manually
 // cleared. The release path marks the node unavailable before this starts, so it
-// cannot re-enter routing until both required checks pass.
+// cannot re-enter routing until the generate_204 check passes.
 func (m *Manager) ProbeAfterRelease(tag string) {
 	_, timeout := m.probeSchedule()
 	if !m.beginAsyncWork() {
@@ -697,9 +713,8 @@ launchProbes:
 		e.mu.RUnlock()
 
 		if probeFn == nil {
-			// A healthy node must pass both connectivity and Trace checks. Without
-			// a probe function neither can be verified, so record a completed failure
-			// instead of leaving the node unchecked or optimistically available.
+			// 健康判定只看 generate_204：Trace 只是出口位置的补充手段，
+			// 没有探测函数的节点既拿不到状态也拿不到延迟，按失败记录。
 			probeErr := errors.New("该节点不支持探测")
 			e.applyProbeResult(ProbeResult{}, probeErr, e.currentAvailabilityEpoch())
 			failedCount.Add(1)
@@ -738,6 +753,7 @@ launchProbes:
 				m.probeSweepOK.Add(1)
 			}
 			entry.applyProbeResult(result, err, availabilityEpoch)
+			m.refreshMissingLocation(ctx, entry, result)
 			m.probeSweepDone.Add(1)
 
 			if err != nil && m.logger != nil {
@@ -969,27 +985,127 @@ func (m *Manager) ProbeWithResult(ctx context.Context, tag string) (ProbeResult,
 	if err != nil {
 		return ProbeResult{}, err
 	}
-	if e.probe == nil {
-		return ProbeResult{}, errors.New("该节点不支持探测")
-	}
 	e.mu.RLock()
+	probe := e.probe
 	suppressed := e.suppressed
 	e.mu.RUnlock()
+	if probe == nil {
+		return ProbeResult{}, errors.New("该节点不支持探测")
+	}
 	if suppressed {
 		return ProbeResult{}, errors.New("节点属于已暂停的订阅")
 	}
 
 	availabilityEpoch := e.currentAvailabilityEpoch()
-	result, err := m.executeNodeProbe(ctx, e, e.probe, true)
+	result, err := m.executeNodeProbe(ctx, e, probe, true)
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return result, err
 	}
 
 	e.applyProbeResult(result, err, availabilityEpoch)
+	// Commit health before any location lookup. A slow/failed Trace must never
+	// turn a successful generate_204 result into a node failure.
+	result = m.refreshMissingLocation(ctx, e, result)
+	return result, err
+}
+
+// TraceNode runs only the exit-location (Trace) check for one node and records
+// the result. It is the manual counterpart of the conditional Trace a probe
+// performs when a node still lacks IP / region data. Availability, latency and
+// blacklist state are untouched.
+func (m *Manager) TraceNode(ctx context.Context, tag string) (ProbeResult, error) {
+	e, err := m.entry(tag)
 	if err != nil {
+		return ProbeResult{}, err
+	}
+	return m.runTrace(ctx, e, false)
+}
+
+func (m *Manager) runTrace(ctx context.Context, e *entry, onlyMissing bool) (ProbeResult, error) {
+	e.mu.Lock()
+	if e.traceGate == nil {
+		e.traceGate = make(chan struct{}, 1)
+	}
+	gate := e.traceGate
+	e.mu.Unlock()
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		return ProbeResult{TraceError: ctx.Err().Error()}, ctx.Err()
+	}
+	if ctx.Err() != nil {
+		return ProbeResult{TraceError: ctx.Err().Error()}, ctx.Err()
+	}
+	e.mu.RLock()
+	trace := e.trace
+	suppressed := e.suppressed
+	missing := strings.TrimSpace(e.ip) == "" || strings.TrimSpace(e.region) == ""
+	e.mu.RUnlock()
+	if onlyMissing && !missing {
+		return ProbeResult{}, nil
+	}
+	if suppressed {
+		return ProbeResult{}, errors.New("节点属于已暂停的订阅")
+	}
+	if trace == nil {
+		return ProbeResult{}, errors.New("该节点不支持位置探测")
+	}
+	result, err := executeTrace(ctx, trace)
+	if errors.Is(ctx.Err(), context.Canceled) {
 		return result, err
 	}
-	return result, nil
+	e.applyTraceResult(result, err)
+	return result, err
+}
+
+// refreshMissingLocation is deliberately outside the shared health cache. Each
+// project decides from its own persisted metadata whether it needs a lookup.
+// A failed generate_204 skips it entirely: the node is unreachable, so a Trace
+// would only burn four more attempts on a dead link every round. The manual
+// Trace action still bypasses this and can fill the location on demand.
+func (m *Manager) refreshMissingLocation(ctx context.Context, e *entry, result ProbeResult) ProbeResult {
+	if !result.ConnectivityOK {
+		return result
+	}
+	e.mu.RLock()
+	missing := strings.TrimSpace(e.ip) == "" || strings.TrimSpace(e.region) == ""
+	trace := e.trace
+	e.mu.RUnlock()
+	if !missing || trace == nil || ctx.Err() != nil {
+		return result
+	}
+	location, _ := m.runTrace(ctx, e, true)
+	return mergeProbeResult(result, location)
+}
+
+// executeTrace enforces the caller's deadline even for outbounds that do not
+// promptly honor cancellation. Late results are discarded, never applied.
+func executeTrace(ctx context.Context, trace traceFunc) (ProbeResult, error) {
+	type outcome struct {
+		result ProbeResult
+		err    error
+	}
+	ch := make(chan outcome, 1)
+	go func() {
+		result, err := trace(ctx)
+		ch <- outcome{result, err}
+	}()
+	select {
+	case out := <-ch:
+		if ctx.Err() != nil {
+			return ProbeResult{TraceError: ctx.Err().Error()}, ctx.Err()
+		}
+		if out.err == nil && !out.result.TraceOK {
+			out.err = errors.New("Trace 没有返回有效的出口位置")
+		}
+		if out.err != nil && out.result.TraceError == "" {
+			out.result.TraceError = out.err.Error()
+		}
+		return out.result, out.err
+	case <-ctx.Done():
+		return ProbeResult{TraceError: ctx.Err().Error()}, ctx.Err()
+	}
 }
 
 // executeProbe enforces the outer deadline while retaining sub-probe progress.
@@ -1239,12 +1355,24 @@ func (m *Manager) entry(tag string) (*entry, error) {
 	return e, nil
 }
 
+// healthyLocked reports whether the node is in the state the WebUI renders as
+// 「在线 Healthy」. Callers must hold e.mu. It is the single predicate behind the
+// "只有健康节点才暴露延迟" rule, so it must stay in sync with the status chain in
+// renderNodes (quarantined → blacklisted → !initial_check_done → !available → healthy).
+func (e *entry) healthyLocked() bool {
+	return e.initialCheckDone && e.available && !e.blacklist && !e.quarantined && !e.suppressed
+}
+
 func (e *entry) snapshot() Snapshot {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	// 延迟只在节点健康时对外暴露：未测试 / 异常 / 拉黑 / 小黑屋 / 订阅暂停一律给 -1，
+	// 免得非健康状态旁边还挂着一个读数。原始读数仍留在 e.lastProbe 里，供延迟调度
+	// （EntryHandle.LastLatency）、时间线与状态持久化使用；LastProbeLatency 同样保持
+	// 原始值不参与门控，它被 boxmgr 用来写 state db。
 	latencyMs := int64(-1)
-	if e.lastProbe > 0 {
+	if e.lastProbe > 0 && e.healthyLocked() {
 		latencyMs = e.lastProbe.Milliseconds()
 		if latencyMs == 0 {
 			latencyMs = 1
@@ -1273,6 +1401,8 @@ func (e *entry) snapshot() Snapshot {
 		LastProbedAt:      e.lastProbedAt,
 		LastProbeLatency:  e.lastProbe,
 		LastLatencyMs:     latencyMs,
+		LastTraceAt:       e.lastTraceAt,
+		LastTraceError:    e.lastTraceError,
 		Available:         e.available,
 		InitialCheckDone:  e.initialCheckDone,
 		Suppressed:        e.suppressed,
@@ -1362,7 +1492,9 @@ func (e *entry) applyProbeResult(result ProbeResult, err error, availabilityEpoc
 	e.lastProbedAt = time.Now()
 	e.applyProbeProgressLocked(result)
 
-	healthy := err == nil && result.ConnectivityOK && result.TraceOK
+	// generate_204 是唯一的健康判据：它成功，节点就可用；Trace 只负责出口位置，
+	// 失败不再让节点变成「异常」。
+	healthy := err == nil && result.ConnectivityOK
 	// Probes performed during a blacklist may refresh latency and exit metadata,
 	// but they must never make the node routable or clear the blacklist. Only
 	// expiry or a manual release can do that, followed by a fresh full probe.
@@ -1382,7 +1514,37 @@ func (e *entry) applyProbeResult(result ProbeResult, err error, availabilityEpoc
 	} else {
 		// Defensive fallback for custom probe functions returning an incomplete
 		// result without an error.
-		e.lastError = "探测不完整：generate_204 和 Trace 必须同时成功"
+		e.lastError = "探测不完整：generate_204 没有返回成功结果"
+	}
+}
+
+// applyTraceResult records a standalone Trace run (manual button or the
+// conditional refresh inside a probe). It only touches the exit location:
+// availability, latency and blacklist state are owned by generate_204.
+func (e *entry) applyTraceResult(result ProbeResult, err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	defer e.persistLocked(false)
+
+	if result.TraceOK {
+		if result.IP != "" {
+			e.ip = result.IP
+		}
+		if result.Region != "" {
+			e.region = result.Region
+		}
+		if result.Country != "" {
+			e.country = result.Country
+		}
+		e.lastTraceAt = time.Now()
+		e.lastTraceError = ""
+		return
+	}
+	if result.TraceError == "" && err != nil {
+		result.TraceError = err.Error()
+	}
+	if result.TraceError != "" {
+		e.lastTraceError = result.TraceError
 	}
 }
 
@@ -1394,35 +1556,22 @@ func (e *entry) applyProbeProgress(result ProbeResult) {
 }
 
 func (e *entry) applyProbeProgressLocked(result ProbeResult) {
-	// Each successful sub-probe updates only the data it owns. Failed checks do
-	// not erase the last known-good value from the other check.
+	// 两个子探测各自拥有自己的数据，且只影响自己的下游：
+	//   generate_204 → 状态（available / lastError）与延迟
+	//   Trace        → 出口 IP / Region / Country
+	//
+	// 连通性失败就把延迟清空，使 e.lastProbe 始终等于「最近一次连通性成功测得的延迟」；
+	// snapshot() 再按健康度决定是否对外暴露（见 healthyLocked）。
 	if result.ConnectivityOK {
 		e.lastProbe = result.Latency
+	} else {
+		e.lastProbe = 0
 	}
-	if result.TraceOK {
-		if result.IP != "" {
-			e.ip = result.IP
-		}
-		if result.Region != "" {
-			e.region = result.Region
-		}
-		if result.Country != "" {
-			e.country = result.Country
-		}
-	}
-
-	var progressErrors []string
 	if result.ConnectivityError != "" {
-		progressErrors = append(progressErrors, "generate_204 探测失败: "+result.ConnectivityError)
-	}
-	if result.TraceError != "" {
-		progressErrors = append(progressErrors, "Trace 探测失败: "+result.TraceError)
-	}
-	if len(progressErrors) > 0 {
 		e.initialCheckDone = true
 		e.available = false
 		e.lastFail = time.Now()
-		e.lastError = strings.Join(progressErrors, "; ")
+		e.lastError = "generate_204 探测失败: " + result.ConnectivityError
 	}
 }
 
@@ -1515,6 +1664,12 @@ func (e *entry) setProbe(fn probeFunc) {
 	e.probe = fn
 }
 
+func (e *entry) setTraceProbe(fn traceFunc) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.trace = fn
+}
+
 func (e *entry) setRelease(fn releaseFunc) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1588,6 +1743,27 @@ func (h *EntryHandle) SetProbe(fn func(ctx context.Context, report func(ProbeRes
 	h.ref.setProbe(fn)
 }
 
+// SetTraceProbe assigns the exit-location (Trace) probe. It is invoked on
+// demand — by the manual Trace action and by probes that still lack a location —
+// never as part of the health check.
+func (h *EntryHandle) SetTraceProbe(fn func(ctx context.Context) (ProbeResult, error)) {
+	if h == nil || h.ref == nil {
+		return
+	}
+	h.ref.setTraceProbe(fn)
+}
+
+// NeedsLocation reports whether the node still lacks exit IP / region data, i.e.
+// whether the next probe has to spend a Trace request on it.
+func (h *EntryHandle) NeedsLocation() bool {
+	if h == nil || h.ref == nil {
+		return true
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return strings.TrimSpace(h.ref.ip) == "" || strings.TrimSpace(h.ref.region) == ""
+}
+
 // SetRelease assigns a release function.
 func (h *EntryHandle) SetRelease(fn func()) {
 	if h == nil || h.ref == nil {
@@ -1650,10 +1826,12 @@ func (h *EntryHandle) Quarantined() bool {
 	return h.ref.quarantined
 }
 
-// Healthy reports whether the node has completed a probe and both required
-// checks succeeded. Blacklist eligibility is maintained by the pool's shared
-// state and is checked separately during member selection, and the manual
-// quarantine flag is checked separately as well.
+// Healthy reports whether the node has completed a probe and the generate_204
+// connectivity check succeeded. The exit-location Trace check is deliberately
+// excluded: it is refreshed on demand and never gates availability. Blacklist
+// eligibility is maintained by the pool's shared state and is checked separately
+// during member selection, and the manual quarantine flag is checked separately
+// as well.
 func (h *EntryHandle) Healthy() bool {
 	if h == nil || h.ref == nil {
 		return false
