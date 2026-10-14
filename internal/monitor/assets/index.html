@@ -3736,12 +3736,12 @@
         let badge = '', statusText = '', statusTitle = '';
         if (n.quarantined) {
           badge = 'badge-warning';
-          statusText = '小黑屋 Jailed';
+          statusText = '小黑屋';
           statusTitle = '已手动关进小黑屋，不参与调度；只能手动释放';
           if (n.last_error) statusTitle += `\n最近探测：${n.last_error}`;
         } else if (n.blacklisted) {
           badge = 'badge-error';
-          statusText = '拉黑 Blocked';
+          statusText = '拉黑';
           const unblockTime = n.blacklisted_until ? formatDateTime(n.blacklisted_until) : '';
           statusTitle = n.last_error || '节点已被拉黑';
           if (unblockTime && unblockTime !== '-') {
@@ -3749,7 +3749,7 @@
           }
         } else if (!n.initial_check_done) {
           badge = 'badge-offline';
-          statusText = '未测试 Unknown';
+          statusText = '未测试';
           statusTitle = '尚未完成首次探测';
         } else if (!n.available) {
           badge = 'badge-error';
@@ -3757,7 +3757,7 @@
           statusTitle = n.last_error || '最近一次探测失败';
         } else {
           badge = 'badge-healthy';
-          statusText = '在线 Healthy';
+          statusText = '在线';
           statusTitle = '最近一次探测成功';
         }
         const copyableError = !n.quarantined && !n.blacklisted && n.initial_check_done && !n.available && !!statusTitle;
