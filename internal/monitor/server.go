@@ -1408,7 +1408,18 @@ func (s *Server) Shutdown(ctx context.Context) {
 	}
 }
 
+// handleIndex serves the single-page WebUI. It is registered on "/", which
+// net/http treats as a catch-all for every path no other pattern matches, so
+// unknown paths must be rejected explicitly: without this, /favicon.ico and any
+// mistyped URL answered 200 with the SPA HTML instead of 404, which made
+// missing resources look like they existed.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/", "/index.html":
+	default:
+		http.NotFound(w, r)
+		return
+	}
 	data, err := embeddedFS.ReadFile("assets/index.html")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
