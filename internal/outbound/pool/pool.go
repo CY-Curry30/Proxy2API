@@ -320,7 +320,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 }
 
 func (p *poolOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	p.noteApplication()
+	p.noteApplication(destination)
 	maxAttempts := p.maxAttempts()
 	stickyKey := p.stickyKeyFromCtx(ctx)
 	singleMember := len(p.options.Members) <= 1
@@ -368,7 +368,7 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 }
 
 func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	p.noteApplication()
+	p.noteApplication(destination)
 	maxAttempts := p.maxAttempts()
 	stickyKey := p.stickyKeyFromCtx(ctx)
 	singleMember := len(p.options.Members) <= 1
@@ -420,10 +420,18 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 // dial attempt — a failing request still proves the project is in use. The
 // monitor may answer by clearing the cool-down and scheduling a health sweep,
 // which is why this is called before any selection work.
-func (p *poolOutbound) noteApplication() {
-	if p.monitor != nil {
-		p.monitor.MarkApplied()
+//
+// Proxy2API's own subscription fetch borrows this proxy entry when its direct
+// attempt fails, so requests to a registered internal host are skipped: they are
+// not client traffic and must not keep the project awake.
+func (p *poolOutbound) noteApplication(destination M.Socksaddr) {
+	if p.monitor == nil {
+		return
 	}
+	if p.monitor.IsInternalDestination(destination.AddrString()) {
+		return
+	}
+	p.monitor.MarkApplied()
 }
 
 // maxAttempts returns the configured retry budget (>=1).

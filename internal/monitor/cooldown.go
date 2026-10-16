@@ -1,6 +1,8 @@
 package monitor
 
 import (
+	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -52,6 +54,10 @@ type cooldownState struct {
 	lastApplied time.Time
 	// announced avoids logging the same cool-down on every probe interval.
 	announced bool
+	// internalDestinations holds the hosts Proxy2API itself fetches through this
+	// project's proxy entry (subscription providers). Their requests reach the
+	// pool exactly like a client's but are not node applications.
+	internalDestinations map[string]struct{}
 }
 
 // applyCooldownSettings installs the policy carried by monitor.Config. The idle
@@ -133,6 +139,63 @@ func (m *Manager) SetManualCooldown(active bool) {
 			go m.ProbeAllNow(m.currentProbeTimeout())
 		}
 	}
+}
+
+// RegisterInternalDestination records a host that Proxy2API fetches itself
+// through this project's proxy entry — today the subscription providers whose
+// direct fetch failed and which were retried over the project's own entry.
+//
+// Such a request arrives at the node pool exactly like a client's, but it is not
+// a node application: counting it would keep resetting the idle timer, and with
+// a subscription refresh interval shorter than the cool-down duration the
+// project would never enter cool-down at all.
+//
+// The set only ever grows. A stale entry is harmless — it can only suppress an
+// application to a host that is one of Proxy2API's own subscription providers.
+func (m *Manager) RegisterInternalDestination(host string) {
+	if m == nil {
+		return
+	}
+	host = normalizeDestinationHost(host)
+	if host == "" {
+		return
+	}
+	m.cooldown.mu.Lock()
+	defer m.cooldown.mu.Unlock()
+	if m.cooldown.internalDestinations == nil {
+		m.cooldown.internalDestinations = make(map[string]struct{})
+	}
+	m.cooldown.internalDestinations[host] = struct{}{}
+}
+
+// IsInternalDestination reports whether host belongs to Proxy2API's own
+// subscription traffic and must therefore not count as a node application.
+func (m *Manager) IsInternalDestination(host string) bool {
+	if m == nil {
+		return false
+	}
+	host = normalizeDestinationHost(host)
+	if host == "" {
+		return false
+	}
+	m.cooldown.mu.RLock()
+	defer m.cooldown.mu.RUnlock()
+	_, ok := m.cooldown.internalDestinations[host]
+	return ok
+}
+
+// normalizeDestinationHost reduces an address to a comparable host: lower case,
+// no port, no IPv6 brackets. Both the registered subscription host and the
+// pool's dial destination go through it so the two always match.
+func normalizeDestinationHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return ""
+	}
+	if split, _, err := net.SplitHostPort(host); err == nil {
+		host = split
+	}
+	return strings.Trim(host, "[]")
 }
 
 // MarkApplied records that an application just used this project's nodes. It is

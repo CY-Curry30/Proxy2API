@@ -1340,6 +1340,14 @@ func (m *Manager) restoreSharedFetchState(cache map[string][]config.NodeConfig, 
 // system proxy. The result records which channel produced it so the refresh
 // summary can report how every subscription was obtained.
 func (m *Manager) fetchSubscriptionDirect(ctx context.Context, rawURL string, timeout time.Duration) subscriptionFetchResult {
+	// This project's own proxy entry is one of the fallback channels below, so
+	// the retry will land in the node pool exactly like a client request. Tell
+	// the pool up front that this host is Proxy2API's own traffic: counting it
+	// as a node application would keep resetting the project's idle timer and,
+	// when the refresh interval is shorter than the cool-down duration, stop the
+	// project from ever entering cool-down.
+	m.registerInternalSubscriptionHost(rawURL)
+
 	direct := m.fetchSubscriptionOnce(ctx, rawURL, timeout, m.httpClient, FetchChannelDirect)
 	if !subscriptionFetchFailed(direct) {
 		return direct
@@ -1410,6 +1418,30 @@ func (m *Manager) currentProjectProxyURL() string {
 		return ""
 	}
 	return strings.TrimSpace(m.projectProxyURL())
+}
+
+// registerInternalSubscriptionHost tells this project's node pool that requests
+// to the subscription's host are Proxy2API's own traffic rather than a client
+// application. It is registered for every fetch, not only the proxy fallback:
+// the direct attempt never touches the pool, so the cost is a single hostname,
+// and it also covers a system proxy that happens to point back at this project.
+func (m *Manager) registerInternalSubscriptionHost(rawURL string) {
+	if m.boxMgr == nil {
+		return
+	}
+	monitorMgr := m.boxMgr.MonitorManager()
+	if monitorMgr == nil {
+		return
+	}
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return
+	}
+	monitorMgr.RegisterInternalDestination(host)
 }
 
 func (m *Manager) currentSystemProxyURL() string {
