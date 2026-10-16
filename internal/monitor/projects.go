@@ -11,26 +11,47 @@ import (
 
 // ProjectSummary is the control-plane view of one isolated runtime.
 type ProjectSummary struct {
-	ID                 string                 `json:"id"`
-	Name               string                 `json:"name"`
-	Enabled            bool                   `json:"enabled"`
-	Autostart          bool                   `json:"autostart"`
-	Status             string                 `json:"status"`
-	LastError          string                 `json:"last_error,omitempty"`
-	StartedAt          time.Time              `json:"started_at,omitempty"`
-	ConfigPath         string                 `json:"config_path"`
-	Mode               string                 `json:"mode,omitempty"`
-	ListenerAddress    string                 `json:"listener_address,omitempty"`
-	ListenerPort       uint16                 `json:"listener_port,omitempty"`
-	MultiPortAddress   string                 `json:"multi_port_address,omitempty"`
-	MultiPortBase      uint16                 `json:"multi_port_base,omitempty"`
-	ClashAPIPort       uint16                 `json:"clash_api_port,omitempty"`
-	NodeCount          int                    `json:"node_count"`
-	MonitoredNodeCount int                    `json:"monitored_node_count"`
-	HealthyNodeCount   int                    `json:"healthy_node_count"`
-	HealthRate         float64                `json:"health_rate"`
-	SubscriptionCount  int                    `json:"subscription_count"`
-	Settings           ProjectRuntimeSettings `json:"settings"`
+	ID                 string    `json:"id"`
+	Name               string    `json:"name"`
+	Enabled            bool      `json:"enabled"`
+	Autostart          bool      `json:"autostart"`
+	Status             string    `json:"status"`
+	LastError          string    `json:"last_error,omitempty"`
+	StartedAt          time.Time `json:"started_at,omitempty"`
+	ConfigPath         string    `json:"config_path"`
+	Mode               string    `json:"mode,omitempty"`
+	ListenerAddress    string    `json:"listener_address,omitempty"`
+	ListenerPort       uint16    `json:"listener_port,omitempty"`
+	MultiPortAddress   string    `json:"multi_port_address,omitempty"`
+	MultiPortBase      uint16    `json:"multi_port_base,omitempty"`
+	ClashAPIPort       uint16    `json:"clash_api_port,omitempty"`
+	NodeCount          int       `json:"node_count"`
+	MonitoredNodeCount int       `json:"monitored_node_count"`
+	HealthyNodeCount   int       `json:"healthy_node_count"`
+	HealthRate         float64   `json:"health_rate"`
+	SubscriptionCount  int       `json:"subscription_count"`
+	// Cooldown mirrors the project's idle cool-down: while active the automatic
+	// health-check sweep is paused because no application has used the nodes.
+	Cooldown CooldownSummary        `json:"cooldown"`
+	Settings ProjectRuntimeSettings `json:"settings"`
+}
+
+// CooldownSummary is the control-plane view of one project's cool-down state.
+type CooldownSummary struct {
+	// Active is true while automatic probing is paused.
+	Active bool `json:"active"`
+	// Manual distinguishes an operator-triggered cool-down from an idle one.
+	Manual bool `json:"manual"`
+	// Since is when the current cool-down started (zero while inactive).
+	Since time.Time `json:"since,omitempty"`
+	// LastApplied is when an application last used the project's nodes.
+	LastApplied time.Time `json:"last_applied_at,omitempty"`
+	// IdleFor is how long the project has gone without a node application.
+	IdleFor string `json:"idle_for,omitempty"`
+	// Duration is the configured idle threshold, as a duration string.
+	Duration string `json:"duration,omitempty"`
+	// Enabled reports whether the idle cool-down feature is switched on.
+	Enabled bool `json:"enabled"`
 }
 
 type ProjectRuntimeSettings struct {
@@ -42,6 +63,7 @@ type ProjectRuntimeSettings struct {
 	Pool                  ProjectPoolSettings         `json:"pool"`
 	Sticky                ProjectStickySettings       `json:"sticky"`
 	Probe                 ProjectProbeSettings        `json:"probe"`
+	Cooldown              ProjectCooldownSettings     `json:"cooldown"`
 	SubscriptionRefresh   ProjectSubscriptionSettings `json:"subscription_refresh"`
 	SelectedSubscriptions []string                    `json:"selected_subscriptions,omitempty"`
 	ExcludedSubscriptions []string                    `json:"excluded_subscriptions,omitempty"`
@@ -91,6 +113,14 @@ type ProjectProbeSettings struct {
 type ProjectSubscriptionSettings struct {
 	Enabled  bool   `json:"enabled"`
 	Interval string `json:"interval"`
+}
+
+// ProjectCooldownSettings is the editable idle cool-down policy of a project.
+// Duration is a Go duration string ("1h"); the project enters cool-down once it
+// has gone that long without any node application.
+type ProjectCooldownSettings struct {
+	Enabled  bool   `json:"enabled"`
+	Duration string `json:"duration"`
 }
 
 type ProjectPortRange struct {
@@ -196,6 +226,11 @@ type ProjectController interface {
 	DeleteProjectWithData(ctx context.Context, id string, deleteData bool) (ProjectDeleteResult, error)
 	StartProject(ctx context.Context, id string) error
 	StopProject(ctx context.Context, id string) error
+	// CooldownProject parks a project in cool-down by hand: automatic probing
+	// stops until it is released or a new application uses the project.
+	CooldownProject(ctx context.Context, id string) error
+	// ReleaseProject clears a manual cool-down and resumes automatic probing.
+	ReleaseProject(ctx context.Context, id string) error
 	ReloadProject(ctx context.Context, id string) error
 	ReloadProjectSources(ctx context.Context, id string) error
 	ReloadSharedSources(ctx context.Context) error

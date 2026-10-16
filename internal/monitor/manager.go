@@ -35,6 +35,9 @@ type Config struct {
 	ProbeConcurrency int    // 并发探测线程数（批量探测与周期健康检查共用）
 	StickyNode       string // 粘性入口指定节点；空值默认选择最低延迟节点
 	TrafficAPI       string // Project-specific sing-box Clash traffic endpoint.
+	// Cooldown is the project's idle cool-down policy: automatic probing pauses
+	// while no application uses the project's nodes.
+	Cooldown CooldownSettings
 }
 
 // NodeInfo is static metadata about a proxy entry.
@@ -214,6 +217,11 @@ type Manager struct {
 	sweepCancel      context.CancelFunc
 	rerunRequested   bool
 	rerunPendingOnly bool
+
+	// cooldown tracks the project's idle cool-down state. While it is active the
+	// periodic sweep is skipped; a node application or a manual release clears
+	// it and probing resumes.
+	cooldown cooldownState
 }
 
 // ProbeSweepProgress reports the current health-check sweep progress. active is
@@ -330,6 +338,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		m.restoredNodes = restored
 	}
 	m.probeDst, m.probeHost, m.probePath, m.probeTLS, m.probeTLSInsecure, m.probeReady = resolveProbeTarget(cfg.ProbeTarget, cfg.SkipCertVerify)
+	m.applyCooldownSettings(cfg.Cooldown)
 	return m, nil
 }
 
@@ -527,7 +536,15 @@ func (m *Manager) StartPeriodicHealthCheck(interval, timeout time.Duration) {
 					return
 				case <-timer.C:
 					_, currentTimeout := m.probeSchedule()
-					m.probeAllNodes(currentTimeout)
+					// A project in cool-down has had no application for a while:
+					// skip the sweep entirely instead of burning a full probe
+					// round on nodes nobody is using. MarkApplied clears the
+					// state and refreshes health data on demand.
+					if m.CooldownActive() {
+						m.announceCooldownOnce()
+					} else {
+						m.probeAllNodes(currentTimeout)
+					}
 					currentInterval, _ = m.probeSchedule()
 					timer.Reset(currentInterval)
 				case <-m.probeScheduleCh:

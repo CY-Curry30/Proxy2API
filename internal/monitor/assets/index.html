@@ -440,6 +440,8 @@
     .badge-warning { background: var(--warning-bg); color: var(--warning); border: 1px solid var(--warning); }
     .badge-error { background: var(--error-bg); color: var(--error); border: 1px solid var(--error); }
     .badge-offline { background: var(--bg-hover); color: var(--text-muted); border: 1px solid var(--border); }
+    /* 冷却：项目长时间没有节点应用，自动探测已暂停。用主色调区分于普通的「已停止」。 */
+    .badge-cooldown { background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary); border: 1px solid var(--primary); }
     .badge-neutral { background: transparent; color: var(--text-muted); border: 1px dashed var(--border); }
     .badge-copyable { cursor: copy; user-select: none; }
 
@@ -1500,6 +1502,11 @@
             <div class="checkbox-row"><input type="checkbox" id="projectStickyEnabled" checked onchange="handleProjectStickyChange()" /><label for="projectStickyEnabled">启用粘性代理</label></div>
             <div class="form-group"><label>粘性端口</label><input type="number" id="projectStickyPort" class="setting-input" min="0" max="65535" oninput="updateProjectPortHints()" /><div class="port-field-hint" id="projectStickyPortHint" aria-live="polite"></div></div>
           </div>
+          <div class="form-section-title">冷却配置</div>
+          <div class="form-section-grid">
+            <div class="checkbox-row"><input type="checkbox" id="projectCooldownEnabled" checked /><label for="projectCooldownEnabled">空闲冷却（长时间没有节点应用时暂停自动探测）</label></div>
+            <div class="form-group"><label>冷却时长</label><input type="text" id="projectCooldownDuration" class="setting-input" placeholder="1h" /><div class="port-field-hint">超过该时长没有任何节点应用时进入冷却，默认 1h；有新的节点应用会自动恢复</div></div>
+          </div>
           <div class="form-section-title">选定订阅（不选择加载全部）</div>
           <div id="projectNonSubscriptionNodesSection" style="display:none;">
             <div class="checkbox-row">
@@ -1759,6 +1766,40 @@
       }
     }
 
+    // 冷却视图：active = 当前处于冷却（自动探测已暂停）；cooling = 冷却中或已被手动冷却。
+    // 停止的项目本来就不探测，因此只显示「已停止」；但手动冷却的记录仍要能点「释放」。
+    function projectCooldownView(project) {
+      const cooldown = (project && project.cooldown) || {};
+      const manual = cooldown.manual === true;
+      const active = cooldown.active === true;
+      const cooling = active || manual;
+      const duration = cooldown.duration || '';
+      const idleFor = cooldown.idle_for || '';
+      let title;
+      if (manual) {
+        title = '已手动冷却：自动探测已暂停，点击「释放」或有节点应用时恢复';
+      } else if (active) {
+        title = `已空闲 ${idleFor || duration}（冷却时长 ${duration}），自动探测已暂停；有节点应用时自动恢复`;
+      } else if (duration) {
+        title = `手动冷却：暂停自动探测，直到有节点应用或点击「释放」（空闲 ${duration} 后自动进入冷却）`;
+      } else {
+        title = '手动冷却：暂停自动探测，直到有节点应用或点击「释放」';
+      }
+      return {
+        active, manual, cooling, duration, idleFor, title,
+        buttonLabel: cooling ? '释放' : '冷却',
+        buttonTitle: cooling ? '释放冷却并恢复自动探测' : title
+      };
+    }
+
+    function projectCooldownStateLabel(project) {
+      const cooldown = (project && project.cooldown) || {};
+      if (cooldown.manual === true) return '冷却中（手动）';
+      if (cooldown.active === true) return '冷却中（空闲）';
+      if (cooldown.enabled === false) return '未启用';
+      return '正常';
+    }
+
     function projectModeLabel(mode) {
       return ({pool:'Pool', 'multi-port':'多端口', hybrid:'混合'})[mode] || mode || '-';
     }
@@ -1995,6 +2036,14 @@
         const busy = project.status === 'starting' || project.status === 'stopping';
         const runtimeDisabled = !project.enabled || busy;
         const runtimeAction = project.status === 'running' ? '停止' : '启动';
+        const cooldown = projectCooldownView(project);
+        // 冷却按钮在项目运行时可用；已处于冷却（含已停止但仍记录着手动冷却）时也要能点「释放」。
+        const cooldownDisabled = !(project.status === 'running' || cooldown.cooling);
+        // 冷却期间项目仍在运行、只是暂停了自动探测，所以状态列用「冷却中」直接替换「运行中」，
+        // 不同时显示两个徽标。只有真正在运行的项目才这样替换，避免掩盖「停止中」等过渡态。
+        const statusBadge = cooldown.active && project.status === 'running'
+          ? `<span class="badge badge-cooldown" title="${escapeHtml(cooldown.title)}">❄ 冷却中</span>`
+          : `<span class="badge ${statusView[0]}" title="${escapeHtml(project.last_error || '')}">${statusView[1]}</span>`;
         const ports = [
           project.listener_port ? `<span>入口 <code>${escapeHtml(projectEndpoint(project.listener_address, project.listener_port))}</code></span>` : '',
           project.multi_port_base ? `<span>多端口 <code>${escapeHtml(projectEndpoint(project.multi_port_address, project.multi_port_base, '+'))}</code></span>` : ''
@@ -2002,13 +2051,14 @@
         return `<tr class="${project.id === currentProjectID ? 'project-selected' : ''}" onclick="selectManagedProject('${projectID}')">
           <td class="project-select-cell"><input type="checkbox" ${selectedProjectIDs.has(project.id) ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleProjectSelection('${projectID}', this.checked)" aria-label="选择项目 ${escapeHtml(project.name || project.id)}" /></td>
           <td><div class="project-name"><strong>${escapeHtml(project.name)}</strong></div></td>
-          <td><span class="badge ${statusView[0]}" title="${escapeHtml(project.last_error || '')}">${statusView[1]}</span></td>
+          <td>${statusBadge}</td>
           <td>${escapeHtml(projectModeLabel(project.mode))}</td>
           <td><div class="project-port-list">${ports}</div></td>
           <td><code>${Number(project.node_count) || 0} / ${Number(project.subscription_count) || 0}</code></td>
           <td><div class="project-row-actions">
             <button class="btn btn-sm" type="button" onclick="event.stopPropagation(); showProjectModal('${projectID}')">编辑</button>
             <button class="btn btn-sm" type="button" ${runtimeDisabled ? 'disabled' : ''} onclick="event.stopPropagation(); toggleManagedProject('${projectID}')">${runtimeAction}</button>
+            <button class="btn btn-sm" type="button" ${cooldownDisabled ? 'disabled' : ''} title="${escapeHtml(cooldown.buttonTitle)}" onclick="event.stopPropagation(); toggleProjectCooldown('${projectID}')">${cooldown.buttonLabel}</button>
             <button class="btn btn-sm btn-danger" type="button" onclick="event.stopPropagation(); deleteProject('${projectID}')">删除</button>
           </div></td>
         </tr>`;
@@ -2025,6 +2075,8 @@
       const settings = project.settings || {};
       const pool = settings.pool || {};
       const sticky = settings.sticky || {};
+      const cooldown = project.cooldown || {};
+      const cooldownView = projectCooldownView(project);
       const configItems = [
         ['运行模式', projectModeLabel(project.mode)],
         ['代理入口', projectEndpoint(project.listener_address, project.listener_port)],
@@ -2036,10 +2088,14 @@
         ['节点池策略', pool.mode || '-'],
         ['SSL 验证', settings.skip_cert_verify ? '跳过' : '严格验证'],
         ['粘性代理', sticky.enabled ? projectEndpoint(project.listener_address, sticky.port) : '未启用'],
+        ['冷却状态', projectCooldownStateLabel(project)],
+        ['冷却时长', cooldown.enabled === false ? '未启用' : (cooldown.duration || '-')],
+        ['最近节点应用', cooldown.last_applied_at ? formatDateTime(cooldown.last_applied_at) : '-'],
         ['启用', project.enabled ? '是' : '否'],
         ['自动运行', project.autostart ? '是' : '否'],
         ['启动时间', formatDateTime(project.started_at)]
       ];
+      if (cooldownView.active && cooldown.idle_for) configItems.push(['已空闲', cooldown.idle_for]);
       if (project.last_error) configItems.push(['最近错误', project.last_error]);
       detail.innerHTML = `<div class="project-detail-heading">
           <strong>${escapeHtml(project.name)}</strong>
@@ -2437,6 +2493,10 @@
           enabled: document.getElementById('projectStickyEnabled').checked,
           port: Number(document.getElementById('projectStickyPort').value) || 0
         },
+        cooldown: {
+          enabled: document.getElementById('projectCooldownEnabled').checked,
+          duration: document.getElementById('projectCooldownDuration').value.trim() || '1h'
+        },
         probe: schedules.probe,
         subscription_refresh: schedules.subscription_refresh,
         selected_subscriptions: selectedSubscriptions,
@@ -2471,6 +2531,9 @@
       document.getElementById('projectPoolRetryAttempts').value = pool.retry_attempts || 3;
       document.getElementById('projectStickyEnabled').checked = sticky.enabled !== false;
       document.getElementById('projectStickyPort').value = sticky.port || '';
+      const cooldown = s.cooldown || {};
+      document.getElementById('projectCooldownEnabled').checked = cooldown.enabled !== false;
+      document.getElementById('projectCooldownDuration').value = cooldown.duration || '1h';
     }
 
     async function showProjectModal(projectID='') {
@@ -2614,6 +2677,26 @@
           updateProjectPortHints();
         }
         showToast(error.message, 'error');
+      }
+    }
+
+    // 手动冷却 / 释放。冷却期间项目不再自动探测节点；有新的节点应用或点击「释放」时恢复。
+    async function toggleProjectCooldown(projectID) {
+      const project = projectsCache.find(item => item.id === projectID);
+      if (!project) return;
+      const cooling = projectCooldownView(project).cooling;
+      const action = cooling ? 'release' : 'cooldown';
+      try {
+        const response = await nativeFetch(`/api/projects/${encodeURIComponent(projectID)}/${action}`, {method:'POST'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || (cooling ? '释放冷却失败' : '冷却项目失败'));
+        await loadProjects();
+        renderProjectManagement();
+        showToast(cooling ? '已释放冷却，自动探测恢复' : '项目已进入冷却，自动探测暂停');
+      } catch (error) {
+        showToast(error.message, 'error');
+        await loadProjects();
+        renderProjectManagement();
       }
     }
 

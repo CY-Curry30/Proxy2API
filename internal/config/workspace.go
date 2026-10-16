@@ -57,9 +57,20 @@ type ProjectSpec struct {
 	// Running remembers the operator's last explicit start/stop decision so a
 	// project that was stopped stays stopped across restarts. Nil means the
 	// project predates this field and is treated as running.
-	Running      *bool  `yaml:"running,omitempty" json:"running,omitempty"`
-	Config       string `yaml:"config" json:"-"`
-	ClashAPIPort uint16 `yaml:"clash_api_port,omitempty" json:"-"`
+	Running *bool `yaml:"running,omitempty" json:"running,omitempty"`
+	// ManualCooldown remembers an operator-triggered cool-down (the 冷却 button
+	// on the management page). It is persisted next to Running so a project the
+	// operator parked stays parked across restarts; a node application or the
+	// 释放 button clears it.
+	ManualCooldown *bool  `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
+	Config         string `yaml:"config" json:"-"`
+	ClashAPIPort   uint16 `yaml:"clash_api_port,omitempty" json:"-"`
+}
+
+// ManualCooling reports whether the operator manually parked this project in
+// cool-down. A missing value means "not parked".
+func (s ProjectSpec) ManualCooling() bool {
+	return s.ManualCooldown != nil && *s.ManualCooldown
 }
 
 // DesiredRunning reports whether the last explicit start/stop left the project

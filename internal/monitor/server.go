@@ -1116,16 +1116,24 @@ func (s *Server) handleProjectRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actionOrAPI := parts[1]
-	if actionOrAPI == "start" || actionOrAPI == "stop" || actionOrAPI == "reload" {
+	if actionOrAPI == "start" || actionOrAPI == "stop" || actionOrAPI == "reload" ||
+		actionOrAPI == "cooldown" || actionOrAPI == "release" {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
+		}
+		actionMessages := map[string]string{
+			"start":    "启动项目",
+			"stop":     "停止项目",
+			"reload":   "重载项目",
+			"cooldown": "冷却项目",
+			"release":  "释放项目冷却",
 		}
 		if s.enqueueAsyncMutation(w, r, TaskSpec{
 			Kind:      "project." + actionOrAPI,
 			ProjectID: projectID,
 			Resource:  "project:" + projectID,
-			Message:   "正在" + map[string]string{"start": "启动项目", "stop": "停止项目", "reload": "重载项目"}[actionOrAPI],
+			Message:   "正在" + actionMessages[actionOrAPI],
 		}, (*Server).handleProjectRoute) {
 			return
 		}
@@ -1137,13 +1145,23 @@ func (s *Server) handleProjectRoute(w http.ResponseWriter, r *http.Request) {
 			actionErr = s.projects.StopProject(r.Context(), projectID)
 		case "reload":
 			actionErr = s.projects.ReloadProject(r.Context(), projectID)
+		case "cooldown":
+			actionErr = s.projects.CooldownProject(r.Context(), projectID)
+		case "release":
+			actionErr = s.projects.ReleaseProject(r.Context(), projectID)
 		}
 		if actionErr != nil {
 			w.WriteHeader(http.StatusConflict)
 			writeJSON(w, map[string]any{"error": actionErr.Error()})
 			return
 		}
-		actionMessage := map[string]string{"start": "项目已启动", "stop": "项目已停止", "reload": "项目已重新加载"}
+		actionMessage := map[string]string{
+			"start":    "项目已启动",
+			"stop":     "项目已停止",
+			"reload":   "项目已重新加载",
+			"cooldown": "项目已进入冷却，自动探测已暂停",
+			"release":  "项目已退出冷却，自动探测已恢复",
+		}
 		writeJSON(w, map[string]any{"message": actionMessage[actionOrAPI]})
 		return
 	}

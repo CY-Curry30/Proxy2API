@@ -320,6 +320,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 }
 
 func (p *poolOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	p.noteApplication()
 	maxAttempts := p.maxAttempts()
 	stickyKey := p.stickyKeyFromCtx(ctx)
 	singleMember := len(p.options.Members) <= 1
@@ -367,6 +368,7 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 }
 
 func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	p.noteApplication()
 	maxAttempts := p.maxAttempts()
 	stickyKey := p.stickyKeyFromCtx(ctx)
 	singleMember := len(p.options.Members) <= 1
@@ -411,6 +413,17 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 		lastErr = E.New("没有可用的健康代理")
 	}
 	return nil, fmt.Errorf("监听数据包在尝试 %d 次后仍失败: %w", maxAttempts, lastErr)
+}
+
+// noteApplication records that an application just used this project's nodes.
+// It is the signal that ends an idle cool-down, so it is recorded for every
+// dial attempt — a failing request still proves the project is in use. The
+// monitor may answer by clearing the cool-down and scheduling a health sweep,
+// which is why this is called before any selection work.
+func (p *poolOutbound) noteApplication() {
+	if p.monitor != nil {
+		p.monitor.MarkApplied()
+	}
 }
 
 // maxAttempts returns the configured retry budget (>=1).

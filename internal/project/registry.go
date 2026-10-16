@@ -112,6 +112,8 @@ func NewRegistry(parent context.Context, workspace *config.Workspace) (*Registry
 			WithSystemProxyURL(r.systemProxyURL),
 			WithGlobalProbeTarget(r.probeTargetOverride),
 		)
+		// A project the operator parked before the restart comes back parked.
+		r.runtimes[id].SetManualCooldown(spec.ManualCooling())
 	}
 	if catalogChanged && workspace.Persisted() {
 		if err := workspace.Save(); err != nil {
@@ -760,6 +762,36 @@ func (r *Registry) projectSummary(id string, spec config.ProjectSpec, runtime *R
 	if summary.MonitoredNodeCount > 0 {
 		summary.HealthRate = float64(summary.HealthyNodeCount) / float64(summary.MonitoredNodeCount) * 100
 	}
+	summary.Cooldown = r.cooldownSummary(cfg, runtime)
+	return summary
+}
+
+// cooldownSummary merges the persisted policy with the live cool-down state so
+// the management page can render the badge and the 冷却/释放 button from one
+// payload, for running and stopped projects alike.
+func (r *Registry) cooldownSummary(cfg *config.Config, runtime *Runtime) monitor.CooldownSummary {
+	summary := monitor.CooldownSummary{}
+	if cfg != nil {
+		summary.Enabled = cfg.Cooldown.EnabledOrDefault()
+		summary.Duration = cfg.Cooldown.DurationOrDefault().String()
+	} else if runtime != nil {
+		summary.Enabled = true
+		summary.Duration = config.DefaultCooldownDuration.String()
+	}
+	if runtime == nil {
+		return summary
+	}
+	status := runtime.CooldownStatus()
+	summary.Active = status.Active
+	summary.Manual = status.Manual
+	summary.Since = status.Since
+	summary.LastApplied = status.LastApplied
+	if status.IdleFor > 0 {
+		summary.IdleFor = status.IdleFor.Round(time.Second).String()
+	}
+	if status.Duration > 0 {
+		summary.Duration = status.Duration.String()
+	}
 	return summary
 }
 
@@ -789,6 +821,10 @@ func runtimeSettings(cfg *config.Config) monitor.ProjectRuntimeSettings {
 		Probe: monitor.ProjectProbeSettings{
 			Target: cfg.ProbeTargetOrDefault(), Interval: cfg.ProbeIntervalOrDefault().String(),
 			Timeout: cfg.ProbeTimeoutOrDefault().String(), Concurrency: cfg.ProbeConcurrencyOrDefault(),
+		},
+		Cooldown: monitor.ProjectCooldownSettings{
+			Enabled:  cfg.Cooldown.EnabledOrDefault(),
+			Duration: cfg.Cooldown.DurationOrDefault().String(),
 		},
 		SubscriptionRefresh: monitor.ProjectSubscriptionSettings{
 			Enabled: cfg.SubscriptionRefresh.Enabled, Interval: cfg.SubscriptionRefresh.Interval.String(),
@@ -966,6 +1002,7 @@ func (r *Registry) CreateProject(ctx context.Context, request monitor.ProjectCre
 		WithSystemProxyURL(r.systemProxyURL),
 		WithGlobalProbeTarget(r.probeTargetOverride),
 	)
+	runtime.SetManualCooldown(spec.ManualCooling())
 	r.mu.Lock()
 	r.workspace.Projects[id] = spec
 	if firstProject {
@@ -1024,6 +1061,9 @@ func defaultProjectConfig(mode string, listenerPort, multiPortBase uint16) *conf
 			Interval:    time.Hour,
 			Timeout:     config.DefaultProbeTimeout,
 			Concurrency: 32,
+		},
+		Cooldown: config.CooldownConfig{
+			Duration: config.DefaultCooldownDuration,
 		},
 		SubscriptionRefresh: config.SubscriptionRefreshConfig{
 			Interval:           24 * time.Hour,
@@ -1178,6 +1218,24 @@ func applyRuntimeSettings(cfg *config.Config, settings monitor.ProjectRuntimeSet
 	if settings.Probe.Concurrency <= 0 || settings.Probe.Concurrency > 1024 {
 		return errors.New("探测并发数必须在 1 到 1024 之间")
 	}
+	// An empty cool-down duration keeps the built-in default so older payloads
+	// (which do not carry the section) cannot fail an unrelated settings save.
+	cooldownDuration := config.DefaultCooldownDuration
+	if raw := strings.TrimSpace(settings.Cooldown.Duration); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return errors.New("冷却时长格式无效，示例：1h、90m")
+		}
+		if parsed <= 0 {
+			return errors.New("冷却时长必须是正数")
+		}
+		cooldownDuration = parsed
+	}
+	if settings.Cooldown.Enabled {
+		if err := config.ValidateCooldownDuration(cooldownDuration); err != nil {
+			return err
+		}
+	}
 	if settings.Pool.FailureThreshold <= 0 || settings.Pool.RetryAttempts <= 0 {
 		return errors.New("节点池阈值必须是正数")
 	}
@@ -1207,6 +1265,9 @@ func applyRuntimeSettings(cfg *config.Config, settings monitor.ProjectRuntimeSet
 	cfg.Probe.Interval = probeInterval
 	cfg.Probe.Timeout = probeTimeout
 	cfg.Probe.Concurrency = settings.Probe.Concurrency
+	cooldownEnabled := settings.Cooldown.Enabled
+	cfg.Cooldown.Enabled = &cooldownEnabled
+	cfg.Cooldown.Duration = cooldownDuration
 	cfg.SubscriptionRefresh.Enabled = settings.SubscriptionRefresh.Enabled
 	cfg.SubscriptionRefresh.Interval = subInterval
 	if settings.SelectedSubscriptions != nil {
@@ -1347,8 +1408,66 @@ func (r *Registry) StartProject(ctx context.Context, id string) error {
 	if err := runtime.Start(); err != nil {
 		return err
 	}
+	// An explicit start opens a fresh usage window: the operator just switched
+	// the project on, so it must not be treated as idle since the last time an
+	// application used it.
+	runtime.ResetIdleTimer()
 	r.persistProjectRunning(id, true)
 	return nil
+}
+
+// CooldownProject parks a project by hand: automatic node probing stops until
+// the operator releases it or a new application uses the project.
+func (r *Registry) CooldownProject(ctx context.Context, id string) error {
+	return r.setManualCooldown(ctx, id, true)
+}
+
+// ReleaseProject clears a manual cool-down and resumes automatic probing.
+func (r *Registry) ReleaseProject(ctx context.Context, id string) error {
+	return r.setManualCooldown(ctx, id, false)
+}
+
+func (r *Registry) setManualCooldown(ctx context.Context, id string, active bool) error {
+	r.mu.RLock()
+	_, ok := r.workspace.Projects[id]
+	runtime := r.runtimes[id]
+	r.mu.RUnlock()
+	if !ok || runtime == nil {
+		return fmt.Errorf("%w: %s", ErrProjectNotFound, id)
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+	// Persist first so a crash between the two steps cannot leave a project
+	// parked in memory but not on disk; the live runtime is then told either way
+	// so the WebUI reflects the operator's click immediately.
+	r.persistProjectCooldown(id, active)
+	runtime.SetManualCooldown(active)
+	return nil
+}
+
+// persistProjectCooldown records an operator-triggered cool-down in
+// projects.yaml, mirroring persistProjectRunning: only a real change is written
+// so toggling back to the default never rewrites the workspace file.
+func (r *Registry) persistProjectCooldown(id string, active bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	spec, ok := r.workspace.Projects[id]
+	if !ok || spec.ManualCooling() == active || !r.workspace.Persisted() {
+		return
+	}
+	previous := spec
+	value := active
+	spec.ManualCooldown = &value
+	r.workspace.Projects[id] = spec
+	if err := r.workspace.Save(); err != nil {
+		r.workspace.Projects[id] = previous
+		log.Printf("[项目:%s] 保存冷却状态失败: %v", id, err)
+	}
 }
 
 func (r *Registry) StopProject(ctx context.Context, id string) error {

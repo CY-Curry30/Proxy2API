@@ -47,6 +47,7 @@ type Config struct {
 	Sticky                StickyConfig              `yaml:"sticky"`
 	Management            ManagementConfig          `yaml:"management"`
 	Probe                 ProbeConfig               `yaml:"probe,omitempty"`
+	Cooldown              CooldownConfig            `yaml:"cooldown,omitempty"`
 	SubscriptionRefresh   SubscriptionRefreshConfig `yaml:"subscription_refresh"`
 	Log                   LogConfig                 `yaml:"log"`
 	Nodes                 []NodeConfig              `yaml:"nodes"`
@@ -156,6 +157,66 @@ type ProbeConfig struct {
 	Interval    time.Duration `yaml:"interval" json:"interval"`
 	Timeout     time.Duration `yaml:"timeout" json:"timeout"`
 	Concurrency int           `yaml:"concurrency" json:"concurrency"`
+}
+
+// CooldownConfig pauses a project's automatic health checks while no
+// application has used its nodes. The project leaves the cool-down state on the
+// next node application (or when the operator releases it manually), at which
+// point automatic probing resumes.
+type CooldownConfig struct {
+	// Enabled turns the idle cool-down off entirely when explicitly false. A
+	// missing value means enabled so projects created before this feature keep
+	// behaving as documented.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Duration is how long a project may stay idle (no node application) before
+	// it enters cool-down. Zero means DefaultCooldownDuration.
+	Duration time.Duration `yaml:"duration,omitempty" json:"duration,omitempty"`
+}
+
+// DefaultCooldownDuration is the idle threshold used when a project does not
+// configure one: one hour without any node application pauses automatic probes.
+const DefaultCooldownDuration = time.Hour
+
+// MinCooldownDuration is the shortest accepted idle threshold. Anything below
+// would cool a project down between two consecutive probes of a busy project.
+const MinCooldownDuration = time.Minute
+
+// MaxCooldownDuration bounds the idle threshold to 30 days.
+const MaxCooldownDuration = 30 * 24 * time.Hour
+
+// EnabledOrDefault reports whether the idle cool-down is active. A missing
+// value counts as enabled.
+func (c CooldownConfig) EnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// DurationOrDefault resolves the idle threshold, falling back to one hour.
+func (c CooldownConfig) DurationOrDefault() time.Duration {
+	if c.Duration <= 0 {
+		return DefaultCooldownDuration
+	}
+	return c.Duration
+}
+
+// EffectiveDuration returns the idle threshold that is actually in force: zero
+// while the feature is switched off, so callers can treat "disabled" and "no
+// threshold" alike.
+func (c CooldownConfig) EffectiveDuration() time.Duration {
+	if !c.EnabledOrDefault() {
+		return 0
+	}
+	return c.DurationOrDefault()
+}
+
+// ValidateCooldownDuration rejects idle thresholds outside the supported range.
+func ValidateCooldownDuration(duration time.Duration) error {
+	if duration < MinCooldownDuration {
+		return fmt.Errorf("冷却时长不能小于 %s", MinCooldownDuration)
+	}
+	if duration > MaxCooldownDuration {
+		return fmt.Errorf("冷却时长不能超过 %s", MaxCooldownDuration)
+	}
+	return nil
 }
 
 // SubscriptionRefreshConfig controls subscription auto-refresh and reload settings.
@@ -3166,6 +3227,7 @@ func (c *Config) SaveSettings() error {
 
 	saveCfg.ExternalIP = c.ExternalIP
 	saveCfg.Probe = c.Probe
+	saveCfg.Cooldown = c.Cooldown
 	saveCfg.SkipCertVerify = c.SkipCertVerify
 	saveCfg.Log = c.Log
 	if !c.sourcesShared {

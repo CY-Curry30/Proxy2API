@@ -59,6 +59,14 @@ type Runtime struct {
 	// globalProbeTarget resolves the workspace-wide latency target. A non-empty
 	// value overrides this project's probe.target on every load.
 	globalProbeTarget func() string
+	// manualCooldown mirrors the operator's parked/released decision from
+	// projects.yaml. It is pushed into the monitor on every start and applied
+	// live when the management page toggles it.
+	manualCooldown bool
+	// lastApplied is the last node application seen by this runtime. It is
+	// carried across an internal restart (a subscription refresh reload) so the
+	// idle timer measures real idle time instead of restarting from zero.
+	lastApplied time.Time
 }
 
 type RuntimeOption func(*Runtime)
@@ -178,7 +186,15 @@ func (r *Runtime) Start() error {
 		return fmt.Errorf("打开项目 %q 的状态库失败: %w", r.id, err)
 	}
 	ctx, cancel := context.WithCancel(r.parentCtx)
-	monitorCfg := monitorConfigForProject(cfg, store, r.probeCoordinator, r.id)
+	r.mu.RLock()
+	cooldown := monitor.CooldownSettings{
+		Enabled:     cfg.Cooldown.EnabledOrDefault(),
+		Duration:    cfg.Cooldown.EffectiveDuration(),
+		Manual:      r.manualCooldown,
+		LastApplied: r.lastApplied,
+	}
+	r.mu.RUnlock()
+	monitorCfg := monitorConfigForProject(cfg, store, r.probeCoordinator, r.id, cooldown)
 	boxMgr := boxmgr.New(
 		cfg,
 		monitorCfg,
@@ -246,7 +262,7 @@ func (r *Runtime) Restart() error {
 	return r.Start()
 }
 
-func monitorConfigForProject(cfg *config.Config, store *state.Store, probeCoordinator *monitor.ProbeCoordinator, probeOwner string) monitor.Config {
+func monitorConfigForProject(cfg *config.Config, store *state.Store, probeCoordinator *monitor.ProbeCoordinator, probeOwner string, cooldown monitor.CooldownSettings) monitor.Config {
 	proxyUsername := cfg.Listener.Username
 	proxyPassword := cfg.Listener.Password
 	if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
@@ -268,6 +284,7 @@ func monitorConfigForProject(cfg *config.Config, store *state.Store, probeCoordi
 		StickyNode:       cfg.Sticky.FixedNode,
 		SkipCertVerify:   cfg.SkipCertVerify,
 		TrafficAPI:       fmt.Sprintf("http://127.0.0.1:%d/traffic", cfg.ClashAPIPort),
+		Cooldown:         cooldown,
 	}
 }
 
@@ -299,6 +316,16 @@ func (r *Runtime) Stop() error {
 	}
 	var closeErr error
 	if boxMgr != nil {
+		// Remember when an application last used this project before the monitor
+		// that tracks it goes away, so an internal restart (a subscription
+		// refresh reload) does not reset the idle timer to zero.
+		if monitorMgr := boxMgr.MonitorManager(); monitorMgr != nil {
+			if applied := monitorMgr.LastAppliedAt(); !applied.IsZero() {
+				r.mu.Lock()
+				r.lastApplied = applied
+				r.mu.Unlock()
+			}
+		}
 		closeErr = boxMgr.Close()
 	}
 	if store != nil {
@@ -423,6 +450,53 @@ func (r *Runtime) SubscriptionRefresher() monitor.SubscriptionRefresher {
 }
 
 func (r *Runtime) LogBuffer() *monitor.LogBuffer { return r.logBuffer }
+
+// SetManualCooldown parks or releases the project by hand. A running project
+// picks the change up immediately; a stopped one keeps it for its next start.
+func (r *Runtime) SetManualCooldown(active bool) {
+	r.mu.Lock()
+	r.manualCooldown = active
+	boxMgr := r.boxMgr
+	r.mu.Unlock()
+	if boxMgr == nil {
+		return
+	}
+	if monitorMgr := boxMgr.MonitorManager(); monitorMgr != nil {
+		monitorMgr.SetManualCooldown(active)
+	}
+}
+
+// ManualCooldown reports the persisted operator decision, even while stopped.
+func (r *Runtime) ManualCooldown() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.manualCooldown
+}
+
+// CooldownStatus reports the live cool-down state. A stopped project has no
+// probing to pause, so only the persisted manual intent is reported.
+func (r *Runtime) CooldownStatus() monitor.CooldownStatus {
+	r.mu.RLock()
+	boxMgr := r.boxMgr
+	manual := r.manualCooldown
+	lastApplied := r.lastApplied
+	r.mu.RUnlock()
+	if boxMgr != nil {
+		if monitorMgr := boxMgr.MonitorManager(); monitorMgr != nil {
+			return monitorMgr.CooldownStatus()
+		}
+	}
+	return monitor.CooldownStatus{Manual: manual, LastApplied: lastApplied}
+}
+
+// ResetIdleTimer restarts the idle countdown. An explicit operator start is a
+// fresh usage window: the project was just switched on, so it should not be
+// treated as idle since whenever it was last used.
+func (r *Runtime) ResetIdleTimer() {
+	r.mu.Lock()
+	r.lastApplied = time.Time{}
+	r.mu.Unlock()
+}
 
 type runtimeLogger struct {
 	logger *log.Logger
