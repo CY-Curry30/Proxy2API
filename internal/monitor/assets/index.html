@@ -386,6 +386,11 @@
     }
     tr:hover { background: rgba(100,100,100,0.02); }
 
+    /* 操作列按钮保持一行。节点表列很多，允许换行会让「探测/Trace/指定/拉黑/小黑屋」
+       逐行堆叠（窄屏时行高从 58px 涨到 167px），也会把其它列压到只剩一个字宽。
+       保持一行后表格会按自身最小宽度在 .table-container 内横向滚动。 */
+    .node-actions { white-space: nowrap; }
+
     /* Truncate long names/URIs so the table layout stays intact */
     .cell-trunc {
       max-width: 260px;
@@ -435,6 +440,10 @@
     
     .badge {
       padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500;
+      /* 徽标都是短标签（在线/未测试/小黑屋/冷却中…）。中文允许在任意两字之间断行，
+         所以列被表格挤压时「最小内容宽度」只有 1 个字，「在线」会被拆成「在」「线」
+         两行。徽标必须整体不换行：宁可让表格横向滚动，也不要把状态拆开。 */
+      white-space: nowrap;
     }
     .badge-healthy { background: var(--success-bg); color: var(--success); border: 1px solid var(--success); }
     .badge-warning { background: var(--warning-bg); color: var(--warning); border: 1px solid var(--warning); }
@@ -3884,7 +3893,7 @@
           <td class="tt-mono">${n.active_connections||0}</td>
           <td class="tt-mono" style="color:${successRate === null ? 'var(--text-muted)' : (successRate >= 90 ? 'var(--success)' : (successRate >= 70 ? 'var(--warning)' : 'var(--error)'))}" title="请求成功 ${n.success_count||0} / 请求失败 ${n.failure_count||0}">${successRate === null ? '-' : successRate.toFixed(1)+'%'}</td>
           <td class="tt-mono" style="white-space:nowrap" title="${escapeHtml(formatDateTime(n.last_probed_at))}">${escapeHtml(formatDateTime(n.last_probed_at))}</td>
-          <td>
+          <td class="node-actions">
             <button class="btn btn-sm" onclick="probeNode('${escapeAttrJs(n.tag)}')">探测</button>
             <button class="btn btn-sm" onclick="traceNode('${escapeAttrJs(n.tag)}')" title="只重新获取出口 IP / 地区，不改动状态与延迟">Trace</button>
             ${stickyNodeTag === n.tag
