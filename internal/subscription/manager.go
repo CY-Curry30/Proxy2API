@@ -766,6 +766,20 @@ func (m *Manager) SetSubscriptionEnabled(rawURL string, enabled bool) error {
 	return nil
 }
 
+// SyncPauseState installs the close lists owned by the config that persists
+// them. A manager created on a snapshot of that config never observes a toggle
+// the API writes straight onto the original, so a later save from the snapshot
+// would resurrect a close the operator already lifted.
+func (m *Manager) SyncPauseState(manualDisabled, autoDisabled []string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.baseCfg.DisabledSubscriptions = append([]string(nil), manualDisabled...)
+	m.baseCfg.AutoDisabledSubscriptions = append([]string(nil), autoDisabled...)
+	m.mu.Unlock()
+}
+
 // EnableBlockReason reports why a subscription may not be enabled right now.
 // An empty string means enabling is allowed. A subscription without a traffic
 // quota and without an expiry date is unconstrained and always allowed.

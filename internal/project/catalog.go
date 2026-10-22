@@ -147,8 +147,12 @@ func (r *CatalogRuntime) Start() error {
 	subMgr := subscription.New(cfg, boxMgr, subscription.WithSystemProxyURL(r.systemProxyURL))
 	subMgr.Start()
 	view := monitor.SubscriptionRefresher(subMgr)
-	if r.syncShared != nil {
-		view = &catalogSubscriptionRefresher{inner: subMgr, syncShared: r.syncShared}
+	if r.syncShared != nil || r.sharedCfg != nil {
+		view = &catalogSubscriptionRefresher{
+			inner:          subMgr,
+			syncShared:     r.syncShared,
+			syncPauseState: func() { r.syncCatalogPauseState(subMgr) },
+		}
 	}
 
 	r.mu.Lock()
@@ -203,6 +207,11 @@ func (r *CatalogRuntime) ReloadFromShared() error {
 		return err
 	}
 	if subMgr != nil {
+		// The manager runs on a snapshot of shared.yaml, so it cannot see a
+		// pause the API wrote straight onto the shared config. Push the current
+		// close lists first: UpdateConfig saves the snapshot back, and a stale
+		// list there would resurrect a toggle the operator already lifted.
+		r.syncCatalogPauseState(subMgr)
 		subMgr.UpdateConfig(next.Subscriptions, false, next.SubscriptionRefresh.Interval)
 	}
 	r.mu.Lock()
@@ -221,6 +230,30 @@ func (r *CatalogRuntime) ReloadIfRunning() error {
 		return nil
 	}
 	return r.ReloadFromShared()
+}
+
+// syncCatalogPauseState copies the shared close lists onto the subscription
+// manager's config snapshot. The manager saves that snapshot back to
+// shared.yaml, so it must carry the operator's latest manual decision.
+func (r *CatalogRuntime) syncCatalogPauseState(subMgr *subscription.Manager) {
+	if subMgr == nil {
+		return
+	}
+	manual, auto := r.sharedPauseState()
+	subMgr.SyncPauseState(manual, auto)
+}
+
+// sharedPauseState returns the close lists currently held by the shared config.
+func (r *CatalogRuntime) sharedPauseState() (manual, auto []string) {
+	if r.sharedMu != nil {
+		r.sharedMu.RLock()
+		defer r.sharedMu.RUnlock()
+	}
+	if r.sharedCfg == nil {
+		return nil, nil
+	}
+	return append([]string(nil), r.sharedCfg.DisabledSubscriptions...),
+		append([]string(nil), r.sharedCfg.AutoDisabledSubscriptions...)
 }
 
 func (r *CatalogRuntime) Binding() (monitor.ProjectBinding, error) {
@@ -280,8 +313,17 @@ func (r *CatalogRuntime) catalogConfig(listenerPort, clashPort uint16) *config.C
 }
 
 type catalogSubscriptionRefresher struct {
-	inner      monitor.SubscriptionRefresher
-	syncShared func() error
+	inner          monitor.SubscriptionRefresher
+	syncShared     func() error
+	syncPauseState func()
+}
+
+// prepare aligns the manager's snapshot with the shared close lists before a
+// mutation that ends in a SaveSettings call.
+func (r *catalogSubscriptionRefresher) prepare() {
+	if r.syncPauseState != nil {
+		r.syncPauseState()
+	}
 }
 
 func (r *catalogSubscriptionRefresher) sync(err error) error {
@@ -301,16 +343,20 @@ func (r *catalogSubscriptionRefresher) Subscriptions() []monitor.SubscriptionInf
 	return r.inner.Subscriptions()
 }
 func (r *catalogSubscriptionRefresher) UpdateConfig(urls []string, enabled bool, interval time.Duration) {
+	r.prepare()
 	r.inner.UpdateConfig(urls, enabled, interval)
 	_ = r.syncShared()
 }
 func (r *catalogSubscriptionRefresher) UpdateConfigAndRefresh(urls []string, enabled bool, interval time.Duration) error {
+	r.prepare()
 	return r.sync(r.inner.UpdateConfigAndRefresh(urls, enabled, interval))
 }
 func (r *catalogSubscriptionRefresher) UpdateConfigAndRefreshSelected(urls []string, enabled bool, interval time.Duration, refreshURLs []string) error {
+	r.prepare()
 	return r.sync(r.inner.UpdateConfigAndRefreshSelected(urls, enabled, interval, refreshURLs))
 }
 func (r *catalogSubscriptionRefresher) SetSubscriptionEnabled(rawURL string, enabled bool) error {
+	r.prepare()
 	return r.sync(r.inner.SetSubscriptionEnabled(rawURL, enabled))
 }
 func (r *catalogSubscriptionRefresher) EnableBlockReason(rawURL string) string {

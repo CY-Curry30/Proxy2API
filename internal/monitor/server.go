@@ -4201,11 +4201,18 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			sharedLock.Unlock()
-			payload := s.subscriptionManagementPayload()
+			// Reload before building the payload: the catalog manager only
+			// learns about the new gate from this reload, so a payload taken
+			// earlier would keep reporting the previous close.
+			reloadStatus := make(map[string]any, 2)
 			if s.projects != nil {
 				// Every running project restarts so it inherits the new gate and
 				// its node pool stops carrying the closed subscription's nodes.
-				s.reloadSharedSources(r.Context(), payload)
+				s.reloadSharedSources(r.Context(), reloadStatus)
+			}
+			payload := s.subscriptionManagementPayload()
+			for key, value := range reloadStatus {
+				payload[key] = value
 			}
 			writeJSON(w, payload)
 			return
