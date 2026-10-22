@@ -286,6 +286,11 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/nodes/", s.withAuth(s.withDefaultProject((*Server).handleNodeAction)))
 	mux.HandleFunc("/api/debug", s.withAuth(s.withDefaultProject((*Server).handleDebug)))
 	mux.HandleFunc("/api/export", s.withAuth(s.withDefaultProject((*Server).handleExport)))
+	// Backup export/import is workspace-scoped on purpose: a single project
+	// backup still has to reach the shared catalog, so it cannot ride the
+	// per-project runtime mux.
+	mux.HandleFunc("/api/backup", s.withAuth(s.handleBackup))
+	mux.HandleFunc("/api/backup/import", s.withAuth(s.handleBackupImport))
 	mux.HandleFunc("/api/subscription/status", s.withAuth(s.withDefaultProject((*Server).handleSubscriptionStatus)))
 	mux.HandleFunc("/api/subscription/refresh", s.withAuth(s.withDefaultProject((*Server).handleSubscriptionRefresh)))
 	mux.HandleFunc("/api/subscription/config", s.withAuth(s.withDefaultProject((*Server).handleSubscriptionConfig)))

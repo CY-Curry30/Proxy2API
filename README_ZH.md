@@ -17,7 +17,8 @@ Proxy2API 是一个基于 sing-box 的代理池管理工具。
 - 端口稳定（multi-port/hybrid）：每个节点按 URI 稳定标识（忽略名称与参数顺序），订阅刷新或重启后保持同一本地端口（持久化到各项目目录的 `node_ports.json`）。
 - 粘性代理：可选的独立端口，按来源 IP 把客户端固定绑定到同一上游节点，保持出口 IP 稳定，与轮询的 pool 入口共存（仅 pool/hybrid 模式）。
 - Web 管理面板 + API：
-  - 节点状态/探测/导出
+  - 节点状态/探测
+  - **配置备份导出与导入**（项目级或全量：项目配置、节点、端口映射、订阅与缓存、节点状态、流量统计）
   - **手动拉黑/解封节点**
   - 项目运行设置（`external_ip`、`probe`、`skip_cert_verify`、监听/节点池/粘性配置）
   - 节点配置增删改查 + 重载
@@ -215,7 +216,10 @@ dns:
 - `POST /api/nodes/{tag}/blacklist`（可选 JSON：`{"duration":"1h"}`）
 - `POST /api/nodes/probe-all`（SSE）
 - `GET|PUT|DELETE /api/sticky/fixed-node`（指定粘性入口出口；清空后恢复最低延迟选择）
-- `GET /api/export`
+- `GET /api/export`（导出节点代理 URI 文本，`?all=true` 含不可用节点）
+- `GET /api/backup?project={id}`（导出单个项目的完整数据：项目配置、节点、端口映射、订阅与订阅节点缓存、节点状态、每日流量）
+- `GET /api/backup?scope=all`（导出工作区设置 + 共享节点/订阅 + 全部项目）
+- `POST /api/backup/import?mode=overwrite|skip`（导入上述 JSON；请求体为 `{"mode":"overwrite","bundle":{...}}`，也接受裸备份文档。共享节点与订阅只合并、不删除；项目数据按备份还原，端口冲突时自动改分配到空闲端口）
 - `GET|PUT /api/subscription/config`
 - `GET|POST /api/subscription/status|refresh`
 - `POST /api/reload`

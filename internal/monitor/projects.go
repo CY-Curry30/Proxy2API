@@ -238,4 +238,10 @@ type ProjectController interface {
 	ApplySharedSubscriptionMembership(rawURL string, include, exclude []string) error
 	SystemSettings() SystemSettings
 	UpdateSystemSettings(ctx context.Context, settings SystemSettings) error
+	// ExportBackup collects one project (all=false) or the whole workspace
+	// (all=true) into a portable backup document.
+	ExportBackup(ctx context.Context, projectID string, all bool) (BackupBundle, error)
+	// ImportBackup restores a backup document. Shared sources are merged
+	// additively; project data is replaced unless mode is "skip".
+	ImportBackup(ctx context.Context, bundle BackupBundle, mode string) (BackupImportResult, error)
 }

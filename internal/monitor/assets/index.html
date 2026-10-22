@@ -808,8 +808,9 @@
         </button>
         <button class="btn btn-primary" id="probeAllBtn" onclick="probeAllNodes()">⚡ 批量探测</button>
         <button class="btn" id="refreshSubBtn" onclick="refreshSubscription()" style="display:none;">刷新订阅</button>
-        <button class="btn header-secondary" onclick="exportNodes()">导出配置</button>
-        <button class="btn header-secondary" onclick="exportNodes(true)">全部导出</button>
+        <button class="btn header-secondary" onclick="exportBackup(false)" title="导出当前项目的全部数据；全局视图下导出全部项目">导出配置</button>
+        <button class="btn header-secondary" onclick="exportBackup(true)" title="导出全部项目与共享目录的全部数据">全部导出</button>
+        <button class="btn header-secondary" onclick="openBackupImportModal()" title="从导出的备份文件恢复数据">导入配置</button>
         <button class="btn" onclick="toggleAutoRefresh()" id="autoRefreshBtn">⏹ 关闭自动刷新</button>
         <button class="btn" onclick="refresh()">↺ 刷新</button>
       </div>
@@ -1461,6 +1462,31 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="backupImportModalOverlay">
+    <div class="modal">
+      <div class="modal-header">导入配置</div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="backupImportFile">备份文件</label>
+          <input type="file" id="backupImportFile" class="setting-input" accept=".json,application/json" onchange="previewBackupFile(this)" />
+          <em style="font-size:11px;color:var(--text-muted);">选择由「导出配置」或「全部导出」生成的 JSON 文件</em>
+        </div>
+        <div id="backupImportPreview" style="display:none; font-size:12px; color:var(--text-muted); line-height:1.7; margin-bottom:12px; word-break:break-all;"></div>
+        <div class="form-group">
+          <label>同名项目处理方式</label>
+          <div class="checkbox-row"><input type="radio" name="backupImportMode" id="backupImportModeOverwrite" value="overwrite" checked /><label for="backupImportModeOverwrite">覆盖：用备份里的配置、节点与状态替换现有项目</label></div>
+          <div class="checkbox-row"><input type="radio" name="backupImportMode" id="backupImportModeSkip" value="skip" /><label for="backupImportModeSkip">跳过：保留现有项目，只导入缺失的项目</label></div>
+        </div>
+        <div id="backupImportResult" style="display:none; font-size:12px; line-height:1.8; padding:10px; border-radius:4px; border:1px solid var(--border);"></div>
+        <em style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;">共享节点与订阅只做合并（不会删除已有条目）；项目配置、节点列表、端口映射、节点状态与流量统计按备份还原，端口冲突时自动改分配到空闲端口。</em>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" onclick="closeBackupImportModal()">取消</button>
+        <button type="button" class="btn btn-primary" id="backupImportSubmitBtn" onclick="submitBackupImport()">开始导入</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="projectModalOverlay">
     <div class="modal modal-project">
       <div class="modal-header" id="projectModalTitle">新建项目</div>
@@ -1653,6 +1679,9 @@
     function projectAPIPath(path) {
       if (typeof path !== 'string' || !path.startsWith('/api/')) return path;
       if (path === '/api/auth' || path === '/api/projects' || path.startsWith('/api/projects/') || path === '/api/tasks' || path.startsWith('/api/tasks/')) return path;
+      // 备份导出/导入是工作区级接口：单个项目的备份同样要访问共享目录，
+      // 因此不能被改写成 /api/projects/<id>/...。
+      if (path === '/api/backup' || path.startsWith('/api/backup/')) return path;
       if (!currentProjectID) return path;
       return `/api/projects/${encodeURIComponent(currentProjectID)}${path.slice(4)}`;
     }
@@ -4248,15 +4277,177 @@
       }
     }
 
-    async function exportNodes(all=false) {
+    // 导出配置：当前项目的全部数据；全局视图下等同于全部导出。
+    // 全部导出：工作区设置 + 共享节点/订阅 + 所有项目。
+    async function exportBackup(all=false) {
+      const wantAll = !!all || !currentProjectID;
+      const url = wantAll
+        ? '/api/backup?scope=all'
+        : `/api/backup?project=${encodeURIComponent(currentProjectID)}`;
       try {
-        const res = await fetch(all ? '/api/export?all=true' : '/api/export');
-        if(!res.ok) throw new Error();
+        const res = await nativeFetch(url);
+        if (!res.ok) {
+          let message = `导出失败 (HTTP ${res.status})`;
+          try { const data = await res.json(); if (data && data.error) message = data.error; } catch (_) {}
+          throw new Error(message);
+        }
+        const disposition = res.headers.get('Content-Disposition') || '';
+        const matched = /filename="?([^";]+)"?/i.exec(disposition);
+        const fallback = wantAll
+          ? 'proxy2api-backup-workspace.json'
+          : `proxy2api-backup-${currentProjectID}.json`;
         const blob = await res.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = all ? 'nodes_all.txt' : 'nodes.txt';
-        document.body.appendChild(a); a.click(); document.body.removeChild(a); window.URL.revokeObjectURL(url);
-      } catch(e) { showToast('导出失败', 'error');}
+        const objectURL = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectURL;
+        link.download = matched ? matched[1] : fallback;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(objectURL);
+        showToast(wantAll ? '已导出全部项目的数据' : '已导出当前项目的数据');
+      } catch (error) {
+        showToast(error.message || '导出失败', 'error');
+      }
+    }
+
+    function openBackupImportModal() {
+      const input = document.getElementById('backupImportFile');
+      if (input) input.value = '';
+      const preview = document.getElementById('backupImportPreview');
+      if (preview) { preview.style.display = 'none'; preview.innerHTML = ''; }
+      const result = document.getElementById('backupImportResult');
+      if (result) { result.style.display = 'none'; result.innerHTML = ''; }
+      const submit = document.getElementById('backupImportSubmitBtn');
+      if (submit) {
+        submit.disabled = false;
+        submit.textContent = '开始导入';
+        // 上一轮导入若以「关闭」收尾会改写 onclick，这里恢复成提交动作。
+        submit.onclick = function() { submitBackupImport(); };
+      }
+      const overwrite = document.getElementById('backupImportModeOverwrite');
+      if (overwrite) overwrite.checked = true;
+      document.getElementById('backupImportModalOverlay').classList.add('show');
+    }
+
+    function closeBackupImportModal() {
+      document.getElementById('backupImportModalOverlay').classList.remove('show');
+    }
+
+    function describeBackupBundle(bundle) {
+      const parts = [];
+      const projects = Array.isArray(bundle.projects) ? bundle.projects : [];
+      parts.push(bundle.scope === 'workspace' ? '全量备份' : '项目备份');
+      parts.push(`${projects.length} 个项目`);
+      if (projects.length) {
+        const names = projects.slice(0, 6).map(item => item.name || item.id).join('、');
+        parts.push(names + (projects.length > 6 ? ' 等' : ''));
+      }
+      if (bundle.shared) {
+        const nodeCount = (bundle.shared.nodes || []).length;
+        const subCount = (bundle.shared.subscriptions || []).length;
+        parts.push(`共享节点 ${nodeCount} 个 / 订阅 ${subCount} 条`);
+      }
+      if (bundle.exported_at) {
+        const exportedAt = new Date(bundle.exported_at);
+        if (!Number.isNaN(exportedAt.getTime())) parts.push(`导出时间 ${exportedAt.toLocaleString()}`);
+      }
+      return parts.join(' · ');
+    }
+
+    async function previewBackupFile(input) {
+      const preview = document.getElementById('backupImportPreview');
+      const file = input && input.files && input.files[0];
+      if (!preview) return;
+      if (!file) { preview.style.display = 'none'; return; }
+      try {
+        const bundle = JSON.parse(await file.text());
+        if (!bundle || typeof bundle !== 'object' || (!bundle.projects && !bundle.shared && !bundle.workspace)) {
+          throw new Error('文件里没有可导入的数据');
+        }
+        preview.innerHTML = `${escapeHtml(describeBackupBundle(bundle))}<br><span style="color:var(--text-muted)">文件大小 ${(file.size / 1024).toFixed(1)} KB</span>`;
+        preview.style.display = 'block';
+      } catch (error) {
+        preview.innerHTML = `<span style="color:var(--danger,#d33)">${escapeHtml(error.message || '无法解析备份文件')}</span>`;
+        preview.style.display = 'block';
+      }
+    }
+
+    function describeImportResult(result) {
+      const lines = [];
+      const list = (values) => (Array.isArray(values) && values.length ? values.join('、') : '无');
+      lines.push(`新建项目：${list(result.created)}`);
+      lines.push(`覆盖项目：${list(result.updated)}`);
+      if (Array.isArray(result.skipped) && result.skipped.length) lines.push(`跳过项目：${list(result.skipped)}`);
+      if (Array.isArray(result.failed) && result.failed.length) lines.push(`失败项目：${list(result.failed)}`);
+      if (Array.isArray(result.started) && result.started.length) lines.push(`已启动：${list(result.started)}`);
+      const counters = [];
+      if (result.nodes_imported) counters.push(`节点状态 ${result.nodes_imported} 条`);
+      if (result.traffic_days) counters.push(`流量记录 ${result.traffic_days} 天`);
+      if (result.shared_updated) counters.push('共享节点/订阅已更新');
+      if (result.workspace_updated) counters.push('系统设置已更新');
+      if (counters.length) lines.push(counters.join(' · '));
+      return lines;
+    }
+
+    async function submitBackupImport() {
+      const input = document.getElementById('backupImportFile');
+      const file = input && input.files && input.files[0];
+      if (!file) { showToast('请先选择备份文件', 'error'); return; }
+      const modeInput = document.querySelector('input[name="backupImportMode"]:checked');
+      const mode = modeInput ? modeInput.value : 'overwrite';
+      let bundle;
+      try {
+        bundle = JSON.parse(await file.text());
+      } catch (error) {
+        showToast('备份文件不是合法的 JSON', 'error');
+        return;
+      }
+      const button = document.getElementById('backupImportSubmitBtn');
+      const resultBox = document.getElementById('backupImportResult');
+      button.disabled = true;
+      button.textContent = '导入中...';
+      try {
+        const res = await nativeFetch(`/api/backup/import?mode=${encodeURIComponent(mode)}`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({mode, bundle})
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `导入失败 (HTTP ${res.status})`);
+        const lines = describeImportResult(data);
+        const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+        if (resultBox) {
+          const failed = Array.isArray(data.failed) && data.failed.length > 0;
+          const warningHtml = warnings.length
+            ? `<div style="margin-top:6px;color:var(--warning,#b8860b)">提示：<br>${warnings.map(item => escapeHtml(item)).join('<br>')}</div>`
+            : '';
+          resultBox.innerHTML = lines.map(line => escapeHtml(line)).join('<br>') + warningHtml;
+          resultBox.style.display = 'block';
+        }
+        if (warnings.length || (Array.isArray(data.failed) && data.failed.length)) {
+          button.disabled = false;
+          button.textContent = '关闭';
+          button.onclick = closeBackupImportModal;
+          showToast('导入完成，请查看结果提示', 'error');
+        } else {
+          closeBackupImportModal();
+          showToast('导入完成');
+        }
+        // 界面刷新失败不应把已成功的导入显示成失败。
+        try {
+          await loadProjects();
+          renderProjectSelector();
+          renderProjectManagement();
+          await refresh();
+        } catch (refreshError) {
+          console.warn('导入后刷新界面失败', refreshError);
+        }
+      } catch (error) {
+        showToast(error.message || '导入失败', 'error');
+        button.disabled = false;
+        button.textContent = '开始导入';
+      }
     }
 
     // Subscriptions

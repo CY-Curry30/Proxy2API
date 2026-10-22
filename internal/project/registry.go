@@ -425,6 +425,13 @@ func (r *Registry) projectOwnProbeTarget(runtime *Runtime) string {
 func (r *Registry) UpdateSystemSettings(ctx context.Context, settings monitor.SystemSettings) error {
 	r.catalogMu.Lock()
 	defer r.catalogMu.Unlock()
+	return r.applySystemSettingsLocked(ctx, settings)
+}
+
+// applySystemSettingsLocked persists the workspace-wide settings. The caller
+// must already hold catalogMu, which lets a bulk import reuse it without
+// re-entering the non-reentrant mutex.
+func (r *Registry) applySystemSettingsLocked(ctx context.Context, settings monitor.SystemSettings) error {
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
