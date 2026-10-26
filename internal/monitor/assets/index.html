@@ -378,6 +378,8 @@
       font-weight: 600;
       border-bottom: 1px solid var(--border);
       background: rgba(100,100,100,0.05);
+      /* 列标题一律单行：中文可在任意两字间折行，窄屏下「请求成功率」会断成两行撑高表头。 */
+      white-space: nowrap;
     }
     td {
       padding: 12px 16px;
@@ -553,6 +555,9 @@
     .table-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .table-tool { min-height: 34px; width: auto; min-width: 120px; padding: 6px 10px; }
     .table-search { min-width: 230px; flex: 1 1 230px; }
+    /* 看板搜索框要容下「搜索名称、标签、端口或出口 IP」这种长提示，且要能看清输入的 IP 片段，
+       比其它表格的搜索框更宽；窄屏由下面的媒体查询接管成整行。 */
+    #nodeSearchInput { min-width: 360px; flex: 1 1 360px; }
     .table-filter-bar {
       display: flex;
       align-items: center;
@@ -849,7 +854,7 @@
               <div class="project-table-wrap">
                 <table class="project-table">
                   <thead>
-                    <tr><th class="project-select-cell"><input id="projectSelectAll" type="checkbox" onchange="toggleAllVisibleProjects(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>项目</th><th>状态</th><th>模式</th><th>端口</th><th>节点 / 订阅</th><th>操作</th></tr>
+                    <tr><th class="project-select-cell"><input id="projectSelectAll" type="checkbox" onchange="toggleAllVisibleProjects(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>项目</th><th>状态</th><th>模式</th><th>端口</th><th>节点/订阅</th><th>操作</th></tr>
                   </thead>
                   <tbody id="projectTableBody"></tbody>
                 </table>
@@ -962,7 +967,7 @@
                 <option value="all">全部订阅来源</option>
                 <option value="__non_subscription__">非订阅节点</option>
               </select>
-              <input id="nodeSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索名称、标签或端口" oninput="applyNodeFilters()" />
+              <input id="nodeSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索名称、标签、端口或出口 IP" title="支持名称 / 标签 / 端口 / 地区 / 出口 IP 的模糊匹配，IP 可用 * 通配（如 104.28.*）" oninput="applyNodeFilters()" />
             </div>
           </div>
           <div class="table-container">
@@ -971,11 +976,11 @@
                 <tr>
                   <th style="width:40px;"><input type="checkbox" id="nodeSelectAll" onchange="toggleAllNodes(this.checked)" title="全选/取消全选" /></th>
                   <th>状态</th>
-                  <th>名称 (Name/Tag)</th>
+                  <th>节点</th>
                   <th>端口</th>
-                  <th>延迟 / 质量</th>
+                  <th>延迟</th>
                   <th>连接</th>
-                  <th>请求成功率</th>
+                  <th>成功率</th>
                   <th>探测时间</th>
                   <th>操作</th>
                 </tr>
@@ -1053,7 +1058,7 @@
           </div>
           <div class="table-container">
             <table>
-              <thead><tr><th class="config-node-select-cell"><input id="configNodeSelectAll" class="config-node-select" type="checkbox" onchange="toggleAllVisibleConfigNodes(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>名称</th><th>URI</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
+              <thead><tr><th class="config-node-select-cell"><input id="configNodeSelectAll" class="config-node-select" type="checkbox" onchange="toggleAllVisibleConfigNodes(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>名称</th><th>链接</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
               <tbody id="configNodesTableBody"></tbody>
             </table>
             <div id="configNodesEmptyState" class="table-empty-state">暂无节点</div>
@@ -1077,7 +1082,7 @@
           </div>
           <div class="table-container">
             <table class="project-schedule-table">
-              <thead><tr><th>项目</th><th>自动更新订阅</th><th>更新间隔</th><th>操作</th></tr></thead>
+              <thead><tr><th>项目</th><th>自动更新</th><th>更新间隔</th><th>操作</th></tr></thead>
               <tbody id="projectSubscriptionSettingsTableBody"></tbody>
             </table>
           </div>
@@ -1127,7 +1132,7 @@
           </div>
           <div class="table-container">
             <table>
-              <thead><tr><th style="width:40px;"><input type="checkbox" id="subscriptionSelectAll" onchange="toggleAllSubscriptions(this.checked)" title="全选/取消全选" /></th><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点(有效/总)</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
+              <thead><tr><th style="width:40px;"><input type="checkbox" id="subscriptionSelectAll" onchange="toggleAllSubscriptions(this.checked)" title="全选/取消全选" /></th><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点数</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
               <tbody id="subscriptionsTableBody"></tbody>
             </table>
             <div id="subscriptionsEmptyState" class="table-empty-state">暂无订阅</div>
@@ -1194,10 +1199,10 @@
               <thead>
                 <tr>
                   <th>节点</th>
-                  <th>请求成功率</th>
-                  <th>请求成功 / 失败</th>
+                  <th>成功率</th>
+                  <th>成功/失败</th>
                   <th>连接</th>
-                  <th>最近请求时间线</th>
+                  <th>时间线</th>
                 </tr>
               </thead>
               <tbody id="debugNodesTableBody"></tbody>
@@ -1594,7 +1599,7 @@
         <div id="systemPortsStatus" style="font-size:12px; color:var(--text-muted);">正在读取当前服务所在电脑的端口...</div>
         <div class="table-container">
           <table class="project-schedule-table">
-            <thead><tr><th>端口</th><th>PID</th><th>程序</th><th>状态</th></tr></thead>
+            <thead><tr><th>端口</th><th>进程号</th><th>程序</th><th>状态</th></tr></thead>
             <tbody id="systemPortsTableBody"></tbody>
           </table>
         </div>
@@ -3013,14 +3018,14 @@
         th.textContent = label;
         header.insertBefore(th, header.children[index] || null);
       };
-      // 节点监控表比调试表多一列复选框，列序为 复选框 / 状态 / Region / Exit IP，
-      // 所以这里要插到索引 2、3，插完是「状态」之后、名称之前，与表体一致。
+      // 节点监控表比调试表多一列复选框，列序为 复选框 / 状态 / 地区 / 出口 IP，
+      // 所以这里要插到索引 2、3，插完是「状态」之后、节点之前，与表体一致。
       const nodeHeader = document.querySelector('#nodesTableBody')?.closest('table')?.querySelector('thead tr');
-      addColumn(nodeHeader, 'region', 'Region', 2);
-      addColumn(nodeHeader, 'ip', 'Exit IP', 3);
+      addColumn(nodeHeader, 'region', '地区', 2);
+      addColumn(nodeHeader, 'ip', '出口 IP', 3);
       const debugHeader = document.querySelector('#debugNodesTableBody')?.closest('table')?.querySelector('thead tr');
-      addColumn(debugHeader, 'region', 'Region', 1);
-      addColumn(debugHeader, 'ip', 'Exit IP', 2);
+      addColumn(debugHeader, 'region', '地区', 1);
+      addColumn(debugHeader, 'ip', '出口 IP', 2);
     }
 
     async function refresh() {
@@ -3803,6 +3808,41 @@
       return country && country !== region ? `${region} (${country})` : region;
     }
 
+    // 出口 IP 可能是 IPv6 全写形式（2001:0db8:0000:0000:0000:0000:0000:0001），
+    // 而用户习惯输入简写（2001:db8::1），直接子串匹配会落空，这里把两侧都展开成 8 组再比。
+    function expandIPv6(value) {
+      const text = String(value || '').trim().toLowerCase().split('%')[0];
+      if (!text || !text.includes(':')) return '';
+      const parts = text.split('::');
+      if (parts.length > 2) return '';
+      const head = parts[0] ? parts[0].split(':') : [];
+      const tail = parts.length === 2 && parts[1] ? parts[1].split(':') : [];
+      const filler = parts.length === 2 ? new Array(Math.max(0, 8 - head.length - tail.length)).fill('0') : [];
+      const groups = head.concat(filler, tail);
+      if (groups.length !== 8) return '';
+      return groups.map(group => group.padStart(4, '0')).join(':');
+    }
+
+    // 出口 IP 模糊匹配：子串命中、IPv6 简写归一化，另外支持 * / ? 通配。
+    function matchExitIP(ip, query) {
+      const text = String(ip || '').trim().toLowerCase();
+      if (!text || !query) return false;
+      if (text.includes(query)) return true;
+      const expandedText = expandIPv6(text);
+      const expandedQuery = expandIPv6(query);
+      if (expandedText && expandedQuery && expandedText.includes(expandedQuery)) return true;
+      if (!query.includes('*') && !query.includes('?')) return false;
+      const pattern = query
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*')
+        .replace(/\?/g, '.');
+      try {
+        return new RegExp(`^${pattern}$`).test(text);
+      } catch (err) {
+        return false;
+      }
+    }
+
     function applyNodeFilters() {
       const status = document.getElementById('nodeStatusFilter').value;
       const query = document.getElementById('nodeSearchInput').value.trim().toLowerCase();
@@ -3817,7 +3857,9 @@
         }
         if (currentNodeSourceFilter !== 'all' && nodeSourceKey(n) !== currentNodeSourceFilter) return false;
         if (!query) return true;
-        return [n.name, n.tag, n.port, n.ip, n.region, n.country, n.subscription_name].some(value => String(value || '').toLowerCase().includes(query));
+        const hitText = [n.name, n.tag, n.port, n.region, n.country, n.subscription_name]
+          .some(value => String(value || '').toLowerCase().includes(query));
+        return hitText || matchExitIP(n.ip, query);
       });
       if (sort === 'asc' || sort === 'desc') {
         nodes = nodes.slice().sort((a, b) => {
@@ -5338,7 +5380,9 @@
       const query = (document.getElementById('debugNodeSearch')?.value || '').trim().toLowerCase();
       const direction = document.getElementById('debugSuccessSort')?.value || 'desc';
       const nodes = (window._debugNodes || [])
-        .filter(n => !query || [n.name, n.tag, n.port, n.ip, n.region, n.country].some(value => String(value || '').toLowerCase().includes(query)))
+        .filter(n => !query
+          || [n.name, n.tag, n.port, n.region, n.country].some(value => String(value || '').toLowerCase().includes(query))
+          || matchExitIP(n.ip, query))
         .slice()
         .sort((a, b) => {
           const aRate = nodeSuccessRate(a);
