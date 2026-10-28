@@ -193,6 +193,16 @@ type SystemSettings struct {
 	// enabled it overrides every project's probe.target.
 	LatencyTest config.LatencyTestConfig `json:"latency_test"`
 	Log         config.LogConfig         `json:"log"`
+	// UI carries WebUI display preferences. The interval is a duration string
+	// ("10s") so the browser never has to know Go's nanosecond encoding.
+	UI UISettings `json:"ui"`
+}
+
+// UISettings is the API shape of the workspace UI preferences.
+type UISettings struct {
+	// RefreshInterval is the dashboard auto-refresh period. An empty value
+	// leaves the stored setting untouched.
+	RefreshInterval string `json:"refresh_interval"`
 }
 
 // ProjectBinding contains the per-project dependencies used by the existing

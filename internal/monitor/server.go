@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	mathrand "math/rand"
 	"net/http"
@@ -26,8 +27,50 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-//go:embed assets/index.html
+//go:embed assets
 var embeddedFS embed.FS
+
+// assetsFS is the embedded WebUI asset directory (index.html, echarts, …).
+// Serving the charting library from the binary keeps the dashboard working on
+// hosts that cannot reach a public CDN.
+var assetsFS = func() fs.FS {
+	sub, err := fs.Sub(embeddedFS, "assets")
+	if err != nil {
+		panic("monitor: 无法打开内嵌资源目录: " + err.Error())
+	}
+	return sub
+}()
+
+// serveEmbeddedAsset serves one file from assetsFS. The assets ship inside the
+// binary, so a long cache lifetime is safe as long as the URL carries a version
+// query (index.html appends ?v=...); bumping it invalidates the browser cache.
+func serveEmbeddedAsset(w http.ResponseWriter, r *http.Request, name string) {
+	data, err := fs.ReadFile(assetsFS, name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", assetContentType(name))
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(data)
+}
+
+// assetContentType maps the embedded asset extension to its media type. The set
+// is deliberately small: everything here ships with the binary.
+func assetContentType(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".js"):
+		return "application/javascript; charset=utf-8"
+	case strings.HasSuffix(name, ".json"), strings.HasSuffix(name, ".geojson"):
+		return "application/json; charset=utf-8"
+	case strings.HasSuffix(name, ".css"):
+		return "text/css; charset=utf-8"
+	case strings.HasSuffix(name, ".svg"):
+		return "image/svg+xml"
+	default:
+		return "application/octet-stream"
+	}
+}
 
 // Session represents a user session with expiration.
 type Session struct {
@@ -264,6 +307,9 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	// Static assets are served before the SPA catch-all; net/http picks the
+	// longest matching pattern, so /assets/... never reaches handleIndex.
+	mux.HandleFunc("/assets/", s.handleAsset)
 	mux.HandleFunc("/api/auth", s.handleAuth)
 	mux.HandleFunc("/api/tasks", s.withAuth(s.handleTasks))
 	mux.HandleFunc("/api/tasks/", s.withAuth(s.handleTaskRoute))
@@ -962,6 +1008,9 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 				"target": settings.LatencyTest.Target,
 			},
 			"log": settings.Log,
+			"ui": map[string]any{
+				"refresh_interval": settings.UI.RefreshInterval,
+			},
 		})
 	case http.MethodPut:
 		if s.enqueueAsyncMutation(w, r, TaskSpec{
@@ -1443,13 +1492,29 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	data, err := embeddedFS.ReadFile("assets/index.html")
+	data, err := fs.ReadFile(assetsFS, "index.html")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(data)
+}
+
+// handleAsset serves a file from the embedded assets directory. Only plain file
+// names are accepted: nested paths and traversal segments are rejected, so the
+// handler cannot be used to probe the rest of the embedded tree.
+func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/assets/")
+	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	serveEmbeddedAsset(w, r, name)
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {

@@ -54,6 +54,9 @@ func (r *Registry) ExportBackup(ctx context.Context, projectID string, all bool)
 				Proxy:       workspace.Proxy,
 				LatencyTest: workspace.LatencyTest,
 				Log:         workspace.Log,
+				UI: monitor.UISettings{
+					RefreshInterval: workspace.UI.EffectiveRefreshInterval().String(),
+				},
 			},
 		}
 		shared, err := exportSharedCatalog(sharedCfg)

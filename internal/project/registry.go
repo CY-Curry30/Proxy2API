@@ -336,6 +336,9 @@ func (r *Registry) SystemSettings() monitor.SystemSettings {
 		Proxy:       r.workspace.Proxy,
 		LatencyTest: r.workspace.LatencyTest,
 		Log:         r.workspace.Log,
+		UI: monitor.UISettings{
+			RefreshInterval: r.workspace.UI.EffectiveRefreshInterval().String(),
+		},
 	}
 }
 
@@ -467,11 +470,28 @@ func (r *Registry) applySystemSettingsLocked(ctx context.Context, settings monit
 			return err
 		}
 	}
+	// The dashboard refresh period is a display preference. An omitted value
+	// keeps the stored setting; an out-of-range one is rejected instead of being
+	// silently clamped, so the operator sees the typo.
+	var uiInterval time.Duration
+	uiProvided := false
+	if raw := strings.TrimSpace(settings.UI.RefreshInterval); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("界面刷新间隔格式无效: %w", err)
+		}
+		if parsed < config.MinUIRefreshInterval || parsed > config.MaxUIRefreshInterval {
+			return fmt.Errorf("界面刷新间隔必须在 %s 到 %s 之间", config.MinUIRefreshInterval, config.MaxUIRefreshInterval)
+		}
+		uiInterval = parsed
+		uiProvided = true
+	}
 	r.mu.Lock()
 	previousManagement := r.workspace.Management
 	previousLog := r.workspace.Log
 	previousProxy := r.workspace.Proxy
 	previousLatency := r.workspace.LatencyTest
+	previousUI := r.workspace.UI
 	previousOverride := previousLatency.EffectiveTarget()
 	r.workspace.Management.Listen = strings.TrimSpace(settings.Management.Listen)
 	r.workspace.Management.Password = settings.Management.Password
@@ -494,11 +514,15 @@ func (r *Registry) applySystemSettingsLocked(ctx context.Context, settings monit
 		r.workspace.Log.MaxAge = settings.Log.MaxAge
 	}
 	r.workspace.Log.Compress = settings.Log.Compress
+	if uiProvided {
+		r.workspace.UI.RefreshInterval = uiInterval
+	}
 	if err := r.workspace.Save(); err != nil {
 		r.workspace.Management = previousManagement
 		r.workspace.Log = previousLog
 		r.workspace.Proxy = previousProxy
 		r.workspace.LatencyTest = previousLatency
+		r.workspace.UI = previousUI
 		r.mu.Unlock()
 		return err
 	}

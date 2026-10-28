@@ -510,6 +510,16 @@
     .modal-header { padding: 16px 24px; border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 600; }
     .modal-body { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
     .modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+    .modal.modal-backup { width: min(620px, calc(100vw - 32px)); }
+    .backup-tabs { display: flex; gap: 8px; padding: 14px 24px 0; }
+    .backup-tab {
+      flex: 1; padding: 9px 12px; font-size: 13px; font-weight: 600; cursor: pointer;
+      color: var(--text-muted); background: transparent; border: 1px solid var(--border);
+      border-radius: 6px; transition: color 0.15s, background 0.15s, border-color 0.15s;
+    }
+    .backup-tab:hover { color: var(--text-main); }
+    .backup-tab.active { color: #fff; background: var(--primary); border-color: var(--primary); }
+    .backup-hint { font-size: 12px; color: var(--text-muted); line-height: 1.7; }
     
     .form-group { display: flex; flex-direction: column; gap: 6px; }
     .form-section-title { color: var(--text-main); font-size: 13px; font-weight: 600; padding-top: 4px; border-top: 1px solid var(--border-light); }
@@ -722,7 +732,8 @@
     }
 
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <!-- 图表库随二进制内嵌，不依赖外网 CDN；换版本时同步改 ?v= 以失效浏览器缓存 -->
+  <script src="/assets/echarts.min.js?v=5.5.0"></script>
   <script>
     // Set theme before first paint to prevent FOUC
     (function(){
@@ -812,12 +823,9 @@
           <span class="theme-mode-label" id="themeModeLabel">跟随系统</span>
         </button>
         <button class="btn btn-primary" id="probeAllBtn" onclick="probeAllNodes()">⚡ 批量探测</button>
-        <button class="btn" id="refreshSubBtn" onclick="refreshSubscription()" style="display:none;">刷新订阅</button>
-        <button class="btn header-secondary" onclick="exportBackup(false)" title="导出当前项目的全部数据；全局视图下导出全部项目">导出配置</button>
-        <button class="btn header-secondary" onclick="exportBackup(true)" title="导出全部项目与共享目录的全部数据">全部导出</button>
-        <button class="btn header-secondary" onclick="openBackupImportModal()" title="从导出的备份文件恢复数据">导入配置</button>
-        <button class="btn" onclick="toggleAutoRefresh()" id="autoRefreshBtn">⏹ 关闭自动刷新</button>
-        <button class="btn" onclick="refresh()">↺ 刷新</button>
+        <button class="btn" id="refreshSubBtn" onclick="refreshSubscription()" style="display:none;">更新订阅</button>
+        <button class="btn header-secondary" onclick="openBackupModal('export')" title="导出或导入配置备份">导入导出</button>
+        <button class="btn" onclick="refresh()">↺ 立即刷新</button>
       </div>
     </header>
 
@@ -1298,6 +1306,22 @@
               </div>
             </div>
 
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">界面 (WebUI)</div></div>
+              <div style="padding: 16px;">
+                <div class="settings-form-grid">
+                  <div class="form-group">
+                    <label>仪表盘刷新间隔（秒）</label>
+                    <input type="number" id="settingUiRefreshInterval" class="setting-input" min="2" max="300" step="1" placeholder="10" />
+                  </div>
+                </div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">
+                  仪表盘自动刷新的周期，取值 2 - 300 秒，默认 10 秒。它只控制页面数据多久重新拉取一次，
+                  与订阅自动更新无关。保存后立即生效，无需重启。
+                </div>
+              </div>
+            </div>
+
             <div style="display: flex; justify-content: flex-end; gap: 12px; padding: 8px 0 24px;">
               <button type="submit" class="btn btn-primary" style="padding: 10px 32px; font-size: 14px;">保存配置</button>
             </div>
@@ -1467,27 +1491,41 @@
     </div>
   </div>
 
-  <div class="modal-overlay" id="backupImportModalOverlay">
-    <div class="modal">
-      <div class="modal-header">导入配置</div>
+  <div class="modal-overlay" id="backupModalOverlay">
+    <div class="modal modal-backup">
+      <div class="modal-header">配置导入 / 导出</div>
+      <div class="backup-tabs">
+        <button type="button" class="backup-tab active" id="backupTabExport" onclick="switchBackupTab('export')">导出</button>
+        <button type="button" class="backup-tab" id="backupTabImport" onclick="switchBackupTab('import')">导入</button>
+      </div>
       <div class="modal-body">
-        <div class="form-group">
-          <label for="backupImportFile">备份文件</label>
-          <input type="file" id="backupImportFile" class="setting-input" accept=".json,application/json" onchange="previewBackupFile(this)" />
-          <em style="font-size:11px;color:var(--text-muted);">选择由「导出配置」或「全部导出」生成的 JSON 文件</em>
+        <div id="backupExportPane" style="display:flex; flex-direction:column; gap:16px;">
+          <div class="form-group">
+            <label for="backupExportProject">导出范围</label>
+            <select id="backupExportProject" class="setting-input" onchange="updateBackupExportHint()"></select>
+          </div>
+          <div class="backup-hint" id="backupExportHint"></div>
         </div>
-        <div id="backupImportPreview" style="display:none; font-size:12px; color:var(--text-muted); line-height:1.7; margin-bottom:12px; word-break:break-all;"></div>
-        <div class="form-group">
-          <label>同名项目处理方式</label>
-          <div class="checkbox-row"><input type="radio" name="backupImportMode" id="backupImportModeOverwrite" value="overwrite" checked /><label for="backupImportModeOverwrite">覆盖：用备份里的配置、节点与状态替换现有项目</label></div>
-          <div class="checkbox-row"><input type="radio" name="backupImportMode" id="backupImportModeSkip" value="skip" /><label for="backupImportModeSkip">跳过：保留现有项目，只导入缺失的项目</label></div>
+        <div id="backupImportPane" style="display:none; flex-direction:column; gap:16px;">
+          <div class="form-group">
+            <label for="backupImportFile">备份文件</label>
+            <input type="file" id="backupImportFile" class="setting-input" accept=".json,application/json" onchange="previewBackupFile(this)" />
+            <em style="font-size:11px;color:var(--text-muted);">选择由「导出」生成的 JSON 文件</em>
+          </div>
+          <div id="backupImportPreview" style="display:none; font-size:12px; color:var(--text-muted); line-height:1.7; word-break:break-all;"></div>
+          <div class="form-group">
+            <label>同名项目处理方式</label>
+            <div class="checkbox-row"><input type="radio" name="backupImportMode" id="backupImportModeOverwrite" value="overwrite" checked /><label for="backupImportModeOverwrite">覆盖：用备份里的配置、节点与状态替换现有项目</label></div>
+            <div class="checkbox-row"><input type="radio" name="backupImportMode" id="backupImportModeSkip" value="skip" /><label for="backupImportModeSkip">跳过：保留现有项目，只导入缺失的项目</label></div>
+          </div>
+          <div id="backupImportResult" style="display:none; font-size:12px; line-height:1.8; padding:10px; border-radius:4px; border:1px solid var(--border);"></div>
+          <em style="font-size:11px;color:var(--text-muted); display:block;">共享节点与订阅只做合并（不会删除已有条目）；项目配置、节点列表、端口映射、节点状态与流量统计按备份还原，端口冲突时自动改分配到空闲端口。</em>
         </div>
-        <div id="backupImportResult" style="display:none; font-size:12px; line-height:1.8; padding:10px; border-radius:4px; border:1px solid var(--border);"></div>
-        <em style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;">共享节点与订阅只做合并（不会删除已有条目）；项目配置、节点列表、端口映射、节点状态与流量统计按备份还原，端口冲突时自动改分配到空闲端口。</em>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn" onclick="closeBackupImportModal()">取消</button>
-        <button type="button" class="btn btn-primary" id="backupImportSubmitBtn" onclick="submitBackupImport()">开始导入</button>
+        <button type="button" class="btn" onclick="closeBackupModal()">取消</button>
+        <button type="button" class="btn btn-primary" id="backupExportSubmitBtn" onclick="submitBackupExport()">导出</button>
+        <button type="button" class="btn btn-primary" id="backupImportSubmitBtn" onclick="submitBackupImport()" style="display:none;">开始导入</button>
       </div>
     </div>
   </div>
@@ -1711,11 +1749,15 @@
       return nativeFetch(input, init);
     };
 
-    const DASHBOARD_REFRESH_MS = 10 * 1000;
+    // Dashboard polling period. The workspace setting overrides this default;
+    // the range is mirrored on the server so both sides reject the same values.
+    const DEFAULT_DASHBOARD_REFRESH_MS = 10 * 1000;
+    const MIN_DASHBOARD_REFRESH_MS = 2 * 1000;
+    const MAX_DASHBOARD_REFRESH_MS = 5 * 60 * 1000;
+    let dashboardRefreshMs = DEFAULT_DASHBOARD_REFRESH_MS;
     const TRAFFIC_CALENDAR_REFRESH_MS = 60 * 60 * 1000;
     const TRAFFIC_RENDER_MS = 1000;
     const TRAFFIC_RENDER_JITTER_MS = 100;
-    let isAutoRefresh = true;
     let autoRefreshInterval = null;
     let lastTrafficRenderAt = 0;
     let allNodesCache = [];
@@ -1755,7 +1797,8 @@
 
     // Chart instances
     const WORLD_MAP_NAME = 'proxy2api-world';
-    const WORLD_MAP_URL = 'https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@v5.1.2/geojson/ne_50m_admin_0_countries.geojson';
+    // 地图数据同样内嵌，避免离线或受限网络下区域图表空白。
+    const WORLD_MAP_URL = '/assets/world-map.geojson?v=5.1.2';
     let worldMapLoadPromise = null;
     let regionMapChartInst = null;
     let successRateChartInst = null;
@@ -2954,16 +2997,21 @@
       }
     }
 
-    function toggleAutoRefresh() {
-      isAutoRefresh = !isAutoRefresh;
-      document.getElementById('autoRefreshBtn').textContent = isAutoRefresh ? '⏹ 关闭自动刷新' : '▶ 开启自动刷新';
-      if (isAutoRefresh) startAutoRefresh(); else stopAutoRefresh();
-    }
+    // 自动刷新常驻开启，周期由「系统设置 → 界面」的仪表盘刷新间隔决定。
+    // 没有开关：页面初始化即启动，只有未通过鉴权时才临时停下，登录后重新拉起。
     function startAutoRefresh() {
       stopAutoRefresh();
       autoRefreshInterval = setInterval(()=> {
         if(!document.hidden && document.getElementById('dashboardTab').classList.contains('active')) refresh();
-      }, DASHBOARD_REFRESH_MS);
+      }, dashboardRefreshMs);
+    }
+    // applyDashboardRefreshMs clamps and adopts a new period, restarting the
+    // running interval so a settings change is visible without a page reload.
+    function applyDashboardRefreshMs(ms) {
+      const numeric = Number(ms);
+      if (!Number.isFinite(numeric) || numeric <= 0) return;
+      dashboardRefreshMs = Math.min(Math.max(numeric, MIN_DASHBOARD_REFRESH_MS), MAX_DASHBOARD_REFRESH_MS);
+      startAutoRefresh();
     }
     function stopAutoRefresh() { clearInterval(autoRefreshInterval); autoRefreshInterval = null; }
 
@@ -4319,13 +4367,14 @@
       }
     }
 
-    // 导出配置：当前项目的全部数据；全局视图下等同于全部导出。
-    // 全部导出：工作区设置 + 共享节点/订阅 + 所有项目。
-    async function exportBackup(all=false) {
-      const wantAll = !!all || !currentProjectID;
+    // 导出：传项目 ID 只导出该项目；空值导出整个工作区
+    // （工作区设置 + 共享节点/订阅 + 所有项目）。
+    async function exportBackup(projectID = '') {
+      const target = String(projectID || '').trim();
+      const wantAll = !target;
       const url = wantAll
         ? '/api/backup?scope=all'
-        : `/api/backup?project=${encodeURIComponent(currentProjectID)}`;
+        : `/api/backup?project=${encodeURIComponent(target)}`;
       try {
         const res = await nativeFetch(url);
         if (!res.ok) {
@@ -4337,7 +4386,7 @@
         const matched = /filename="?([^";]+)"?/i.exec(disposition);
         const fallback = wantAll
           ? 'proxy2api-backup-workspace.json'
-          : `proxy2api-backup-${currentProjectID}.json`;
+          : `proxy2api-backup-${target}.json`;
         const blob = await res.blob();
         const objectURL = window.URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -4347,13 +4396,92 @@
         link.click();
         document.body.removeChild(link);
         window.URL.revokeObjectURL(objectURL);
-        showToast(wantAll ? '已导出全部项目的数据' : '已导出当前项目的数据');
+        showToast(wantAll ? '已导出全部项目的数据' : `已导出项目 ${target} 的数据`);
+        return true;
       } catch (error) {
         showToast(error.message || '导出失败', 'error');
+        return false;
       }
     }
 
-    function openBackupImportModal() {
+    function openBackupModal(tab = 'export') {
+      renderBackupExportProjects();
+      resetBackupImportForm();
+      switchBackupTab(tab);
+      document.getElementById('backupModalOverlay').classList.add('show');
+    }
+
+    function closeBackupModal() {
+      document.getElementById('backupModalOverlay').classList.remove('show');
+    }
+
+    function switchBackupTab(tab) {
+      const isExport = tab !== 'import';
+      const exportPane = document.getElementById('backupExportPane');
+      const importPane = document.getElementById('backupImportPane');
+      if (exportPane) exportPane.style.display = isExport ? 'flex' : 'none';
+      if (importPane) importPane.style.display = isExport ? 'none' : 'flex';
+      const exportBtn = document.getElementById('backupExportSubmitBtn');
+      const importBtn = document.getElementById('backupImportSubmitBtn');
+      if (exportBtn) exportBtn.style.display = isExport ? '' : 'none';
+      if (importBtn) importBtn.style.display = isExport ? 'none' : '';
+      const exportTab = document.getElementById('backupTabExport');
+      const importTab = document.getElementById('backupTabImport');
+      if (exportTab) exportTab.classList.toggle('active', isExport);
+      if (importTab) importTab.classList.toggle('active', !isExport);
+      if (isExport) updateBackupExportHint();
+    }
+
+    // renderBackupExportProjects fills the scope selector with "全部项目" plus
+    // every known project. An empty selection means the workspace export.
+    function renderBackupExportProjects() {
+      const select = document.getElementById('backupExportProject');
+      if (!select) return;
+      const previous = select.value;
+      const projects = Array.isArray(projectsCache) ? projectsCache : [];
+      const options = ['<option value="">全部项目（含共享节点 / 订阅与系统设置）</option>'];
+      projects.forEach(project => {
+        const label = project.name && project.name !== project.id
+          ? `${project.name}（${project.id}）`
+          : project.id;
+        options.push(`<option value="${escapeHtml(project.id)}">${escapeHtml(label)}</option>`);
+      });
+      select.innerHTML = options.join('');
+      if (previous && projects.some(project => project.id === previous)) select.value = previous;
+      updateBackupExportHint();
+    }
+
+    function updateBackupExportHint() {
+      const select = document.getElementById('backupExportProject');
+      const hint = document.getElementById('backupExportHint');
+      if (!select || !hint) return;
+      const target = select.value;
+      if (!target) {
+        hint.textContent = '将导出工作区设置、共享节点与订阅，以及全部项目的配置、节点、端口映射、状态与流量统计。';
+        return;
+      }
+      const project = (Array.isArray(projectsCache) ? projectsCache : []).find(item => item.id === target);
+      const name = project && project.name ? project.name : target;
+      hint.textContent = `将导出项目「${name}」的配置、节点、端口映射、状态与流量统计，并附带它实际使用的共享节点与订阅，便于在另一台机器上还原。`;
+    }
+
+    async function submitBackupExport() {
+      const select = document.getElementById('backupExportProject');
+      const target = select ? select.value : '';
+      const button = document.getElementById('backupExportSubmitBtn');
+      const originalText = button ? button.textContent : '导出';
+      if (button) { button.disabled = true; button.textContent = '导出中...'; }
+      try {
+        if (await exportBackup(target)) closeBackupModal();
+      } finally {
+        if (button) { button.disabled = false; button.textContent = originalText; }
+      }
+    }
+
+    // resetBackupImportForm restores the import pane to its initial state. It
+    // also repairs the submit button, which turns into a "关闭" action after an
+    // import that finished with warnings.
+    function resetBackupImportForm() {
       const input = document.getElementById('backupImportFile');
       if (input) input.value = '';
       const preview = document.getElementById('backupImportPreview');
@@ -4364,16 +4492,10 @@
       if (submit) {
         submit.disabled = false;
         submit.textContent = '开始导入';
-        // 上一轮导入若以「关闭」收尾会改写 onclick，这里恢复成提交动作。
         submit.onclick = function() { submitBackupImport(); };
       }
       const overwrite = document.getElementById('backupImportModeOverwrite');
       if (overwrite) overwrite.checked = true;
-      document.getElementById('backupImportModalOverlay').classList.add('show');
-    }
-
-    function closeBackupImportModal() {
-      document.getElementById('backupImportModalOverlay').classList.remove('show');
     }
 
     function describeBackupBundle(bundle) {
@@ -4470,10 +4592,10 @@
         if (warnings.length || (Array.isArray(data.failed) && data.failed.length)) {
           button.disabled = false;
           button.textContent = '关闭';
-          button.onclick = closeBackupImportModal;
+          button.onclick = closeBackupModal;
           showToast('导入完成，请查看结果提示', 'error');
         } else {
-          closeBackupImportModal();
+          closeBackupModal();
           showToast('导入完成');
         }
         // 界面刷新失败不应把已成功的导入显示成失败。
@@ -5492,9 +5614,44 @@
         document.getElementById('settingLogMaxAge').value = logCfg.max_age || 7;
         document.getElementById('settingLogCompress').checked = !!logCfg.compress;
         toggleLogFileSettings();
+        const uiCfg = system.ui || {};
+        document.getElementById('settingUiRefreshInterval').value =
+          parseGoDurationSeconds(uiCfg.refresh_interval, DEFAULT_DASHBOARD_REFRESH_MS / 1000);
         _savedCoreSnapshot = _buildCoreSnapshot();
       } catch (error) {
         showToast(error.message, 'error');
+      }
+    }
+
+    // parseGoDurationSeconds converts Go's Duration.String() output ("10s",
+    // "2m30s", "1h0m0s", "500ms") into seconds for the number input.
+    function parseGoDurationSeconds(raw, fallbackSeconds) {
+      const text = String(raw || '').trim();
+      if (!text) return fallbackSeconds;
+      const pattern = /(\d+(?:\.\d+)?)(h|ms|m|s)/g;
+      let total = 0, matched = false, match;
+      while ((match = pattern.exec(text)) !== null) {
+        matched = true;
+        const value = parseFloat(match[1]);
+        if (match[2] === 'h') total += value * 3600;
+        else if (match[2] === 'm') total += value * 60;
+        else if (match[2] === 'ms') total += value / 1000;
+        else total += value;
+      }
+      return matched ? total : fallbackSeconds;
+    }
+
+    // loadDashboardRefreshSetting pulls the workspace UI preference so a page
+    // load starts on the configured period instead of the built-in default.
+    async function loadDashboardRefreshSetting() {
+      try {
+        const response = await nativeFetch('/api/system/settings');
+        if (!response.ok) return;
+        const system = await response.json();
+        const seconds = parseGoDurationSeconds((system.ui || {}).refresh_interval, DEFAULT_DASHBOARD_REFRESH_MS / 1000);
+        applyDashboardRefreshMs(seconds * 1000);
+      } catch (_) {
+        // 设置读取失败时沿用默认周期，不影响页面其余部分。
       }
     }
 
@@ -5512,6 +5669,7 @@
         log_max_backups: document.getElementById('settingLogMaxBackups').value,
         log_max_age: document.getElementById('settingLogMaxAge').value,
         log_compress: document.getElementById('settingLogCompress').checked,
+        ui_refresh: document.getElementById('settingUiRefreshInterval').value,
       });
     }
     function toggleLogFileSettings() {
@@ -5584,6 +5742,9 @@
           max_backups: parseInt(document.getElementById('settingLogMaxBackups').value) || 3,
           max_age: parseInt(document.getElementById('settingLogMaxAge').value) || 7,
           compress: document.getElementById('settingLogCompress').checked,
+        },
+        ui: {
+          refresh_interval: `${parseInt(document.getElementById('settingUiRefreshInterval').value, 10) || 10}s`,
         }
       };
       try {
@@ -5594,6 +5755,7 @@
           if (!response.ok) throw new Error(data.error || '保存失败');
           needRestart = !!data.need_restart;
           _savedCoreSnapshot = currentCoreSnapshot;
+          applyDashboardRefreshMs((parseInt(document.getElementById('settingUiRefreshInterval').value, 10) || 10) * 1000);
         }
         showToast(needRestart ? '系统设置已保存，服务配置重启后生效' : '系统设置已保存');
       } catch (error) {
@@ -5740,10 +5902,13 @@
         } else if (project) {
           await fetchSubscriptionStatus();
         }
-        startAutoRefresh();
       } catch (error) {
         showToast(error.message, 'error');
       }
+      // 自动刷新与数据加载解耦：echarts 等外部依赖加载失败会让 resetProjectView
+      // 抛错，若把定时器放在上面的 try 里，页面就会静默停止更新。
+      await loadDashboardRefreshSetting();
+      startAutoRefresh();
     }
 
     // Init App

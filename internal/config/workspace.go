@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,6 +48,38 @@ func (c LatencyTestConfig) EffectiveTarget() string {
 		return ""
 	}
 	return strings.TrimSpace(c.Target)
+}
+
+const (
+	// DefaultUIRefreshInterval is the built-in dashboard polling period. It
+	// matches the historical hard-coded value in the WebUI.
+	DefaultUIRefreshInterval = 10 * time.Second
+	// MinUIRefreshInterval is the shortest period the dashboard accepts. The
+	// page issues two requests per tick, so anything faster mostly adds load.
+	MinUIRefreshInterval = 2 * time.Second
+	// MaxUIRefreshInterval keeps a typo from parking the dashboard on a period
+	// that is effectively "never".
+	MaxUIRefreshInterval = 5 * time.Minute
+)
+
+// UIConfig holds WebUI display preferences shared by every browser session.
+type UIConfig struct {
+	// RefreshInterval is the dashboard auto-refresh period. Zero means the
+	// built-in default; values outside the accepted range are clamped so a
+	// hand-edited file cannot hammer the management server.
+	RefreshInterval time.Duration `yaml:"refresh_interval,omitempty" json:"refresh_interval"`
+}
+
+// EffectiveRefreshInterval returns the period the dashboard should use,
+// falling back to the built-in default when the stored value is unusable.
+func (c UIConfig) EffectiveRefreshInterval() time.Duration {
+	if c.RefreshInterval < MinUIRefreshInterval {
+		return DefaultUIRefreshInterval
+	}
+	if c.RefreshInterval > MaxUIRefreshInterval {
+		return MaxUIRefreshInterval
+	}
+	return c.RefreshInterval
 }
 
 // ProjectSpec is the process-wide catalog entry for one project runtime.
@@ -91,14 +124,17 @@ func (s ProjectSpec) ShouldAutostart() bool {
 // node/subscription definitions live in SharedConfigFileName; the legacy
 // -config file is retained as the migration source for existing deployments.
 type Workspace struct {
-	Management            ControlManagementConfig `yaml:"management" json:"management"`
-	Proxy                 SystemProxyConfig       `yaml:"proxy,omitempty" json:"proxy"`
-	LatencyTest           LatencyTestConfig       `yaml:"latency_test,omitempty" json:"latency_test"`
-	Log                   LogConfig               `yaml:"log" json:"log"`
-	ProjectsDir           string                  `yaml:"projects_dir" json:"projects_dir"`
-	DefaultProject        string                  `yaml:"default_project" json:"default_project"`
-	SharedSourcesMigrated bool                    `yaml:"shared_sources_migrated,omitempty" json:"shared_sources_migrated"`
-	Projects              map[string]ProjectSpec  `yaml:"projects" json:"projects"`
+	Management  ControlManagementConfig `yaml:"management" json:"management"`
+	Proxy       SystemProxyConfig       `yaml:"proxy,omitempty" json:"proxy"`
+	LatencyTest LatencyTestConfig       `yaml:"latency_test,omitempty" json:"latency_test"`
+	Log         LogConfig               `yaml:"log" json:"log"`
+	// UI holds WebUI display preferences. They are workspace-wide because the
+	// dashboard renders the same data for every project.
+	UI                    UIConfig               `yaml:"ui,omitempty" json:"ui"`
+	ProjectsDir           string                 `yaml:"projects_dir" json:"projects_dir"`
+	DefaultProject        string                 `yaml:"default_project" json:"default_project"`
+	SharedSourcesMigrated bool                   `yaml:"shared_sources_migrated,omitempty" json:"shared_sources_migrated"`
+	Projects              map[string]ProjectSpec `yaml:"projects" json:"projects"`
 
 	filePath         string
 	rootDir          string
