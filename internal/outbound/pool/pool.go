@@ -38,6 +38,7 @@ const (
 	modeRandom     = "random"
 	modeBalance    = "balance"
 	modeLatency    = "latency"
+	modeSuccess    = "success"
 )
 
 // Options controls pool outbound behaviour.
@@ -225,6 +226,8 @@ func normalizeOptions(options Options) Options {
 		options.Mode = modeRandom
 	case modeBalance:
 		options.Mode = modeBalance
+	case modeSuccess, "highest-success-rate":
+		options.Mode = modeSuccess
 	case modeLatency, "lowest-latency":
 		options.Mode = modeLatency
 	case "":
@@ -676,37 +679,83 @@ func (p *poolOutbound) selectByMode(candidates []*memberState) *memberState {
 			}
 		}
 		return selected
-	case modeLatency:
-		// Pick the candidate with the lowest measured latency.
-		// Candidates without a latency reading (never probed) are deprioritized;
-		// if all are unmeasured, fall back to round-robin.
+	case modeSuccess:
+		// Pick the online candidate with the highest client-request success rate.
+		// Candidates without any recorded requests are skipped; if none of them
+		// has a success rate yet, degrade to lowest-latency selection.
 		var selected *memberState
-		var minLatency time.Duration
-		hasMeasured := false
+		var bestRate float64
+		hasRate := false
 		for _, member := range candidates {
 			if member.entry == nil {
 				continue
 			}
-			latency := member.entry.LastLatency()
-			if latency <= 0 {
+			rate, ok := member.entry.SuccessRate()
+			if !ok {
 				continue
 			}
-			if !hasMeasured || latency < minLatency {
+			if !hasRate || rate > bestRate ||
+				(rate == bestRate && latencyLess(member, selected)) {
 				selected = member
-				minLatency = latency
-				hasMeasured = true
+				bestRate = rate
+				hasRate = true
 			}
 		}
 		if selected != nil {
 			return selected
 		}
-		// Fallback: no measurements yet — round-robin.
-		idx := int(p.rrCounter.Add(1)-1) % len(candidates)
-		return candidates[idx]
+		return p.selectLowestLatency(candidates)
+	case modeLatency:
+		return p.selectLowestLatency(candidates)
 	default:
 		idx := int(p.rrCounter.Add(1)-1) % len(candidates)
 		return candidates[idx]
 	}
+}
+
+// selectLowestLatency picks the candidate with the lowest measured latency.
+// Candidates without a latency reading (never probed) are deprioritized;
+// if all are unmeasured, it falls back to round-robin.
+func (p *poolOutbound) selectLowestLatency(candidates []*memberState) *memberState {
+	var selected *memberState
+	var minLatency time.Duration
+	hasMeasured := false
+	for _, member := range candidates {
+		if member.entry == nil {
+			continue
+		}
+		latency := member.entry.LastLatency()
+		if latency <= 0 {
+			continue
+		}
+		if !hasMeasured || latency < minLatency {
+			selected = member
+			minLatency = latency
+			hasMeasured = true
+		}
+	}
+	if selected != nil {
+		return selected
+	}
+	// Fallback: no measurements yet — round-robin.
+	idx := int(p.rrCounter.Add(1)-1) % len(candidates)
+	return candidates[idx]
+}
+
+// latencyLess reports whether a's measured latency is lower than b's. Unmeasured
+// nodes lose against measured ones, and two unmeasured nodes compare equal.
+func latencyLess(a, b *memberState) bool {
+	var aLatency, bLatency time.Duration
+	if a.entry != nil {
+		aLatency = a.entry.LastLatency()
+	}
+	if b.entry != nil {
+		bLatency = b.entry.LastLatency()
+	}
+	if aLatency <= 0 || bLatency <= 0 {
+		return false
+	}
+	return aLatency < bLatency
 }
 
 func (p *poolOutbound) recordFailure(member *memberState, cause error) {

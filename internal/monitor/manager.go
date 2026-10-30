@@ -1858,6 +1858,22 @@ func (h *EntryHandle) Healthy() bool {
 	return h.ref.initialCheckDone && h.ref.available && !h.ref.suppressed
 }
 
+// SuccessRate returns the client-request success ratio in [0,1] and whether
+// any request has been recorded. Nodes without traffic report ok=false so the
+// scheduler can treat them as "no rate data" instead of 0%.
+func (h *EntryHandle) SuccessRate() (float64, bool) {
+	if h == nil || h.ref == nil {
+		return 0, false
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	calls := h.ref.success + int64(h.ref.failure)
+	if calls <= 0 {
+		return 0, false
+	}
+	return float64(h.ref.success) / float64(calls), true
+}
+
 // LastLatency returns the last measured probe latency.
 // Returns 0 if no measurement is available yet.
 func (h *EntryHandle) LastLatency() time.Duration {

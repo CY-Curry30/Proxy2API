@@ -53,7 +53,7 @@ listener:
 # 代理池配置
 # ───────────────────────────────────────────────────────────────
 pool:
-  # 调度模式: sequential（顺序）, random（随机）, balance（均衡）, latency（最低延迟）
+  # 调度模式: sequential（顺序）, random（随机）, balance（均衡）, latency（最低延迟）, success（最高成功率，无成功数据时降级为最低延迟）
   mode: latency
   # 连续失败多少次后加入黑名单
   failure_threshold: 3

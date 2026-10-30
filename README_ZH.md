@@ -92,7 +92,7 @@ listener:
   password: pass
 
 pool:
-  mode: latency       # latency / random / balance / sequential
+  mode: latency       # latency / success / random / balance / sequential
   failure_threshold: 3
   blacklist_duration: 30m
   retry_enabled: true # 拨号失败时切换到另一节点重试
