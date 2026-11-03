@@ -422,6 +422,28 @@ func (r *Runtime) setSubscriptionReferences(selected, excluded []string) {
 	}
 }
 
+// setExcludedNodes keeps the in-memory project config aligned with a membership
+// change until the next full reload replaces it.
+func (r *Runtime) setExcludedNodes(excluded []string) {
+	r.mu.RLock()
+	cfg := r.cfg
+	boxMgr := r.boxMgr
+	r.mu.RUnlock()
+	apply := func(target *config.Config) {
+		if target == nil {
+			return
+		}
+		target.ExcludedNodes = append([]string(nil), excluded...)
+	}
+	apply(cfg)
+	if boxMgr != nil {
+		live := boxMgr.CurrentConfig()
+		if live != cfg {
+			apply(live)
+		}
+	}
+}
+
 func (r *Runtime) MonitorManager() *monitor.Manager {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

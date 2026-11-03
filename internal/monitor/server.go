@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -4398,6 +4399,11 @@ type nodePayload struct {
 	Port     uint16 `json:"port"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+	// ProjectIDs limits a newly created shared node to the selected projects.
+	// The WebUI always sends it when adding manually; omitted preserves the
+	// legacy behaviour (project scope joins the current project, global scope
+	// leaves the node visible to every project).
+	ProjectIDs []string `json:"project_ids,omitempty"`
 }
 
 type deleteNodesPayload struct {
@@ -4568,6 +4574,51 @@ func subscriptionNameFromURL(rawURL string) string {
 	return "未知订阅"
 }
 
+// nodeProjectMembership translates the selected project IDs into the include
+// and exclude lists understood by ApplySharedNodeMembership. When
+// requireSelection is true (global view), at least one existing project must be
+// selected; when there are no projects at all the node simply stays global.
+func (s *Server) nodeProjectMembership(selected []string, requireSelection bool) (include, exclude []string, err error) {
+	if s.projects == nil {
+		return nil, nil, nil
+	}
+	projects := s.projects.ListProjects()
+	if len(projects) == 0 {
+		if len(selected) > 0 {
+			return nil, nil, errors.New("项目不存在")
+		}
+		return nil, nil, nil
+	}
+	known := make(map[string]bool, len(projects))
+	for _, project := range projects {
+		known[project.ID] = true
+	}
+	desired := make(map[string]bool, len(selected))
+	for _, rawID := range selected {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if !known[id] {
+			return nil, nil, fmt.Errorf("项目不存在: %s", id)
+		}
+		desired[id] = true
+	}
+	if requireSelection && len(desired) == 0 {
+		return nil, nil, errors.New("请至少选择一个项目")
+	}
+	for id := range known {
+		if desired[id] {
+			include = append(include, id)
+		} else {
+			exclude = append(exclude, id)
+		}
+	}
+	sort.Strings(include)
+	sort.Strings(exclude)
+	return include, exclude, nil
+}
+
 // handleConfigNodes handles listing, creation, and batch deletion of config nodes.
 func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureNodeManager(w) {
@@ -4610,12 +4661,33 @@ func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"error": "请求格式错误"})
 			return
 		}
+		var nodeInclude, nodeExclude []string
+		if len(payload.ProjectIDs) > 0 || globalScope {
+			var membershipErr error
+			nodeInclude, nodeExclude, membershipErr = s.nodeProjectMembership(payload.ProjectIDs, globalScope)
+			if membershipErr != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]any{"error": membershipErr.Error()})
+				return
+			}
+		}
 		node, err := s.nodeMgr.CreateNode(r.Context(), payload.toConfig())
 		if err != nil {
 			s.respondNodeError(w, err)
 			return
 		}
-		if !globalScope {
+		if len(payload.ProjectIDs) > 0 && s.projects != nil {
+			if err := s.projects.ApplySharedNodeMembership(node.StateID(), nodeInclude, nodeExclude); err != nil {
+				_, deleteErr := s.nodeMgr.DeleteNodes(r.Context(), []string{node.Name})
+				message := err.Error()
+				if deleteErr != nil {
+					message = fmt.Sprintf("%s（回滚新节点失败: %v）", message, deleteErr)
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				writeJSON(w, map[string]any{"error": message})
+				return
+			}
+		} else if !globalScope {
 			if err := s.setCurrentProjectNodeIncluded(node, true); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				writeJSON(w, map[string]any{"error": err.Error()})

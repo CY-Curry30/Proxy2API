@@ -581,6 +581,19 @@
     .table-result-count { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
     .table-result-count strong { color: var(--text-main); font-weight: 600; }
     .table-empty-state { display: none; text-align: center; padding: 40px; color: var(--text-muted); }
+    .table-pagination {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+      padding: 10px 16px; border-top: 1px solid var(--border);
+      color: var(--text-muted); font-size: 12px;
+    }
+    .table-pagination[hidden] { display: none; }
+    .table-pagination-info strong { color: var(--text-main); font-weight: 600; }
+    .table-pagination-controls { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .table-pagination-controls .btn { min-width: 30px; }
+    .table-pagination-page.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+    .table-pagination-ellipsis { padding: 0 2px; color: var(--text-muted); }
+    .table-page-size { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .table-page-size .setting-input { width: auto; min-width: 68px; min-height: 30px; padding: 4px 8px; }
     .project-schedule-table { min-width: 900px; }
     .project-schedule-table th,
     .project-schedule-table td { vertical-align: middle; }
@@ -605,6 +618,7 @@
       .content { padding: 12px; }
       .table-tools { width: 100%; }
       .table-tool, .table-search, .table-filter-bar .table-search { width: 100%; min-width: 0; }
+      .table-pagination { align-items: flex-start; flex-direction: column; }
       .panel-header { align-items: flex-start; flex-direction: column; }
       .config-node-header-actions { width: 100%; justify-content: space-between; }
     }
@@ -851,7 +865,7 @@
               <div class="panel-header">
                 <div class="panel-title">项目列表</div>
                 <div class="table-tools">
-                  <input id="projectSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索项目名称或 ID" aria-label="搜索项目" oninput="renderProjectManagement()" />
+                  <input id="projectSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索项目名称或 ID" aria-label="搜索项目" oninput="resetTablePage('projects');renderProjectManagement()" />
                   <button class="btn btn-sm btn-danger" type="button" id="projectBatchDeleteBtn" onclick="deleteSelectedProjects()" disabled>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/></svg>
                     <span id="projectBatchDeleteLabel">批量删除</span>
@@ -862,12 +876,13 @@
               <div class="project-table-wrap">
                 <table class="project-table">
                   <thead>
-                    <tr><th class="project-select-cell"><input id="projectSelectAll" type="checkbox" onchange="toggleAllVisibleProjects(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>项目</th><th>状态</th><th>模式</th><th>端口</th><th>节点/订阅</th><th>操作</th></tr>
+                    <tr><th class="project-select-cell"><input id="projectSelectAll" type="checkbox" onchange="toggleAllVisibleProjects(this.checked)" aria-label="全选本页" title="全选本页" /></th><th>项目</th><th>状态</th><th>模式</th><th>端口</th><th>节点/订阅</th><th>操作</th></tr>
                   </thead>
                   <tbody id="projectTableBody"></tbody>
                 </table>
               </div>
               <div class="project-management-empty" id="projectEmptyState" style="display:none;">暂无项目</div>
+              <div class="table-pagination" id="projectPagination" hidden></div>
             </section>
             <section class="panel project-detail-panel">
               <div class="panel-header">
@@ -955,7 +970,7 @@
                 <button class="btn btn-sm" id="batchUnquarantineBtn" onclick="batchReleaseQuarantineNodes()" title="批量释放出小黑屋">🔓 出小黑屋</button>
                 <button class="btn btn-sm" onclick="clearNodeSelection()" title="取消选择">✖</button>
               </div>
-              <select id="nodeStatusFilter" class="setting-input table-tool" onchange="applyNodeFilters()" title="状态筛选">
+              <select id="nodeStatusFilter" class="setting-input table-tool" onchange="applyNodeFilters(true)" title="状态筛选">
                 <option value="all">全部状态</option>
                 <option value="healthy">在线</option>
                 <option value="error">异常</option>
@@ -963,7 +978,7 @@
                 <option value="jailed">小黑屋</option>
                 <option value="unknown">未测试</option>
               </select>
-              <select id="nodeLatencySort" class="setting-input table-tool" onchange="applyNodeFilters()" title="排序方式">
+              <select id="nodeLatencySort" class="setting-input table-tool" onchange="applyNodeFilters(true)" title="排序方式">
                 <option value="default">默认排序</option>
                 <option value="asc">延迟从低到高</option>
                 <option value="desc">延迟从高到低</option>
@@ -977,14 +992,14 @@
                 <option value="all">全部订阅来源</option>
                 <option value="__non_subscription__">非订阅节点</option>
               </select>
-              <input id="nodeSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索名称、标签、端口或出口 IP" title="支持名称 / 标签 / 端口 / 地区 / 出口 IP 的模糊匹配，IP 可用 * 通配（如 104.28.*）" oninput="applyNodeFilters()" />
+              <input id="nodeSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索名称、标签、端口或出口 IP" title="支持名称 / 标签 / 端口 / 地区 / 出口 IP 的模糊匹配，IP 可用 * 通配（如 104.28.*）" oninput="applyNodeFilters(true)" />
             </div>
           </div>
           <div class="table-container">
             <table>
               <thead>
                 <tr>
-                  <th style="width:40px;"><input type="checkbox" id="nodeSelectAll" onchange="toggleAllNodes(this.checked)" title="全选/取消全选" /></th>
+                  <th style="width:40px;"><input type="checkbox" id="nodeSelectAll" onchange="toggleAllNodes(this.checked)" title="全选本页 / 取消本页" /></th>
                   <th>状态</th>
                   <th>节点</th>
                   <th>端口</th>
@@ -1000,7 +1015,7 @@
               </tbody>
             </table>
             <div id="emptyState" style="display:none; text-align:center; padding: 40px; color: var(--text-muted);">暂无数据</div>
-            <div id="nodesPagingHint" style="display:none; text-align:center; padding: 12px; color: var(--text-muted); font-size: 12px;"></div>
+            <div id="nodesPagination" class="table-pagination" hidden></div>
           </div>
         </div>
       </div>
@@ -1047,11 +1062,11 @@
             </div>
           </div>
           <div class="table-filter-bar">
-            <select id="configNodeSubscriptionFilter" class="setting-input table-tool" onchange="renderConfigNodes()" title="订阅筛选">
+            <select id="configNodeSubscriptionFilter" class="setting-input table-tool" onchange="resetTablePage('configNodes');renderConfigNodes()" title="订阅筛选">
               <option value="all">全部订阅来源</option>
               <option value="__non_subscription__">非订阅节点</option>
             </select>
-            <select id="configNodeStatusFilter" class="setting-input table-tool" onchange="renderConfigNodes()" title="状态筛选">
+            <select id="configNodeStatusFilter" class="setting-input table-tool" onchange="resetTablePage('configNodes');renderConfigNodes()" title="状态筛选">
               <option value="all">全部状态</option>
               <option value="valid">有效</option>
               <option value="abnormal">异常</option>
@@ -1059,8 +1074,8 @@
               <option value="quarantined">小黑屋</option>
               <option value="unknown">未探测</option>
             </select>
-            <input id="configNodeSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称或 URL" aria-label="搜索节点名称或 URL" oninput="renderConfigNodes()" />
-            <select id="configNodeNameSort" class="setting-input table-tool" onchange="renderConfigNodes()" title="名称排序">
+            <input id="configNodeSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称或 URL" aria-label="搜索节点名称或 URL" oninput="resetTablePage('configNodes');renderConfigNodes()" />
+            <select id="configNodeNameSort" class="setting-input table-tool" onchange="resetTablePage('configNodes');renderConfigNodes()" title="名称排序">
               <option value="default">默认排序</option>
               <option value="asc">名称升序</option>
               <option value="desc">名称降序</option>
@@ -1068,10 +1083,11 @@
           </div>
           <div class="table-container">
             <table>
-              <thead><tr><th class="config-node-select-cell"><input id="configNodeSelectAll" class="config-node-select" type="checkbox" onchange="toggleAllVisibleConfigNodes(this.checked)" aria-label="全选当前筛选结果" title="全选当前筛选结果" /></th><th>名称</th><th>链接</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
+              <thead><tr><th class="config-node-select-cell"><input id="configNodeSelectAll" class="config-node-select" type="checkbox" onchange="toggleAllVisibleConfigNodes(this.checked)" aria-label="全选本页" title="全选本页" /></th><th>名称</th><th>链接</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
               <tbody id="configNodesTableBody"></tbody>
             </table>
             <div id="configNodesEmptyState" class="table-empty-state">暂无节点</div>
+            <div id="configNodesPagination" class="table-pagination" hidden></div>
           </div>
         </div>
       </div>
@@ -1110,7 +1126,7 @@
             </div>
           </div>
           <div class="table-filter-bar">
-            <select id="subscriptionStatusFilter" class="setting-input table-tool" onchange="renderSubscriptions()" title="状态筛选">
+            <select id="subscriptionStatusFilter" class="setting-input table-tool" onchange="resetTablePage('subscriptions');renderSubscriptions()" title="状态筛选">
               <option value="all">全部状态</option>
               <option value="active">有效</option>
               <option value="disabled">已关闭</option>
@@ -1119,8 +1135,8 @@
               <option value="error">更新失败</option>
               <option value="pending">待更新</option>
             </select>
-            <input id="subscriptionSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索订阅名称或 URL" oninput="renderSubscriptions()" />
-            <select id="subscriptionSort" class="setting-input table-tool" onchange="renderSubscriptions()" title="订阅排序">
+            <input id="subscriptionSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索订阅名称或 URL" oninput="resetTablePage('subscriptions');renderSubscriptions()" />
+            <select id="subscriptionSort" class="setting-input table-tool" onchange="resetTablePage('subscriptions');renderSubscriptions()" title="订阅排序">
               <option value="default">默认排序</option>
               <option value="expires_asc">到期时间升序</option>
               <option value="expires_desc">到期时间降序</option>
@@ -1142,10 +1158,11 @@
           </div>
           <div class="table-container">
             <table>
-              <thead><tr><th style="width:40px;"><input type="checkbox" id="subscriptionSelectAll" onchange="toggleAllSubscriptions(this.checked)" title="全选/取消全选" /></th><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点数</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
+              <thead><tr><th style="width:40px;"><input type="checkbox" id="subscriptionSelectAll" onchange="toggleAllSubscriptions(this.checked)" title="全选本页 / 取消本页" /></th><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点数</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
               <tbody id="subscriptionsTableBody"></tbody>
             </table>
             <div id="subscriptionsEmptyState" class="table-empty-state">暂无订阅</div>
+            <div id="subscriptionsPagination" class="table-pagination" hidden></div>
           </div>
         </div>
       </div>
@@ -1197,8 +1214,8 @@
           <div class="panel-header">
             <div class="panel-title">节点质量分析</div>
             <div class="table-tools">
-              <input id="debugNodeSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称、标签、IP 或端口" oninput="renderDebugNodes()" />
-              <select id="debugSuccessSort" class="setting-input table-tool" onchange="renderDebugNodes()">
+              <input id="debugNodeSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称、标签、IP 或端口" oninput="resetTablePage('debugNodes');renderDebugNodes()" />
+              <select id="debugSuccessSort" class="setting-input table-tool" onchange="resetTablePage('debugNodes');renderDebugNodes()">
                 <option value="desc">请求成功率从高到低</option>
                 <option value="asc">请求成功率从低到高</option>
               </select>
@@ -1217,6 +1234,7 @@
               </thead>
               <tbody id="debugNodesTableBody"></tbody>
             </table>
+            <div id="debugNodesPagination" class="table-pagination" hidden></div>
           </div>
         </div>
       </div>
@@ -1387,6 +1405,17 @@
             <textarea id="nodeUri" class="node-uri-input" required placeholder="vless://... 或 anytls://..."></textarea>
           </div>
           <input type="hidden" id="nodeEditName" />
+          <div id="nodeProjectSection" style="display:none;">
+            <div class="form-section-title">项目可用范围</div>
+            <div style="display:flex; gap:8px; margin-bottom:8px;">
+              <button type="button" class="btn btn-sm" onclick="selectAllNodeProjects()">全选</button>
+              <button type="button" class="btn btn-sm" onclick="clearAllNodeProjects()">全不选</button>
+            </div>
+            <div class="checkbox-grid" id="nodeProjectCheckboxes" style="max-height:200px; overflow-y:auto; border:1px solid var(--border); padding:8px; border-radius:4px;">
+              <!-- Populated dynamically -->
+            </div>
+            <em id="nodeProjectHint" style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;"></em>
+          </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn" onclick="document.getElementById('nodeModalOverlay').classList.remove('show')">取消</button>
@@ -1774,7 +1803,6 @@
     let currentRegionFilter = 'all';
     // 'all' | '__non_subscription__' | <订阅显示名>。与节点定义列表的订阅筛选保持一致。
     let currentNodeSourceFilter = 'all';
-    let nodeRenderLimit = 300;
     let isEditMode = false;
     let configNodes = [];
     let visibleConfigNodeNames = [];
@@ -1786,6 +1814,137 @@
     let _savedCoreSnapshot = '';
     // Cached pool.blacklist_duration from /api/settings (e.g. "1h", "30m0s"). null = not loaded yet.
     let cachedBlacklistDuration = null;
+
+    // ========== 列表分页 ==========
+    const TABLE_PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200];
+    const DEFAULT_TABLE_PAGE_SIZE = 20;
+    const tablePageStates = new Map();
+
+    function tablePageStorageKey(key) {
+      return `proxy2apiTablePageSize:${key}`;
+    }
+
+    function normalizeTablePageSize(value) {
+      const size = Number(value);
+      return TABLE_PAGE_SIZE_OPTIONS.includes(size) ? size : DEFAULT_TABLE_PAGE_SIZE;
+    }
+
+    function tablePageStateFor(key) {
+      if (!tablePageStates.has(key)) {
+        let size = DEFAULT_TABLE_PAGE_SIZE;
+        try {
+          size = normalizeTablePageSize(localStorage.getItem(tablePageStorageKey(key)));
+        } catch (error) {}
+        tablePageStates.set(key, {page: 1, size});
+      }
+      return tablePageStates.get(key);
+    }
+
+    function paginateTableItems(key, items) {
+      const list = Array.isArray(items) ? items : [];
+      const state = tablePageStateFor(key);
+      const total = list.length;
+      const totalPages = Math.max(1, Math.ceil(total / state.size));
+      if (state.page > totalPages) state.page = totalPages;
+      if (state.page < 1) state.page = 1;
+      const page = total > 0 ? state.page : 1;
+      const startIndex = (page - 1) * state.size;
+      const pageItems = list.slice(startIndex, startIndex + state.size);
+      return {
+        items: pageItems,
+        page,
+        totalPages,
+        total,
+        size: state.size,
+        start: total > 0 ? startIndex + 1 : 0,
+        end: Math.min(total, startIndex + pageItems.length)
+      };
+    }
+
+    function resetTablePage(key) {
+      tablePageStateFor(key).page = 1;
+    }
+
+    // 切换项目或全局目录后，列表内容整体换了一套，页码回到第一页。
+    function resetAllTablePages() {
+      ['dashboardNodes', 'projects', 'configNodes', 'subscriptions', 'debugNodes']
+        .forEach(key => resetTablePage(key));
+    }
+
+    function rerenderTable(key) {
+      switch (key) {
+        case 'dashboardNodes': applyNodeFilters(); break;
+        case 'projects': renderProjectManagement(); break;
+        case 'configNodes': renderConfigNodes(); break;
+        case 'subscriptions': renderSubscriptions(); break;
+        case 'debugNodes': renderDebugNodes(); break;
+      }
+    }
+
+    function gotoTablePage(key, page) {
+      const state = tablePageStateFor(key);
+      const next = Math.floor(Number(page));
+      state.page = Number.isFinite(next) && next > 0 ? next : 1;
+      rerenderTable(key);
+    }
+
+    function changeTablePageSize(key, value) {
+      const state = tablePageStateFor(key);
+      state.size = normalizeTablePageSize(value);
+      state.page = 1;
+      try {
+        localStorage.setItem(tablePageStorageKey(key), String(state.size));
+      } catch (error) {}
+      rerenderTable(key);
+    }
+
+    function tablePageNumbers(page, totalPages) {
+      const pages = [];
+      const add = value => {
+        if (value >= 1 && value <= totalPages && !pages.includes(value)) pages.push(value);
+      };
+      add(1);
+      for (let value = Math.max(2, page - 2); value <= Math.min(totalPages - 1, page + 2); value++) {
+        add(value);
+      }
+      add(totalPages);
+      return pages.sort((a, b) => a - b);
+    }
+
+    function renderTablePager(containerID, key, paging) {
+      const container = document.getElementById(containerID);
+      if (!container) return;
+      if (!paging || paging.total === 0) {
+        container.hidden = true;
+        container.innerHTML = '';
+        return;
+      }
+      container.hidden = false;
+      const pages = tablePageNumbers(paging.page, paging.totalPages);
+      let pageHTML = '';
+      let previous = 0;
+      pages.forEach(page => {
+        if (previous && page - previous > 1) pageHTML += '<span class="table-pagination-ellipsis">…</span>';
+        pageHTML += `<button type="button" class="btn btn-sm table-pagination-page ${page === paging.page ? 'active' : ''}" ${page === paging.page ? 'aria-current="page"' : ''} onclick="gotoTablePage('${key}', ${page})">${page}</button>`;
+        previous = page;
+      });
+      const sizeOptions = TABLE_PAGE_SIZE_OPTIONS.map(size =>
+        `<option value="${size}" ${size === paging.size ? 'selected' : ''}>${size}</option>`
+      ).join('');
+      container.innerHTML = `
+        <div class="table-pagination-info">共 <strong>${paging.total}</strong> 条 · 第 <strong>${paging.page}</strong> / ${paging.totalPages} 页（${paging.start}-${paging.end}）</div>
+        <div class="table-pagination-controls">
+          <button type="button" class="btn btn-sm" title="首页" ${paging.page <= 1 ? 'disabled' : ''} onclick="gotoTablePage('${key}', 1)">«</button>
+          <button type="button" class="btn btn-sm" title="上一页" ${paging.page <= 1 ? 'disabled' : ''} onclick="gotoTablePage('${key}', ${paging.page - 1})">‹</button>
+          ${pageHTML}
+          <button type="button" class="btn btn-sm" title="下一页" ${paging.page >= paging.totalPages ? 'disabled' : ''} onclick="gotoTablePage('${key}', ${paging.page + 1})">›</button>
+          <button type="button" class="btn btn-sm" title="末页" ${paging.page >= paging.totalPages ? 'disabled' : ''} onclick="gotoTablePage('${key}', ${paging.totalPages})">»</button>
+        </div>
+        <label class="table-page-size">每页
+          <select class="setting-input" aria-label="每页条数" onchange="changeTablePageSize('${key}', this.value)">${sizeOptions}</select>
+          条
+        </label>`;
+    }
 
     function showFullscreenLoading(text, subtext) {
       document.getElementById('fullscreenLoadingText').textContent = text || '处理中...';
@@ -2095,6 +2254,14 @@
       if (refreshButton && !hasProject) refreshButton.style.display = 'none';
     }
 
+    function filteredProjectsForManagement() {
+      const query = (document.getElementById('projectSearchInput')?.value || '').trim().toLowerCase();
+      return query
+        ? projectsCache.filter(project => [project.id, project.name]
+          .some(value => String(value || '').toLowerCase().includes(query)))
+        : projectsCache;
+    }
+
     function renderProjectManagement() {
       const tbody = document.getElementById('projectTableBody');
       const empty = document.getElementById('projectEmptyState');
@@ -2103,21 +2270,20 @@
       if (!tbody || !empty || !detail || !editButton) return;
 
       const query = (document.getElementById('projectSearchInput')?.value || '').trim().toLowerCase();
-      const visibleProjects = query
-        ? projectsCache.filter(project => [project.id, project.name]
-          .some(value => String(value || '').toLowerCase().includes(query)))
-        : projectsCache;
+      const filteredProjects = filteredProjectsForManagement();
+      const paging = paginateTableItems('projects', filteredProjects);
+      const visibleProjects = paging.items;
       selectedProjectIDs.forEach(projectID => {
         if (!projectsCache.some(project => project.id === projectID)) selectedProjectIDs.delete(projectID);
       });
       const totalBadge = document.getElementById('projectTotalBadge');
       if (totalBadge) {
         totalBadge.textContent = query
-          ? `显示 ${visibleProjects.length} / ${projectsCache.length} 个项目`
+          ? `显示 ${filteredProjects.length} / ${projectsCache.length} 个项目`
           : `${projectsCache.length} 个项目`;
       }
       empty.textContent = query ? '没有匹配的项目' : '暂无项目';
-      empty.style.display = visibleProjects.length ? 'none' : 'block';
+      empty.style.display = filteredProjects.length ? 'none' : 'block';
       tbody.innerHTML = visibleProjects.map(project => {
         const statusView = projectStatusView(project.status);
         const projectID = escapeAttrJs(project.id);
@@ -2152,6 +2318,7 @@
         </tr>`;
       }).join('');
       syncProjectSelectionUI(visibleProjects);
+      renderTablePager('projectPagination', 'projects', paging);
 
       const project = currentProject();
       editButton.disabled = !project;
@@ -2199,11 +2366,7 @@
     }
 
     function toggleAllVisibleProjects(checked) {
-      const query = (document.getElementById('projectSearchInput')?.value || '').trim().toLowerCase();
-      const visibleProjects = query
-        ? projectsCache.filter(project => [project.id, project.name]
-          .some(value => String(value || '').toLowerCase().includes(query)))
-        : projectsCache;
+      const visibleProjects = paginateTableItems('projects', filteredProjectsForManagement()).items;
       visibleProjects.forEach(project => {
         if (checked) selectedProjectIDs.add(project.id);
         else selectedProjectIDs.delete(project.id);
@@ -2412,6 +2575,7 @@
     }
 
     function resetProjectView() {
+      resetAllTablePages();
       allNodesCache = [];
       selectedNodeTags.clear();
       configNodes = [];
@@ -3769,7 +3933,7 @@
 
     function filterByRegion(region) {
       currentRegionFilter = region;
-      applyNodeFilters();
+      applyNodeFilters(true);
     }
 
     function updateRegionFilterOptions() {
@@ -3820,7 +3984,7 @@
 
     function filterByNodeSource(value) {
       currentNodeSourceFilter = value || 'all';
-      applyNodeFilters();
+      applyNodeFilters(true);
     }
 
     function updateNodeSourceFilterOptions() {
@@ -3893,7 +4057,8 @@
       }
     }
 
-    function applyNodeFilters() {
+    function applyNodeFilters(resetPage = false) {
+      if (resetPage) resetTablePage('dashboardNodes');
       const status = document.getElementById('nodeStatusFilter').value;
       const query = document.getElementById('nodeSearchInput').value.trim().toLowerCase();
       const sort = document.getElementById('nodeLatencySort').value;
@@ -3936,17 +4101,16 @@
 
     function renderNodes(nodes) {
       const tbody = document.getElementById('nodesTableBody');
-      const hint = document.getElementById('nodesPagingHint');
+      const paging = paginateTableItems('dashboardNodes', nodes);
+      const visible = paging.items;
       if (!nodes.length) {
         tbody.innerHTML = '';
         document.getElementById('emptyState').style.display='block';
-        if(hint) hint.style.display='none';
+        renderTablePager('nodesPagination', 'dashboardNodes', paging);
         renderBatchSelectionState();
         return;
       }
       document.getElementById('emptyState').style.display='none';
-      // 分批渲染：节点量大时只渲染前 nodeRenderLimit 个，避免一次性插入数千行 DOM 导致卡顿。
-      const visible = nodes.slice(0, nodeRenderLimit);
       tbody.innerHTML = visible.map(n => {
         const measuredMs = Number.isFinite(n.last_latency_ms) ? n.last_latency_ms : -1;
         const currentHealthy = n.initial_check_done && n.available && !n.blacklisted;
@@ -4041,20 +4205,7 @@
         tbody.querySelectorAll('button[onclick^="setStickyNode"], button[onclick^="releaseNode"], button[onclick^="blacklistNode"], button[onclick^="quarantineNode"], button[onclick^="releaseQuarantineNode"]').forEach(button => button.remove());
       }
       renderBatchSelectionState();
-      if (hint) {
-        if (nodes.length > visible.length) {
-          const more = Math.min(300, nodes.length - visible.length);
-          hint.style.display = 'block';
-          hint.innerHTML = `显示 ${visible.length} / ${nodes.length} 个节点 <button class="btn btn-sm" style="margin-left:10px" onclick="showMoreNodes()">显示更多 (+${more})</button>`;
-        } else {
-          hint.style.display = 'none';
-        }
-      }
-    }
-
-    function showMoreNodes() {
-      nodeRenderLimit += 300;
-      applyNodeFilters();
+      renderTablePager('nodesPagination', 'dashboardNodes', paging);
     }
 
     async function probeNode(tag) {
@@ -4779,10 +4930,12 @@
           return direction * (aValue - bValue) || a.index - b.index;
         });
       }
-      const visibleItems = items.map(entry => entry.item);
+      const filteredItems = items.map(entry => entry.item);
+      const paging = paginateTableItems('subscriptions', filteredItems);
+      const visibleItems = paging.items;
       empty.textContent = subscriptionsCache.length ? '没有匹配的订阅' : '暂无订阅';
-      empty.style.display = visibleItems.length ? 'none' : 'block';
-      document.getElementById('subscriptionVisibleCount').textContent = visibleItems.length;
+      empty.style.display = filteredItems.length ? 'none' : 'block';
+      document.getElementById('subscriptionVisibleCount').textContent = filteredItems.length;
       tbody.innerHTML = visibleItems.map(item => {
         // A close owned by the shared catalog is inherited by every project, so
         // the project view can only explain it — not undo it.
@@ -4834,6 +4987,7 @@
         </tr>`;
       }).join('');
       renderSubscriptionSelectionState();
+      renderTablePager('subscriptionsPagination', 'subscriptions', paging);
     }
 
     function subscriptionSortTime(value) {
@@ -5205,7 +5359,9 @@
           String(b.node.name || ''), 'zh-CN', {numeric:true, sensitivity:'base'}
         ) || a.index - b.index);
       }
-      const visibleNodes = nodes.map(item => item.node);
+      const filteredNodes = nodes.map(item => item.node);
+      const paging = paginateTableItems('configNodes', filteredNodes);
+      const visibleNodes = paging.items;
       visibleConfigNodeNames = visibleNodes.map(node => String(node.name || ''));
       tbody.innerHTML = visibleNodes.map(n => `
           <tr class="${selectedConfigNodeNames.has(String(n.name || '')) ? 'config-node-row-selected' : ''}">
@@ -5220,11 +5376,12 @@
             </td>
           </tr>
         `).join('');
-      document.getElementById('configNodeVisibleCount').textContent = visibleNodes.length;
+      document.getElementById('configNodeVisibleCount').textContent = filteredNodes.length;
       document.getElementById('configNodeTotalCount').textContent = configNodes.length;
       empty.textContent = configNodes.length ? '没有匹配的节点' : '暂无节点';
-      empty.style.display = visibleNodes.length ? 'none' : 'block';
+      empty.style.display = filteredNodes.length ? 'none' : 'block';
       updateConfigNodeSelectionUI();
+      renderTablePager('configNodesPagination', 'configNodes', paging);
     }
 
     function updateConfigNodeSelectionUI() {
@@ -5287,16 +5444,100 @@
       document.getElementById('nodeImportForm').style.display = isImport ? 'block' : 'none';
       document.getElementById('nodeModeSingleBtn').classList.toggle('active', !isImport);
       document.getElementById('nodeModeImportBtn').classList.toggle('active', isImport);
+      updateNodeProjectSection();
     }
+
+    function nodeProjectPickerProjects() {
+      return Array.isArray(projectsCache) ? projectsCache : [];
+    }
+
+    function updateNodeProjectSection() {
+      const section = document.getElementById('nodeProjectSection');
+      if (!section) return;
+      const singleMode = !document.getElementById('nodeModeImportBtn')?.classList.contains('active');
+      const show = !isEditMode && singleMode;
+      section.style.display = show ? 'block' : 'none';
+      if (show) renderNodeProjectPicker();
+    }
+
+    // 手动添加节点时选择哪些项目可以使用它。全局视图下默认不选（必须手动选），
+    // 项目视图下默认选中当前项目，同时允许追加其他项目。
+    function renderNodeProjectPicker() {
+      const grid = document.getElementById('nodeProjectCheckboxes');
+      if (!grid) return;
+      const projects = nodeProjectPickerProjects();
+      if (!projects.length) {
+        grid.innerHTML = '<em style="font-size:12px;color:var(--text-muted);">暂无项目，节点将只保留在全局目录</em>';
+        updateNodeProjectSummary();
+        return;
+      }
+      grid.innerHTML = projects.map((project, index) => {
+        const id = `nodeproj-${index}`;
+        const name = project.name || project.id;
+        const checked = project.id === currentProjectID;
+        const suffix = project.id === currentProjectID ? '（当前项目）' : '';
+        return `<div class="checkbox-row" title="${escapeHtml(project.id)}">
+          <input type="checkbox" class="node-project-checkbox" id="${id}" value="${escapeHtml(project.id)}" onchange="updateNodeProjectSummary()" ${checked ? 'checked' : ''} />
+          <label for="${id}">${escapeHtml(name)}${suffix}</label>
+        </div>`;
+      }).join('');
+      updateNodeProjectSummary();
+    }
+
+    // 选中数量与规则提示。全局视图没有默认项目，必须至少选一个；项目视图默认当前项目。
+    function updateNodeProjectSummary() {
+      const hint = document.getElementById('nodeProjectHint');
+      if (!hint) return;
+      const projects = nodeProjectPickerProjects();
+      if (!projects.length) {
+        hint.textContent = '当前没有可选择的项目；节点会保留在全局节点定义中，可供以后创建的项目使用。';
+        return;
+      }
+      const selected = selectedNodeProjectIDs().length;
+      const scopeHint = currentProjectID
+        ? '默认选中当前项目，可追加其他项目'
+        : '全局视图下必须至少选择一个项目';
+      hint.textContent = `已选 ${selected} / ${projects.length} 个项目 · ${scopeHint}；未勾选的项目不会使用该节点。`;
+    }
+
+    function selectedNodeProjectIDs() {
+      return Array.from(
+        document.querySelectorAll('#nodeProjectCheckboxes input[type="checkbox"]')
+      ).filter(checkbox => checkbox.checked).map(checkbox => checkbox.value);
+    }
+
+    function selectAllNodeProjects() {
+      document.querySelectorAll('#nodeProjectCheckboxes input[type="checkbox"]').forEach(checkbox => {
+        checkbox.checked = true;
+      });
+      updateNodeProjectSummary();
+    }
+
+    function clearAllNodeProjects() {
+      document.querySelectorAll('#nodeProjectCheckboxes input[type="checkbox"]').forEach(checkbox => {
+        checkbox.checked = false;
+      });
+      updateNodeProjectSummary();
+    }
+
     function showAddNodeModal() {
       isEditMode=false;
       document.getElementById('nodeModalTitle').textContent='添加节点';
       document.getElementById('nodeModeSwitch').style.display='flex';
       document.getElementById('nodeName').value='';
       document.getElementById('nodeUri').value='';
+      document.getElementById('nodeEditName').value='';
       document.getElementById('nodeImportFile').value='';
       document.getElementById('nodeImportContent').value='';
       setNodeModalMode('single');
+      renderNodeProjectPicker();
+      if (!projectsCache.length) {
+        loadProjects()
+          .then(() => {
+            if (document.getElementById('nodeModalOverlay').classList.contains('show') && !isEditMode) renderNodeProjectPicker();
+          })
+          .catch(() => {});
+      }
       document.getElementById('nodeModalOverlay').classList.add('show');
     }
     function showEditNodeModal(name) { 
@@ -5308,7 +5549,13 @@
     }
     async function handleNodeSubmit(e) {
       e.preventDefault();
+      const projectIDs = isEditMode ? [] : selectedNodeProjectIDs();
+      if (!isEditMode && nodeProjectPickerProjects().length && projectIDs.length === 0) {
+        showToast('请至少选择一个项目', 'error');
+        return;
+      }
       const p = { name: document.getElementById('nodeName').value, uri: document.getElementById('nodeUri').value };
+      if (!isEditMode) p.project_ids = projectIDs;
       try {
         const editName = document.getElementById('nodeEditName').value;
         const url = globalScopePath(isEditMode ? '/api/nodes/config/'+encodeURIComponent(editName) : '/api/nodes/config');
@@ -5513,7 +5760,7 @@
       if (!tb) return;
       const query = (document.getElementById('debugNodeSearch')?.value || '').trim().toLowerCase();
       const direction = document.getElementById('debugSuccessSort')?.value || 'desc';
-      const nodes = (window._debugNodes || [])
+      const filteredNodes = (window._debugNodes || [])
         .filter(n => !query
           || [n.name, n.tag, n.port, n.region, n.country].some(value => String(value || '').toLowerCase().includes(query))
           || matchExitIP(n.ip, query))
@@ -5526,6 +5773,8 @@
           if (bRate < 0) return -1;
           return direction === 'asc' ? aRate - bRate : bRate - aRate;
         });
+      const paging = paginateTableItems('debugNodes', filteredNodes);
+      const nodes = paging.items;
       tb.innerHTML = nodes.map(n => {
         const rate = nodeSuccessRate(n);
         const rateText = rate < 0 ? '-' : rate.toFixed(1) + '%';
@@ -5540,6 +5789,7 @@
           <td><div class="timeline">${tl||'-'}</div></td>
         </tr>`;
       }).join('');
+      renderTablePager('debugNodesPagination', 'debugNodes', paging);
     }
 
     function updateDebugCharts(globalRate) {

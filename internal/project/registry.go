@@ -1715,7 +1715,100 @@ func (r *Registry) ApplySharedSubscriptionMembership(rawURL string, include, exc
 	return nil
 }
 
+// ApplySharedNodeMembership attaches a shared node to the projects listed in
+// include and hides it from those listed in exclude by maintaining each
+// project's excluded_nodes list. Projects absent from both lists keep their
+// current relationship. Writes are all-or-nothing: a failure rolls back every
+// project already saved in this call.
+func (r *Registry) ApplySharedNodeMembership(nodeID string, include, exclude []string) error {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" || (len(include) == 0 && len(exclude) == 0) {
+		return nil
+	}
+	desired := make(map[string]bool, len(include)+len(exclude))
+	for _, id := range exclude {
+		if id = strings.TrimSpace(id); id != "" {
+			desired[id] = false
+		}
+	}
+	// Inclusion wins when an id appears in both lists.
+	for _, id := range include {
+		if id = strings.TrimSpace(id); id != "" {
+			desired[id] = true
+		}
+	}
+	if len(desired) == 0 {
+		return nil
+	}
+
+	r.catalogMu.Lock()
+	defer r.catalogMu.Unlock()
+	r.mu.RLock()
+	runtimes := make(map[string]*Runtime, len(desired))
+	for id := range desired {
+		if runtime, ok := r.runtimes[id]; ok {
+			runtimes[id] = runtime
+		}
+	}
+	r.mu.RUnlock()
+
+	ids := make([]string, 0, len(desired))
+	for id := range desired {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	updates := make([]nodeReferenceUpdate, 0, len(ids))
+	for _, id := range ids {
+		runtime, ok := runtimes[id]
+		if !ok {
+			return fmt.Errorf("项目 %q 不存在", id)
+		}
+		cfg, err := config.LoadSettingsReadOnly(runtime.configPath)
+		if err != nil {
+			return fmt.Errorf("加载项目 %q 的节点关联失败: %w", id, err)
+		}
+		before := *cfg
+		before.ExcludedNodes = append([]string(nil), cfg.ExcludedNodes...)
+		excluded := append([]string(nil), cfg.ExcludedNodes...)
+		if desired[id] {
+			excluded = removeStringValue(excluded, nodeID)
+		} else {
+			excluded = appendUniqueString(excluded, nodeID)
+		}
+		if equalStringSlices(excluded, cfg.ExcludedNodes) {
+			continue
+		}
+		cfg.ExcludedNodes = excluded
+		updates = append(updates, nodeReferenceUpdate{runtime: runtime, before: &before, after: cfg})
+	}
+
+	saved := make([]nodeReferenceUpdate, 0, len(updates))
+	for _, update := range updates {
+		if err := update.after.SaveSettings(); err != nil {
+			rollbackErrors := []error{fmt.Errorf("保存项目节点关联失败: %w", err)}
+			for index := len(saved) - 1; index >= 0; index-- {
+				if rollbackErr := saved[index].before.SaveSettings(); rollbackErr != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("回滚项目节点关联失败: %w", rollbackErr))
+				}
+			}
+			return errors.Join(rollbackErrors...)
+		}
+		saved = append(saved, update)
+	}
+	for _, update := range updates {
+		update.runtime.setExcludedNodes(update.after.ExcludedNodes)
+	}
+	return nil
+}
+
 type subscriptionReferenceUpdate struct {
+	runtime *Runtime
+	before  *config.Config
+	after   *config.Config
+}
+
+type nodeReferenceUpdate struct {
 	runtime *Runtime
 	before  *config.Config
 	after   *config.Config

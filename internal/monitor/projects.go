@@ -246,6 +246,10 @@ type ProjectController interface {
 	ReloadSharedSources(ctx context.Context) error
 	RewriteSharedSubscriptionReferences(oldURL, newURL string) error
 	ApplySharedSubscriptionMembership(rawURL string, include, exclude []string) error
+	// ApplySharedNodeMembership controls which projects inherit a shared node by
+	// maintaining each project's excluded_nodes list. Projects absent from both
+	// lists keep their current relationship.
+	ApplySharedNodeMembership(nodeID string, include, exclude []string) error
 	SystemSettings() SystemSettings
 	UpdateSystemSettings(ctx context.Context, settings SystemSettings) error
 	// ExportBackup collects one project (all=false) or the whole workspace
