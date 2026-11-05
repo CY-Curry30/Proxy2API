@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/bits"
 	"net/url"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"Proxy2API/internal/state"
+	"Proxy2API/internal/successrate"
 
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -58,7 +60,8 @@ type NodeInfo struct {
 	// Quarantined marks a node the operator manually moved into the project's
 	// "小黑屋". It is applied from the project config on every reload and is
 	// never set automatically. Snapshot re-exposes it as `quarantined`.
-	Quarantined bool `json:"-"`
+	Quarantined    bool `json:"-"`
+	MaxConnections int  `json:"max_connections"`
 }
 
 // TimelineEvent represents a single usage event for debug tracking.
@@ -76,20 +79,31 @@ const probeTimeoutParts = 6
 // Snapshot is a runtime view of a proxy node.
 type Snapshot struct {
 	NodeInfo
-	IP                string        `json:"ip,omitempty"`
-	Region            string        `json:"region,omitempty"`
-	Country           string        `json:"country,omitempty"`
-	FailureCount      int           `json:"failure_count"` // client request connection failures
-	SuccessCount      int64         `json:"success_count"` // client request connection successes
-	Blacklisted       bool          `json:"blacklisted"`
-	BlacklistedUntil  time.Time     `json:"blacklisted_until"`
-	ActiveConnections int32         `json:"active_connections"`
-	LastError         string        `json:"last_error,omitempty"`
-	LastFailure       time.Time     `json:"last_failure,omitempty"`
-	LastSuccess       time.Time     `json:"last_success,omitempty"`
-	LastProbedAt      time.Time     `json:"last_probed_at,omitempty"`
-	LastProbeLatency  time.Duration `json:"last_probe_latency,omitempty"`
-	LastLatencyMs     int64         `json:"last_latency_ms"`
+	IP           string `json:"ip,omitempty"`
+	Region       string `json:"region,omitempty"`
+	Country      string `json:"country,omitempty"`
+	FailureCount int    `json:"failure_count"` // client request connection failures
+	SuccessCount int64  `json:"success_count"` // client request connection successes
+	// RecentSuccessCount/RecentAttempts describe the sliding window the success
+	// scheduler scores. The UI shows this instead of the cumulative ratio, which
+	// is dominated by history and barely moves once a node has been running.
+	RecentSuccessCount int                 `json:"recent_success_count"`
+	RecentAttempts     int                 `json:"recent_attempts"`
+	RecentLastAt       time.Time           `json:"recent_last_at"`
+	SuccessMetrics     *NodeSuccessMetrics `json:"success_metrics,omitempty"`
+	recentTimes        [successrate.WindowLimit]time.Time
+	DialLatencyMS      float64 `json:"dial_latency_ms"`
+	Recovering         bool    `json:"recovering"`
+	recentMask         uint64
+	Blacklisted        bool          `json:"blacklisted"`
+	BlacklistedUntil   time.Time     `json:"blacklisted_until"`
+	ActiveConnections  int32         `json:"active_connections"`
+	LastError          string        `json:"last_error,omitempty"`
+	LastFailure        time.Time     `json:"last_failure,omitempty"`
+	LastSuccess        time.Time     `json:"last_success,omitempty"`
+	LastProbedAt       time.Time     `json:"last_probed_at,omitempty"`
+	LastProbeLatency   time.Duration `json:"last_probe_latency,omitempty"`
+	LastLatencyMs      int64         `json:"last_latency_ms"`
 	// LastTraceAt is when the exit location was last refreshed successfully;
 	// LastTraceError carries the most recent Trace failure. Trace is decoupled
 	// from the health check, so neither field affects Available.
@@ -136,6 +150,14 @@ type entry struct {
 	country           string
 	failure           int
 	success           int64
+	recentMask        uint64    // bit 0 is the most recent dial, 1 = success
+	recentCount       uint8     // dials represented in recentMask, capped at 64
+	recentLastAt      time.Time // when the most recent dial was recorded
+	recentTimes       [successrate.WindowLimit]time.Time
+	dialLatencyEWMA   time.Duration
+	lastDialAt        time.Time
+	circuitFailures   int
+	recovering        bool
 	timeline          []TimelineEvent
 	blacklist         bool
 	until             time.Time
@@ -1403,28 +1425,35 @@ func (e *entry) snapshot() Snapshot {
 	}
 
 	return Snapshot{
-		NodeInfo:          e.info,
-		IP:                e.ip,
-		Region:            e.region,
-		Country:           e.country,
-		FailureCount:      e.failure,
-		SuccessCount:      e.success,
-		Blacklisted:       e.blacklist,
-		BlacklistedUntil:  e.until,
-		ActiveConnections: e.active.Load(),
-		LastError:         e.lastError,
-		LastFailure:       e.lastFail,
-		LastSuccess:       e.lastOK,
-		LastProbedAt:      e.lastProbedAt,
-		LastProbeLatency:  e.lastProbe,
-		LastLatencyMs:     latencyMs,
-		LastTraceAt:       e.lastTraceAt,
-		LastTraceError:    e.lastTraceError,
-		Available:         e.available,
-		InitialCheckDone:  e.initialCheckDone,
-		Suppressed:        e.suppressed,
-		Quarantined:       e.quarantined,
-		Timeline:          timelineCopy,
+		NodeInfo:           e.info,
+		IP:                 e.ip,
+		Region:             e.region,
+		Country:            e.country,
+		FailureCount:       e.failure,
+		SuccessCount:       e.success,
+		RecentSuccessCount: bits.OnesCount64(e.recentMask),
+		RecentAttempts:     int(e.recentCount),
+		RecentLastAt:       e.recentLastAt,
+		recentMask:         e.recentMask,
+		recentTimes:        e.recentTimes,
+		DialLatencyMS:      float64(e.dialLatencyEWMA) / float64(time.Millisecond),
+		Recovering:         e.recovering,
+		Blacklisted:        e.blacklist,
+		BlacklistedUntil:   e.until,
+		ActiveConnections:  e.active.Load(),
+		LastError:          e.lastError,
+		LastFailure:        e.lastFail,
+		LastSuccess:        e.lastOK,
+		LastProbedAt:       e.lastProbedAt,
+		LastProbeLatency:   e.lastProbe,
+		LastLatencyMs:      latencyMs,
+		LastTraceAt:        e.lastTraceAt,
+		LastTraceError:     e.lastTraceError,
+		Available:          e.available,
+		InitialCheckDone:   e.initialCheckDone,
+		Suppressed:         e.suppressed,
+		Quarantined:        e.quarantined,
+		Timeline:           timelineCopy,
 	}
 }
 
@@ -1444,6 +1473,26 @@ func (e *entry) restore(record state.NodeRecord) {
 	e.lastProbe = record.LastProbeLatency
 	e.initialCheckDone = record.InitialCheckDone
 	e.available = record.Available && !record.Blacklisted
+	e.recentMask = record.RecentMask
+	e.recentCount = record.RecentCount
+	if e.recentCount > successWindowSize {
+		e.recentCount = successWindowSize
+	}
+	e.recentLastAt = record.RecentLastAt
+	if e.recentCount == 0 && (e.success > 0 || e.failure > 0) {
+		// Upgrade path: this record predates the sliding window, so seed it from
+		// the cumulative ratio instead of making every node look cold.
+		e.recentMask, e.recentCount = synthesizeRecentWindow(int(e.success), int(e.success)+e.failure)
+		e.recentLastAt = latestOf(record.LastSuccess, record.LastFailure)
+	}
+	copy(e.recentTimes[:], record.RecentTimes)
+	if len(record.RecentTimes) == 0 {
+		for i := 0; i < int(e.recentCount); i++ {
+			e.recentTimes[i] = e.recentLastAt
+		}
+	}
+	e.dialLatencyEWMA, e.lastDialAt = record.DialLatencyEWMA, record.LastDialAt
+	e.circuitFailures, e.recovering = record.CircuitFailures, record.Recovering
 	e.timeline = make([]TimelineEvent, 0, maxTimelineSize)
 	start := 0
 	if len(record.Timeline) > maxTimelineSize {
@@ -1472,6 +1521,10 @@ func (e *entry) stateRecordLocked() state.NodeRecord {
 		Disabled: e.suppressed, Order: e.info.Order, Active: true,
 		IP: e.ip, Region: e.region, Country: e.country,
 		FailureCount: e.failure, SuccessCount: e.success,
+		RecentMask: e.recentMask, RecentCount: e.recentCount, RecentLastAt: e.recentLastAt,
+		RecentTimes:     append([]time.Time(nil), e.recentTimes[:e.recentCount]...),
+		DialLatencyEWMA: e.dialLatencyEWMA, LastDialAt: e.lastDialAt,
+		CircuitFailures: e.circuitFailures, Recovering: e.recovering,
 		ConsecutiveFails: e.consecutiveFails,
 		Blacklisted:      e.blacklist, BlacklistedUntil: e.until,
 		LastError: e.lastError, LastFailure: e.lastFail, LastSuccess: e.lastOK,
@@ -1601,17 +1654,79 @@ func (e *entry) recordFailure(err error, consecutive int) {
 	e.consecutiveFails = consecutive
 	e.lastError = errStr
 	e.lastFail = time.Now()
+	e.pushRecentLocked(false)
 	e.appendTimelineLocked(false, 0, errStr)
 }
 
-func (e *entry) recordSuccess() {
+func (e *entry) recordSuccess(latency time.Duration) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	defer e.persistLocked(false)
 	e.success++
 	e.consecutiveFails = 0
 	e.lastOK = time.Now()
-	e.appendTimelineLocked(true, 0, "")
+	e.pushRecentLocked(true)
+	if latency > 0 {
+		if e.dialLatencyEWMA <= 0 || time.Since(e.lastDialAt) >= successrate.DefaultHalfLife {
+			e.dialLatencyEWMA = latency
+		} else {
+			e.dialLatencyEWMA = time.Duration(0.8*float64(e.dialLatencyEWMA) + 0.2*float64(latency))
+		}
+		e.lastDialAt = time.Now()
+	}
+	e.appendTimelineLocked(true, latency.Milliseconds(), "")
+}
+
+// successWindowSize is the number of recent dial outcomes kept per node. 64 fits
+// in one word, so the whole window costs 8 bytes and popcount stays O(1).
+const successWindowSize = successrate.WindowLimit
+
+// pushRecentLocked shifts one dial outcome into the sliding window. The window
+// is what the success scheduler reads: cumulative counters can never recover
+// from an old bad patch, while this one forgets by construction.
+func (e *entry) pushRecentLocked(ok bool) {
+	copy(e.recentTimes[1:], e.recentTimes[:successWindowSize-1])
+	e.recentTimes[0] = time.Now()
+	e.recentMask <<= 1
+	if ok {
+		e.recentMask |= 1
+	}
+	if int(e.recentCount) < successWindowSize {
+		e.recentCount++
+	}
+	e.recentLastAt = time.Now()
+}
+
+// synthesizeRecentWindow rebuilds a window from the cumulative counters. It is
+// only used when loading a record written before the window existed, so an
+// upgrade does not reset every node's scheduling history to "no data".
+func synthesizeRecentWindow(successes, attempts int) (uint64, uint8) {
+	if attempts < 0 {
+		attempts = 0
+	}
+	if successes < 0 {
+		successes = 0
+	}
+	if successes > attempts {
+		successes = attempts
+	}
+	if attempts > successWindowSize {
+		// Keep the ratio when the history is longer than the window can hold.
+		successes = successes * successWindowSize / attempts
+		attempts = successWindowSize
+	}
+	if successes >= successWindowSize {
+		return ^uint64(0), successWindowSize
+	}
+	return (uint64(1) << uint(successes)) - 1, uint8(attempts)
+}
+
+// latestOf returns the later of two timestamps.
+func latestOf(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 func (e *entry) appendTimelineLocked(success bool, latencyMs int64, errStr string) {
@@ -1702,11 +1817,15 @@ func (h *EntryHandle) RecordFailure(err error, consecutive int) {
 }
 
 // RecordSuccess updates the last success timestamp.
-func (h *EntryHandle) RecordSuccess() {
+func (h *EntryHandle) RecordSuccess(latency ...time.Duration) {
 	if h == nil || h.ref == nil {
 		return
 	}
-	h.ref.recordSuccess()
+	var elapsed time.Duration
+	if len(latency) > 0 {
+		elapsed = latency[0]
+	}
+	h.ref.recordSuccess(elapsed)
 }
 
 // Blacklist marks the node unavailable until the given deadline.
@@ -1874,6 +1993,22 @@ func (h *EntryHandle) SuccessRate() (float64, bool) {
 	return float64(h.ref.success) / float64(calls), true
 }
 
+// RecentWindow returns the sliding window of recent client dial outcomes:
+// successes and attempts among the newest `limit` attempts (limit <= 0 means
+// the whole window), plus the time of the most recent attempt — zero when the
+// node has never been dialled in this window. The scheduler prefers this over
+// SuccessRate because a cumulative ratio cannot recover from an old bad patch
+// and gives a single lucky dial the same standing as hundreds of good ones.
+func (h *EntryHandle) RecentWindow(limit int) (successes, attempts int, last time.Time) {
+	if h == nil || h.ref == nil {
+		return 0, 0, time.Time{}
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	successes, attempts = successrate.Window(h.ref.recentMask, int(h.ref.recentCount), limit)
+	return successes, attempts, h.ref.recentLastAt
+}
+
 // LastLatency returns the last measured probe latency.
 // Returns 0 if no measurement is available yet.
 func (h *EntryHandle) LastLatency() time.Duration {
@@ -1886,4 +2021,46 @@ func (h *EntryHandle) LastLatency() time.Duration {
 		return 0
 	}
 	return h.ref.lastProbe
+}
+
+// WeightedWindow is shared by the live scheduler and monitoring snapshots.
+func (h *EntryHandle) WeightedWindow(limit int, halfLife time.Duration, now time.Time) (float64, float64) {
+	if h == nil || h.ref == nil {
+		return 0, 0
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return successrate.WeightedWindow(h.ref.recentMask, int(h.ref.recentCount), limit, h.ref.recentTimes[:], h.ref.recentLastAt, now, halfLife)
+}
+
+func (h *EntryHandle) DialLatency(now time.Time) time.Duration {
+	if h == nil || h.ref == nil {
+		return 0
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	if now.Sub(h.ref.lastDialAt) >= successrate.DefaultHalfLife {
+		return 0
+	}
+	return h.ref.dialLatencyEWMA
+}
+
+func (h *EntryHandle) CircuitState() (int, bool) {
+	if h == nil || h.ref == nil {
+		return 0, false
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return h.ref.circuitFailures, h.ref.recovering
+}
+
+func (h *EntryHandle) SetCircuitState(failures int, recovering bool, consecutive int) {
+	if h == nil || h.ref == nil {
+		return
+	}
+	h.ref.mu.Lock()
+	defer h.ref.mu.Unlock()
+	h.ref.circuitFailures, h.ref.recovering = failures, recovering
+	h.ref.consecutiveFails = consecutive
+	h.ref.persistLocked(false)
 }

@@ -250,6 +250,14 @@ type ProjectController interface {
 	// maintaining each project's excluded_nodes list. Projects absent from both
 	// lists keep their current relationship.
 	ApplySharedNodeMembership(nodeID string, include, exclude []string) error
+	// ApplySharedNodeMembershipMany applies one scope decision to several shared
+	// nodes at once, used by batch import.
+	ApplySharedNodeMembershipMany(nodeIDs []string, include, exclude []string) error
+	// PruneSharedNodeMemberships drops stale node IDs from every project's
+	// excluded_nodes list after a node is deleted or its identity changes.
+	PruneSharedNodeMemberships(nodeIDs []string) error
+	// NodeProjectIDs reports which projects currently inherit a shared node.
+	NodeProjectIDs(nodeID string) ([]string, error)
 	SystemSettings() SystemSettings
 	UpdateSystemSettings(ctx context.Context, settings SystemSettings) error
 	// ExportBackup collects one project (all=false) or the whole workspace

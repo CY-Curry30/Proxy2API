@@ -1718,11 +1718,18 @@ func (r *Registry) ApplySharedSubscriptionMembership(rawURL string, include, exc
 // ApplySharedNodeMembership attaches a shared node to the projects listed in
 // include and hides it from those listed in exclude by maintaining each
 // project's excluded_nodes list. Projects absent from both lists keep their
-// current relationship. Writes are all-or-nothing: a failure rolls back every
-// project already saved in this call.
+// current relationship.
 func (r *Registry) ApplySharedNodeMembership(nodeID string, include, exclude []string) error {
-	nodeID = strings.TrimSpace(nodeID)
-	if nodeID == "" || (len(include) == 0 && len(exclude) == 0) {
+	return r.ApplySharedNodeMembershipMany([]string{nodeID}, include, exclude)
+}
+
+// ApplySharedNodeMembershipMany applies one scope decision to several shared
+// nodes at once (manual add, batch import). Projects absent from both lists keep
+// their current relationship. Writes are all-or-nothing: a failure rolls back
+// every project already saved in this call.
+func (r *Registry) ApplySharedNodeMembershipMany(nodeIDs []string, include, exclude []string) error {
+	nodeIDs = normalizeNodeIDs(nodeIDs)
+	if len(nodeIDs) == 0 || (len(include) == 0 && len(exclude) == 0) {
 		return nil
 	}
 	desired := make(map[string]bool, len(include)+len(exclude))
@@ -1741,21 +1748,99 @@ func (r *Registry) ApplySharedNodeMembership(nodeID string, include, exclude []s
 		return nil
 	}
 
+	ids := make([]string, 0, len(desired))
+	for id := range desired {
+		ids = append(ids, id)
+	}
+	return r.applySharedNodeExclusions(ids, func(projectID string, excluded []string) []string {
+		for _, nodeID := range nodeIDs {
+			if desired[projectID] {
+				excluded = removeStringValue(excluded, nodeID)
+			} else {
+				excluded = appendUniqueString(excluded, nodeID)
+			}
+		}
+		return excluded
+	})
+}
+
+// PruneSharedNodeMemberships removes node IDs from every project's excluded
+// list. It runs after a node is deleted or its stable identity changes (URI
+// edit), so stale exclusions do not linger.
+func (r *Registry) PruneSharedNodeMemberships(nodeIDs []string) error {
+	nodeIDs = normalizeNodeIDs(nodeIDs)
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	r.mu.RLock()
+	ids := make([]string, 0, len(r.runtimes))
+	for id := range r.runtimes {
+		ids = append(ids, id)
+	}
+	r.mu.RUnlock()
+	return r.applySharedNodeExclusions(ids, func(_ string, excluded []string) []string {
+		for _, nodeID := range nodeIDs {
+			excluded = removeStringValue(excluded, nodeID)
+		}
+		return excluded
+	})
+}
+
+// NodeProjectIDs reports which projects currently inherit a shared node. A
+// stopped project is read from disk; a running one uses its live config.
+func (r *Registry) NodeProjectIDs(nodeID string) ([]string, error) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return []string{}, nil
+	}
 	r.catalogMu.Lock()
 	defer r.catalogMu.Unlock()
+
 	r.mu.RLock()
-	runtimes := make(map[string]*Runtime, len(desired))
-	for id := range desired {
+	runtimes := make(map[string]*Runtime, len(r.runtimes))
+	for id, runtime := range r.runtimes {
+		runtimes[id] = runtime
+	}
+	r.mu.RUnlock()
+
+	ids := make([]string, 0, len(runtimes))
+	for id := range runtimes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		excluded, err := runtimes[id].excludedNodesSnapshot()
+		if err != nil {
+			return nil, fmt.Errorf("加载项目 %q 的节点关联失败: %w", id, err)
+		}
+		if !containsString(excluded, nodeID) {
+			result = append(result, id)
+		}
+	}
+	return result, nil
+}
+
+// applySharedNodeExclusions loads each selected project's config, applies
+// mutate to excluded_nodes and saves the projects that changed. A save failure
+// rolls back every project already written in this call.
+func (r *Registry) applySharedNodeExclusions(projectIDs []string, mutate func(projectID string, excluded []string) []string) error {
+	if len(projectIDs) == 0 {
+		return nil
+	}
+	r.catalogMu.Lock()
+	defer r.catalogMu.Unlock()
+
+	r.mu.RLock()
+	runtimes := make(map[string]*Runtime, len(projectIDs))
+	for _, id := range projectIDs {
 		if runtime, ok := r.runtimes[id]; ok {
 			runtimes[id] = runtime
 		}
 	}
 	r.mu.RUnlock()
 
-	ids := make([]string, 0, len(desired))
-	for id := range desired {
-		ids = append(ids, id)
-	}
+	ids := append([]string(nil), projectIDs...)
 	sort.Strings(ids)
 
 	updates := make([]nodeReferenceUpdate, 0, len(ids))
@@ -1770,13 +1855,12 @@ func (r *Registry) ApplySharedNodeMembership(nodeID string, include, exclude []s
 		}
 		before := *cfg
 		before.ExcludedNodes = append([]string(nil), cfg.ExcludedNodes...)
-		excluded := append([]string(nil), cfg.ExcludedNodes...)
-		if desired[id] {
-			excluded = removeStringValue(excluded, nodeID)
-		} else {
-			excluded = appendUniqueString(excluded, nodeID)
+		excluded := mutate(id, append([]string(nil), cfg.ExcludedNodes...))
+		if excluded == nil {
+			excluded = []string{}
 		}
-		if equalStringSlices(excluded, cfg.ExcludedNodes) {
+		changed := !equalStringSlices(excluded, cfg.ExcludedNodes)
+		if !changed {
 			continue
 		}
 		cfg.ExcludedNodes = excluded
@@ -1800,6 +1884,25 @@ func (r *Registry) ApplySharedNodeMembership(nodeID string, include, exclude []s
 		update.runtime.setExcludedNodes(update.after.ExcludedNodes)
 	}
 	return nil
+}
+
+// normalizeNodeIDs trims values, drops blanks and removes duplicates while
+// preserving the first-seen order.
+func normalizeNodeIDs(nodeIDs []string) []string {
+	seen := make(map[string]struct{}, len(nodeIDs))
+	result := make([]string, 0, len(nodeIDs))
+	for _, raw := range nodeIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
 }
 
 type subscriptionReferenceUpdate struct {

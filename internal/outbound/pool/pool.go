@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"Proxy2API/internal/monitor"
+	"Proxy2API/internal/successrate"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -62,6 +64,22 @@ type Options struct {
 	// Sticky pins each client (by source IP) to a single member, only
 	// re-selecting when the pinned member becomes unavailable. Pool/hybrid entry only.
 	Sticky bool
+	// SuccessWindowSize is the number of recent dial attempts the "success" mode
+	// scores. 0 = default 64; negative = legacy cumulative counters.
+	SuccessWindowSize int
+	// SuccessPriorStrength is the pseudo-count that pulls a small sample toward
+	// the pool mean, so one lucky dial cannot outrank hundreds of good ones.
+	// 0 = default 8; negative = no smoothing.
+	SuccessPriorStrength int
+	// SuccessExploreEvery diverts one dial out of N to the candidate whose
+	// window is the stalest, so cold and recovered nodes keep collecting
+	// evidence. 0 = default 50; negative = never explore.
+	SuccessExploreEvery int
+	// SuccessHalfLife is the observation half-life; zero uses 30 minutes.
+	SuccessHalfLife time.Duration
+	// SuccessHotspotBand gates load/latency selection to similarly reliable nodes.
+	// 0 = default 0.03; negative = strict reliability argmax.
+	SuccessHotspotBand float64
 }
 
 // MemberMeta carries optional descriptive information for monitoring UI.
@@ -80,7 +98,8 @@ type MemberMeta struct {
 	Suppressed      bool
 	// Quarantined mirrors the project's manual quarantine ("小黑屋") state for
 	// this member. It is never derived from failures.
-	Quarantined bool
+	Quarantined    bool
+	MaxConnections int
 }
 
 // Register wires the pool outbound into the registry.
@@ -97,25 +116,28 @@ type memberState struct {
 
 type poolOutbound struct {
 	outbound.Adapter
-	ctx             context.Context
-	logger          singlog.ContextLogger
-	manager         adapter.OutboundManager
-	options         Options
-	mode            string
-	members         []*memberState
-	mu              sync.Mutex
-	rrCounter       atomic.Uint32
-	rng             *rand.Rand
-	rngMu           sync.Mutex // protects rng for random mode
-	monitor         *monitor.Manager
-	sharedStates    *SharedStateStore
-	candidatesPool  sync.Pool
-	sticky          bool
-	stickyMu        sync.Mutex        // protects stickyMap
-	stickyMap       map[string]string // sticky key (client source IP) -> member tag
-	stickySelection string            // last configured sticky node; protects stale pins
-	lastUsedMember  *memberState      // fallback when no healthy nodes available
-	lastUsedMu      sync.RWMutex      // protects lastUsedMember
+	ctx               context.Context
+	logger            singlog.ContextLogger
+	manager           adapter.OutboundManager
+	options           Options
+	mode              string
+	members           []*memberState
+	mu                sync.Mutex
+	rrCounter         atomic.Uint32
+	rng               *rand.Rand
+	rngMu             sync.Mutex // protects rng for random mode
+	monitor           *monitor.Manager
+	sharedStates      *SharedStateStore
+	candidatesPool    sync.Pool
+	sticky            bool
+	stickyMu          sync.Mutex        // protects stickyMap
+	stickyMap         map[string]string // sticky key (client source IP) -> member tag
+	stickySelection   string            // last configured sticky node; protects stale pins
+	lastUsedMember    *memberState      // fallback when no healthy nodes available
+	lastExploration   uint64            // guarded by the shared selection mutex
+	selectionCount    uint64
+	explorationMember *memberState
+	lastUsedMu        sync.RWMutex // protects lastUsedMember
 }
 
 func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger, tag string, options Options) (adapter.Outbound, error) {
@@ -177,7 +199,9 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 				Password:        meta.Password,
 				Suppressed:      meta.Suppressed,
 				Quarantined:     meta.Quarantined,
+				MaxConnections:  normalizedCapacity(meta.MaxConnections),
 			}
+			state.configureCapacity(meta.MaxConnections)
 			entry := monitorMgr.Register(info)
 			if entry != nil {
 				// Attach entry to shared state so all pool instances share it
@@ -235,6 +259,24 @@ func normalizeOptions(options Options) Options {
 	default:
 		options.Mode = modeSequential
 	}
+	options.SuccessHalfLife = successrate.HalfLife(options.SuccessHalfLife)
+	if options.SuccessWindowSize == 0 {
+		options.SuccessWindowSize = successWindowLimit
+	} else if options.SuccessWindowSize > successWindowLimit {
+		options.SuccessWindowSize = successWindowLimit
+	}
+	if options.SuccessPriorStrength == 0 {
+		options.SuccessPriorStrength = defaultSuccessPriorStrength
+	}
+	if options.SuccessExploreEvery == 0 {
+		options.SuccessExploreEvery = defaultSuccessExploreEvery
+	} else if options.SuccessExploreEvery > maxSuccessExploreEvery {
+		// Bounded so the uint32 modulo used by the canary can never wrap to zero.
+		options.SuccessExploreEvery = maxSuccessExploreEvery
+	}
+	if options.SuccessHotspotBand == 0 {
+		options.SuccessHotspotBand = defaultSuccessHotspotBand
+	}
 	return options
 }
 
@@ -271,6 +313,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 
 		// Acquire shared state (creates if not exists, reuses if already created)
 		state := p.sharedStates.acquire(tag)
+		state.configureCapacity(p.options.Metadata[tag].MaxConnections)
 
 		member := &memberState{
 			outbound: detour,
@@ -297,7 +340,9 @@ func (p *poolOutbound) initializeMembersLocked() error {
 				Password:        meta.Password,
 				Suppressed:      meta.Suppressed,
 				Quarantined:     meta.Quarantined,
+				MaxConnections:  normalizedCapacity(meta.MaxConnections),
 			}
+			state.configureCapacity(meta.MaxConnections)
 			entry := p.monitor.Register(info)
 			if entry != nil {
 				state.attachEntry(entry)
@@ -333,18 +378,27 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 	}
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		member, err := p.pickMemberFiltered(network, tried, stickyKey)
+		lease, err := p.acquireMember(network, tried, stickyKey)
 		if err != nil {
 			if lastErr != nil {
 				return nil, fmt.Errorf("%w（已尝试 %d 次；上次错误：%v）", err, attempt-1, lastErr)
 			}
 			return nil, err
 		}
-		p.incActive(member)
+		member := lease.member
+		started := time.Now()
 		conn, dialErr := member.outbound.DialContext(ctx, network, destination)
 		if dialErr != nil {
-			p.decActive(member)
-			p.recordFailure(member, dialErr)
+			if clientAborted(ctx, dialErr) {
+				// The caller gave up before the node answered. That is no
+				// evidence about node health, so it must not lower the node's
+				// success rate — and retrying a cancelled request is pointless.
+				lease.release()
+				p.logger.Debug("客户端已取消请求，不计入 ", member.tag, " 的失败统计: ", dialErr)
+				return nil, dialErr
+			}
+			p.recordFailure(member, dialErr, lease)
+			lease.release()
 			lastErr = dialErr
 			if tried != nil {
 				tried[member.tag] = true
@@ -361,8 +415,8 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 		if attempt > 1 {
 			p.logger.Info("通过 ", member.tag, " 拨号成功，共尝试 ", attempt, " 次")
 		}
-		p.recordSuccess(member)
-		return p.wrapConn(conn, member), nil
+		p.recordSuccess(member, time.Since(started), lease)
+		return &trackedConn{Conn: conn, release: lease.release}, nil
 	}
 	if lastErr == nil {
 		lastErr = E.New("没有可用的健康代理")
@@ -381,18 +435,24 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 	}
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		member, err := p.pickMemberFiltered(N.NetworkUDP, tried, stickyKey)
+		lease, err := p.acquireMember(N.NetworkUDP, tried, stickyKey)
 		if err != nil {
 			if lastErr != nil {
 				return nil, fmt.Errorf("%w（已尝试 %d 次；上次错误：%v）", err, attempt-1, lastErr)
 			}
 			return nil, err
 		}
-		p.incActive(member)
+		member := lease.member
+		started := time.Now()
 		conn, listenErr := member.outbound.ListenPacket(ctx, destination)
 		if listenErr != nil {
-			p.decActive(member)
-			p.recordFailure(member, listenErr)
+			if clientAborted(ctx, listenErr) {
+				lease.release()
+				p.logger.Debug("客户端已取消请求，不计入 ", member.tag, " 的失败统计: ", listenErr)
+				return nil, listenErr
+			}
+			p.recordFailure(member, listenErr, lease)
+			lease.release()
 			lastErr = listenErr
 			if tried != nil {
 				tried[member.tag] = true
@@ -409,8 +469,8 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 		if attempt > 1 {
 			p.logger.Info("通过 ", member.tag, " 监听数据包成功，共尝试 ", attempt, " 次")
 		}
-		p.recordSuccess(member)
-		return p.wrapPacketConn(conn, member), nil
+		p.recordSuccess(member, time.Since(started), lease)
+		return &trackedPacketConn{PacketConn: conn, release: lease.release}, nil
 	}
 	if lastErr == nil {
 		lastErr = E.New("没有可用的健康代理")
@@ -448,105 +508,100 @@ func (p *poolOutbound) maxAttempts() int {
 	return p.options.RetryAttempts
 }
 
-// pickMemberFiltered selects a healthy member, optionally excluding tags in `tried`.
-// When `tried` is nil or every healthy member has been tried, falls back to picking
-// any healthy member (ensuring single-member pools retry the same node).
-func (p *poolOutbound) pickMemberFiltered(network string, tried map[string]bool, stickyKey string) (*memberState, error) {
+// clientAborted reports whether a dial failure came from the caller cancelling
+// the request rather than from the node being unhealthy. Only an explicit
+// cancellation qualifies: DeadlineExceeded is ambiguous (the node may simply be
+// too slow), so it keeps counting against the node.
+func clientAborted(ctx context.Context, err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	return ctx != nil && ctx.Err() == context.Canceled
+}
+
+// acquireMember serializes selection plus reservation across all listeners in a
+// project. Network I/O happens after releasing this lock.
+func (p *poolOutbound) acquireMember(network string, tried map[string]bool, stickyKey string) (*memberLease, error) {
+	p.sharedStates.selectionMu.Lock()
+	defer p.sharedStates.selectionMu.Unlock()
 	now := time.Now()
 	candidates := p.getCandidateBuffer()
-
+	defer func() { p.putCandidateBuffer(candidates) }()
 	p.mu.Lock()
 	if len(p.members) == 0 {
 		if err := p.initializeMembersLocked(); err != nil {
 			p.mu.Unlock()
-			p.putCandidateBuffer(candidates)
 			return nil, err
 		}
 	}
 	candidates = p.availableMembersLocked(now, network, candidates)
 	p.mu.Unlock()
-
+	hadHealthy := len(candidates) > 0
+	usable := candidates[:0]
+	for _, member := range candidates {
+		if member.shared.canReserve(p.mode == modeSuccess && coldMember(member), false, now) {
+			usable = append(usable, member)
+		}
+	}
+	candidates = usable
 	if p.options.HonorStickySelection && p.monitor != nil {
 		selectedTag := p.monitor.StickyNode()
 		p.syncStickySelection(selectedTag)
 		if selectedTag != "" {
 			for _, member := range candidates {
 				if member.tag == selectedTag {
-					p.putCandidateBuffer(candidates)
-					return member, nil
+					if lease := member.shared.reserve(member, false, false, false, now); lease != nil {
+						return lease, nil
+					}
 				}
 			}
-			p.putCandidateBuffer(candidates)
-			return nil, E.New("选定的粘性代理节点不可用: ", selectedTag)
+			return nil, E.New("选定的粘性代理节点不可用或已达连接上限: ", selectedTag)
 		}
 	}
-
 	if len(candidates) == 0 {
-		p.putCandidateBuffer(candidates)
-		// 降级策略：如果没有健康节点，使用最后一次成功的节点
+		if hadHealthy {
+			return nil, E.New("可用节点均已达连接或试探上限")
+		}
 		p.lastUsedMu.RLock()
-		lastUsed := p.lastUsedMember
+		fallback := p.lastUsedMember
 		p.lastUsedMu.RUnlock()
-		if lastUsed != nil && usableFallback(lastUsed) {
-			p.logger.Warn("没有可用的健康代理，降级使用最后一次成功的节点: ", lastUsed.tag)
-			log.Printf("⚠️  [节点池] 没有可用的健康代理，降级使用最后一次成功的节点: %s", lastUsed.tag)
-			return lastUsed, nil
+		if usableFallback(fallback) && common.Contains(fallback.outbound.Network(), network) {
+			if lease := fallback.shared.reserve(fallback, false, false, true, now); lease != nil {
+				p.logger.Warn("无健康节点，限流试探最后成功节点: ", fallback.tag)
+				return lease, nil
+			}
 		}
 		return nil, E.New("没有可用的健康代理")
 	}
-
-	// Filter out members already tried in this request.
 	if len(tried) > 0 {
 		filtered := candidates[:0]
-		for _, m := range candidates {
-			if !tried[m.tag] {
-				filtered = append(filtered, m)
+		for _, member := range candidates {
+			if !tried[member.tag] {
+				filtered = append(filtered, member)
 			}
 		}
-		// If filtering left nothing, fall back to all candidates so we still
-		// dial something (matches per-node single-member retry semantics).
 		if len(filtered) > 0 {
 			candidates = filtered
 		}
 	}
-
-	member := p.selectMember(candidates, stickyKey)
-	p.putCandidateBuffer(candidates)
-	return member, nil
-}
-
-func (p *poolOutbound) pickMember(network string) (*memberState, error) {
-	now := time.Now()
-	candidates := p.getCandidateBuffer()
-
-	p.mu.Lock()
-	if len(p.members) == 0 {
-		if err := p.initializeMembersLocked(); err != nil {
-			p.mu.Unlock()
-			p.putCandidateBuffer(candidates)
-			return nil, err
+	for len(candidates) > 0 {
+		p.explorationMember = nil
+		member := p.selectMember(candidates, stickyKey)
+		if member == nil {
+			break
+		}
+		if lease := member.shared.reserve(member, p.mode == modeSuccess && coldMember(member), p.explorationMember == member, false, now); lease != nil {
+			return lease, nil
+		}
+		// A concurrent result may have closed the circuit after candidate filtering.
+		for i, candidate := range candidates {
+			if candidate == member {
+				candidates = append(candidates[:i], candidates[i+1:]...)
+				break
+			}
 		}
 	}
-	candidates = p.availableMembersLocked(now, network, candidates)
-	p.mu.Unlock()
-
-	if len(candidates) == 0 {
-		p.putCandidateBuffer(candidates)
-		// 降级策略：如果没有健康节点，使用最后一次成功的节点
-		p.lastUsedMu.RLock()
-		lastUsed := p.lastUsedMember
-		p.lastUsedMu.RUnlock()
-		if lastUsed != nil && usableFallback(lastUsed) {
-			p.logger.Warn("没有可用的健康代理，降级使用最后一次成功的节点: ", lastUsed.tag)
-			log.Printf("⚠️  [节点池] 没有可用的健康代理，降级使用最后一次成功的节点: %s", lastUsed.tag)
-			return lastUsed, nil
-		}
-		return nil, E.New("没有可用的健康代理")
-	}
-
-	member := p.selectMember(candidates, "")
-	p.putCandidateBuffer(candidates)
-	return member, nil
+	return nil, E.New("节点在选取期间变为不可用")
 }
 
 func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf []*memberState) []*memberState {
@@ -591,7 +646,7 @@ func usableFallback(member *memberState) bool {
 	if member == nil {
 		return false
 	}
-	return member.entry == nil || !member.entry.Quarantined()
+	return member.shared != nil && (member.entry == nil || (!member.entry.Quarantined() && !member.entry.Suppressed()))
 }
 
 const stickyFallbackKey = "_global_"
@@ -680,37 +735,234 @@ func (p *poolOutbound) selectByMode(candidates []*memberState) *memberState {
 		}
 		return selected
 	case modeSuccess:
-		// Pick the online candidate with the highest client-request success rate.
-		// Candidates without any recorded requests are skipped; if none of them
-		// has a success rate yet, degrade to lowest-latency selection.
-		var selected *memberState
-		var bestRate float64
-		hasRate := false
-		for _, member := range candidates {
-			if member.entry == nil {
-				continue
-			}
-			rate, ok := member.entry.SuccessRate()
-			if !ok {
-				continue
-			}
-			if !hasRate || rate > bestRate ||
-				(rate == bestRate && latencyLess(member, selected)) {
-				selected = member
-				bestRate = rate
-				hasRate = true
-			}
-		}
-		if selected != nil {
-			return selected
-		}
-		return p.selectLowestLatency(candidates)
+		return p.selectBySuccess(candidates, time.Now())
 	case modeLatency:
 		return p.selectLowestLatency(candidates)
 	default:
 		idx := int(p.rrCounter.Add(1)-1) % len(candidates)
 		return candidates[idx]
 	}
+}
+
+// successCandidate is one candidate's scored sliding window.
+type successCandidate struct {
+	member      *memberState
+	successes   float64
+	attempts    float64
+	rawAttempts int
+	lastAt      time.Time
+	score       float64
+}
+
+// selectBySuccess implements the "success" strategy:
+//
+//	score_i = Beta lower bound of the smoothed success rate (see successScore)
+//
+// S_i and n_i come from the sliding window of the last `window` dial attempts,
+// p0 is the pool-wide mean success rate and m pulls small samples toward it. The
+// lower confidence bound is what keeps one lucky dial from outranking hundreds
+// of good ones; the window is what lets a node recover from an old bad patch.
+// Within hotspotBand, capacity-normalized load and actual dial latency decide.
+// Exploration is budgeted, with priority for recovered and undersampled nodes.
+func (p *poolOutbound) selectBySuccess(candidates []*memberState, now time.Time) *memberState {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if p.options.SuccessWindowSize < 0 {
+		return p.selectBySuccessLegacy(candidates)
+	}
+	window := p.options.SuccessWindowSize
+	priorStrength := p.options.SuccessPriorStrength
+	if priorStrength < 0 {
+		priorStrength = 0
+	}
+
+	stats := make([]successCandidate, 0, len(candidates))
+	totalSuccess, totalAttempts := 0.0, 0.0
+	for _, member := range candidates {
+		_, rawAttempts, lastAt := recentOutcomes(member, window)
+		var successes, attempts float64
+		if member.entry != nil {
+			successes, attempts = member.entry.WeightedWindow(window, p.options.SuccessHalfLife, now)
+		}
+		stats = append(stats, successCandidate{
+			member:      member,
+			successes:   successes,
+			attempts:    attempts,
+			rawAttempts: rawAttempts,
+			lastAt:      lastAt,
+		})
+		totalSuccess += successes
+		totalAttempts += attempts
+	}
+
+	prior := defaultSuccessPrior
+	if totalAttempts > 0 {
+		prior = float64(totalSuccess) / float64(totalAttempts)
+	}
+	for i := range stats {
+		stats[i].score = successScore(stats[i].successes, stats[i].attempts, prior, float64(priorStrength))
+	}
+
+	best := 0
+	for i := 1; i < len(stats); i++ {
+		switch {
+		case stats[i].score > stats[best].score+rateEpsilon:
+		case stats[i].score < stats[best].score-rateEpsilon:
+			continue
+		case !preferOnTie(stats[i].member, stats[best].member):
+			continue
+		}
+		best = i
+	}
+
+	p.selectionCount++
+	if p.options.SuccessExploreEvery > 0 {
+		if canary, warm := explorationCandidate(stats, best, now); canary >= 0 {
+			period := uint64(p.options.SuccessExploreEvery)
+			if warm {
+				period = (period + 3) / 4
+			} // at most 4x the configured budget
+			if period < 1 {
+				period = 1
+			}
+			if p.selectionCount-p.lastExploration >= period {
+				p.lastExploration = p.selectionCount
+				p.explorationMember = stats[canary].member
+				return stats[canary].member
+			}
+		}
+	}
+	if band := p.options.SuccessHotspotBand; band > 0 {
+		best = leastLoadedWithinBand(stats, best, band, now)
+	}
+
+	p.logger.Debug("success 调度：候选 ", len(stats), " 个，选中 ", stats[best].member.tag,
+		"，得分 ", stats[best].score, "，窗口 ", stats[best].successes, "/", stats[best].attempts,
+		"，池均值 ", prior)
+	return stats[best].member
+}
+
+// selectBySuccessLegacy is the pre-window behaviour: strict argmax over the
+// cumulative success ratio, skipping nodes that have never been dialled. Kept as
+// an escape hatch (success_window: -1) so the old behaviour stays one config
+// value away.
+func (p *poolOutbound) selectBySuccessLegacy(candidates []*memberState) *memberState {
+	var selected *memberState
+	var bestRate float64
+	hasRate := false
+	for _, member := range candidates {
+		if member.entry == nil {
+			continue
+		}
+		rate, ok := member.entry.SuccessRate()
+		if !ok {
+			continue
+		}
+		switch {
+		case !hasRate:
+		case rate > bestRate+rateEpsilon:
+		case rate < bestRate-rateEpsilon:
+			continue
+		case !preferOnTie(member, selected):
+			continue
+		}
+		selected = member
+		bestRate = rate
+		hasRate = true
+	}
+	if selected != nil {
+		p.logger.Debug("success 调度（legacy）：候选 ", len(candidates), " 个，选中 ", selected.tag,
+			"，累计成功率 ", bestRate*100, "%")
+		return selected
+	}
+	p.logger.Debug("success 调度（legacy）：候选 ", len(candidates), " 个均无成功率数据，降级为最低延迟")
+	return p.selectLowestLatency(candidates)
+}
+
+// explorationCandidate prefers recovery and new nodes without duplicating
+// outstanding dials. Known poor nodes get a slower retry cadence even if idle.
+func explorationCandidate(stats []successCandidate, best int, now time.Time) (int, bool) {
+	chosen, priority := -1, -1
+	var oldest time.Time
+	for i, item := range stats {
+		if i == best || item.member.shared == nil {
+			continue
+		}
+		_, _, pending, recovering, selected, next := item.member.shared.schedulingState()
+		if pending > 0 || now.Before(next) {
+			continue
+		}
+		if selected.Before(item.lastAt) {
+			selected = item.lastAt
+		}
+		poor := item.rawAttempts >= 8 && item.attempts > 0 && item.successes/item.attempts < 0.5
+		if poor && now.Sub(selected) < 5*time.Minute && !recovering {
+			continue
+		}
+		rank := 0
+		if recovering {
+			rank = 3
+		} else if item.rawAttempts < 8 {
+			rank = 2
+		} else if item.attempts < 8 {
+			rank = 1
+		}
+		if chosen < 0 || rank > priority || (rank == priority && (selected.Before(oldest) || (selected.Equal(oldest) && item.member.tag < stats[chosen].member.tag))) {
+			chosen, priority, oldest = i, rank, selected
+		}
+	}
+	return chosen, priority >= 2
+}
+
+// Reliability gates the candidate set. Only then do capacity-normalized load
+// and bounded latency cost matter. Equal-cost nodes rotate by last selection.
+func leastLoadedWithinBand(stats []successCandidate, best int, band float64, now time.Time) int {
+	chosen := best
+	cost, last := dispatchCost(stats[best].member, now)
+	threshold := stats[best].score - band
+	for i := range stats {
+		if i == best || stats[i].score < threshold {
+			continue
+		}
+		candidateCost, candidateLast := dispatchCost(stats[i].member, now)
+		if candidateCost < cost-rateEpsilon || (math.Abs(candidateCost-cost) <= rateEpsilon && (candidateLast < last || (candidateLast == last && stats[i].member.tag < stats[chosen].member.tag))) {
+			chosen, cost, last = i, candidateCost, candidateLast
+		}
+	}
+	return chosen
+}
+
+func dispatchCost(member *memberState, now time.Time) (float64, uint64) {
+	active, capacity, _, _, _, _ := member.shared.schedulingState()
+	if capacity <= 0 {
+		capacity = defaultNodeCapacity
+	}
+	latency := time.Duration(0)
+	if member.entry != nil {
+		latency = member.entry.DialLatency(now)
+	}
+	if latency <= 0 {
+		latency = measuredLatency(member)
+	}
+	if latency <= 0 {
+		latency = 250 * time.Millisecond
+	}
+	latencyCost := 0.25 * float64(latency) / float64(latency+250*time.Millisecond)
+	return float64(active)/float64(capacity) + latencyCost, member.shared.selectionOrder()
+}
+
+// recentOutcomes reads a member's sliding window. A member without a monitor
+// entry (monitoring disabled) is treated as never dialled.
+func recentOutcomes(member *memberState, window int) (successes, attempts int, last time.Time) {
+	if member == nil || member.entry == nil {
+		return 0, 0, time.Time{}
+	}
+	return member.entry.RecentWindow(window)
+}
+
+func successScore(successes, attempts, prior, priorStrength float64) float64 {
+	return successrate.Score(successes, attempts, prior, priorStrength)
 }
 
 // selectLowestLatency picks the candidate with the lowest measured latency.
@@ -742,32 +994,87 @@ func (p *poolOutbound) selectLowestLatency(candidates []*memberState) *memberSta
 	return candidates[idx]
 }
 
-// latencyLess reports whether a's measured latency is lower than b's. Unmeasured
-// nodes lose against measured ones, and two unmeasured nodes compare equal.
-func latencyLess(a, b *memberState) bool {
-	var aLatency, bLatency time.Duration
-	if a.entry != nil {
-		aLatency = a.entry.LastLatency()
-	}
-	if b.entry != nil {
-		bLatency = b.entry.LastLatency()
-	}
-	if aLatency <= 0 || bLatency <= 0 {
+// rateEpsilon is the tolerance used when comparing two success rates. Rates are
+// ratios of two integers, so a tie means the fractions are equal; the tolerance
+// only absorbs float rounding error.
+const rateEpsilon = 1e-9
+
+// Tuning for the "success" mode. The window matches the monitor's bitmask width;
+// everything below is deliberately conservative so the scheduler degrades toward
+// the previous greedy behaviour instead of oscillating.
+const (
+	// successWindowLimit is the widest usable window (one 64-bit word).
+	successWindowLimit = successrate.WindowLimit
+	// defaultSuccessPriorStrength is the pseudo-count pulling a small sample
+	// toward the pool mean. Eight samples' worth of doubt: a node needs roughly
+	// that many dials before its own rate dominates its score.
+	defaultSuccessPriorStrength = successrate.DefaultPriorStrength
+	// defaultSuccessPrior is the pool mean assumed when no candidate has any
+	// window data at all (fresh install, monitoring just enabled).
+	defaultSuccessPrior = successrate.DefaultPrior
+	// defaultSuccessExploreEvery sends one dial in fifty to the stalest node.
+	defaultSuccessExploreEvery = 50
+	// maxSuccessExploreEvery bounds the exploration period; larger values are
+	// clamped so the uint32 modulo cannot wrap to zero.
+	maxSuccessExploreEvery = 1 << 20
+	// defaultSuccessHotspotBand is the score band inside which the least busy
+	// node wins, in probability points (0.03 = 3 percentage points).
+	defaultSuccessHotspotBand = 0.03
+)
+
+// preferOnTie orders two candidates whose success rates are indistinguishable,
+// and does so deterministically: measured latency first (an unmeasured node
+// loses), then the number of active connections, then the tag so the outcome
+// never depends on candidate ordering.
+func preferOnTie(a, b *memberState) bool {
+	if a == nil {
 		return false
 	}
-	return aLatency < bLatency
+	if b == nil {
+		return true
+	}
+	aLatency, bLatency := measuredLatency(a), measuredLatency(b)
+	switch {
+	case aLatency > 0 && bLatency > 0 && aLatency != bLatency:
+		return aLatency < bLatency
+	case aLatency > 0 && bLatency <= 0:
+		return true
+	case aLatency <= 0 && bLatency > 0:
+		return false
+	}
+	if aActive, bActive := activeCountOf(a), activeCountOf(b); aActive != bActive {
+		return aActive < bActive
+	}
+	return a.tag < b.tag
 }
 
-func (p *poolOutbound) recordFailure(member *memberState, cause error) {
+// measuredLatency returns the last probe latency, or 0 when the node has no
+// measurement (unprobed, or currently unhealthy).
+func measuredLatency(member *memberState) time.Duration {
+	if member == nil || member.entry == nil {
+		return 0
+	}
+	return member.entry.LastLatency()
+}
+
+// activeCountOf returns the live connection count of a member, or 0 when the
+// member has no shared state attached.
+func activeCountOf(member *memberState) int32 {
+	if member == nil || member.shared == nil {
+		return 0
+	}
+	return member.shared.activeCount()
+}
+
+func (p *poolOutbound) recordFailure(member *memberState, cause error, lease *memberLease) {
 	if member.shared == nil {
 		p.logger.Warn("代理 ", member.tag, " 失败（无共享状态）: ", cause)
 		return
 	}
-	failures, blacklisted, until, transient := member.shared.recordFailure(cause, p.options.FailureThreshold, p.options.BlacklistDuration)
+	failures, blacklisted, until, transient := member.shared.recordFailure(cause, p.options.FailureThreshold, p.options.BlacklistDuration, lease)
 	switch {
 	case transient:
-		// Transient (e.g. 429 rate-limit): short cooldown, not counted toward the
-		// 24h blacklist. The node is retried automatically once the cooldown ends.
+		// Transient transport failures use jittered exponential backoff.
 		p.logger.Warn("代理 ", member.tag, " 暂时失败，冷却至 ", until.Format("15:04:05"), ": ", cause)
 		log.Printf("[节点池] %s 暂时失败，冷却至 %s: %v", member.tag, until.Format("15:04:05"), cause)
 	case blacklisted:
@@ -780,9 +1087,9 @@ func (p *poolOutbound) recordFailure(member *memberState, cause error) {
 	}
 }
 
-func (p *poolOutbound) recordSuccess(member *memberState) {
+func (p *poolOutbound) recordSuccess(member *memberState, latency time.Duration, lease *memberLease) {
 	if member.shared != nil {
-		member.shared.recordSuccess()
+		member.shared.recordSuccess(latency, lease)
 	}
 	if p.monitor != nil && p.options.EntryPort > 0 {
 		p.monitor.RecordEntryExit(p.options.EntryPort, member.tag)
@@ -791,18 +1098,6 @@ func (p *poolOutbound) recordSuccess(member *memberState) {
 	p.lastUsedMu.Lock()
 	p.lastUsedMember = member
 	p.lastUsedMu.Unlock()
-}
-
-func (p *poolOutbound) wrapConn(conn net.Conn, member *memberState) net.Conn {
-	return &trackedConn{Conn: conn, release: func() {
-		p.decActive(member)
-	}}
-}
-
-func (p *poolOutbound) wrapPacketConn(conn net.PacketConn, member *memberState) net.PacketConn {
-	return &trackedPacketConn{PacketConn: conn, release: func() {
-		p.decActive(member)
-	}}
 }
 
 func (p *poolOutbound) makeReleaseFunc(member *memberState) func() {
@@ -1250,18 +1545,6 @@ func (c *trackedPacketConn) Close() error {
 	err := c.PacketConn.Close()
 	c.once.Do(c.release)
 	return err
-}
-
-func (p *poolOutbound) incActive(member *memberState) {
-	if member.shared != nil {
-		member.shared.incActive()
-	}
-}
-
-func (p *poolOutbound) decActive(member *memberState) {
-	if member.shared != nil {
-		member.shared.decActive()
-	}
 }
 
 func (p *poolOutbound) getCandidateBuffer() []*memberState {

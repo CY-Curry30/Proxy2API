@@ -83,6 +83,10 @@ func Build(cfg *config.Config) (option.Options, error) {
 			SubscriptionURL: node.SubscriptionURL,
 			Suppressed:      node.Disabled,
 		}
+		meta.MaxConnections = cfg.Pool.MaxConnectionsPerNode
+		if capacity, ok := cfg.Pool.NodeCapacityOverrides[meta.ID]; ok {
+			meta.MaxConnections = capacity
+		}
 		// For multi-port and hybrid modes, use per-node port
 		if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
 			meta.ListenAddress = cfg.MultiPort.Address
@@ -136,14 +140,19 @@ func Build(cfg *config.Config) (option.Options, error) {
 		}
 		inbounds = append(inbounds, inbound)
 		poolOptions := poolout.Options{
-			Mode:              cfg.Pool.Mode,
-			Members:           memberTags,
-			FailureThreshold:  cfg.Pool.FailureThreshold,
-			BlacklistDuration: cfg.Pool.BlacklistDuration,
-			RetryEnabled:      cfg.Pool.RetryEnabledOrDefault(),
-			RetryAttempts:     cfg.Pool.RetryAttempts,
-			Metadata:          metadata,
-			EntryPort:         cfg.Listener.Port,
+			Mode:                 cfg.Pool.Mode,
+			Members:              memberTags,
+			FailureThreshold:     cfg.Pool.FailureThreshold,
+			BlacklistDuration:    cfg.Pool.BlacklistDuration,
+			RetryEnabled:         cfg.Pool.RetryEnabledOrDefault(),
+			RetryAttempts:        cfg.Pool.RetryAttempts,
+			SuccessWindowSize:    cfg.Pool.SuccessWindow,
+			SuccessPriorStrength: cfg.Pool.SuccessPriorStrength,
+			SuccessExploreEvery:  cfg.Pool.SuccessExploreEvery,
+			SuccessHotspotBand:   cfg.Pool.SuccessHotspotBand,
+			SuccessHalfLife:      cfg.Pool.SuccessHalfLife,
+			Metadata:             metadata,
+			EntryPort:            cfg.Listener.Port,
 		}
 		outbounds = append(outbounds, option.Outbound{
 			Type:    poolout.Type,

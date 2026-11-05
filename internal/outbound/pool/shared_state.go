@@ -2,9 +2,17 @@ package pool
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"io"
+	"math/rand"
+	"net"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"Proxy2API/internal/monitor"
@@ -23,44 +31,84 @@ type sharedMemberState struct {
 	activationPending bool
 	entry             atomic.Pointer[monitor.EntryHandle]
 	active            atomic.Int32
+	pending           int
+	capacity          int
+	epoch             uint64
+	transientFailures int
+	recovering        bool
+	recoverySuccesses int
+	trialInFlight     bool
+	exploring         bool
+	lastSelected      time.Time
+	lastSequence      uint64
+	nextExplore       time.Time
 }
 
-// transientCooldown is how long a node is skipped after a transient failure
-// (rate-limit / timeout / connection reset). Far shorter than the 24h blacklist
-// used for permanent faults, because these errors usually clear on their own —
-// e.g. a shared free node briefly rate-limited (HTTP 429) by its CDN.
-const transientCooldown = 60 * time.Second
+const (
+	transientCooldown     = 15 * time.Second
+	maxTransientCooldown  = 5 * time.Minute
+	recoverySuccessTarget = 3
+	defaultNodeCapacity   = 128
+)
 
-// isTransientError reports whether err looks like a temporary condition that
-// should NOT count toward the permanent-blacklist threshold. Rate limiting
-// (429), timeouts and connection resets fall here: the node is likely alive and
-// will recover, so a full 24h ban would needlessly drain the healthy pool.
+// Prefer typed transport errors; string matching is only for opaque upstream
+// proxy handshakes. Application HTTP responses inside a tunnel are not observed.
 func isTransientError(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "429"),
-		strings.Contains(msg, "too many requests"),
-		strings.Contains(msg, "timeout"),
-		strings.Contains(msg, "deadline exceeded"),
-		strings.Contains(msg, "connection reset"),
-		strings.Contains(msg, "reset by peer"),
-		strings.Contains(msg, "temporarily"),
-		strings.Contains(msg, "try again"),
-		strings.Contains(msg, "service unavailable"),
-		strings.Contains(msg, "503"):
+	var cert *tls.CertificateVerificationError
+	var unknown x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	if errors.As(err, &cert) || errors.As(err, &unknown) || errors.As(err, &hostname) || errors.As(err, &invalid) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ETIMEDOUT) ||
+		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.EPIPE) {
 		return true
 	}
-	return false
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return true
+	} // destination failures must not permanently eject a proxy
+	var transport net.Error
+	if errors.As(err, &transport) && (transport.Timeout() || transport.Temporary()) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, fragment := range []string{"too many requests", "timeout", "deadline exceeded", "connection reset", "reset by peer", "temporarily", "try again", "service unavailable"} {
+		if strings.Contains(msg, fragment) {
+			return true
+		}
+	}
+	return transientHTTPStatus.MatchString(msg)
+}
+
+var transientHTTPStatus = regexp.MustCompile(`(?i)(?:HTTP/[0-9](?:[.][0-9])?\s+|status(?:\s+code)?[ :=]+|response(?:\s+code)?[ :=]+)(429|503)\b`)
+
+func cooldownFor(failures int, jitter float64) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	if failures > 6 {
+		failures = 6
+	}
+	base := transientCooldown * time.Duration(1<<uint(failures-1))
+	if base > maxTransientCooldown {
+		base = maxTransientCooldown
+	}
+	// 80%-100% jitter keeps the documented upper bound intact.
+	return time.Duration(float64(base) * (0.8 + 0.2*jitter))
 }
 
 // SharedStateStore owns the mutable pool state for one project runtime. Pool
 // and multi-port outbounds inside the same project share this store, while
 // separate projects receive separate instances.
 type SharedStateStore struct {
-	states sync.Map // map[tag]*sharedMemberState
+	selectionMu sync.Mutex // selection and reservation across pool/sticky/per-node listeners
+	states      sync.Map   // map[tag]*sharedMemberState
 }
 
 // NewSharedStateStore creates an isolated pool state container.
@@ -162,6 +210,7 @@ func (s *sharedMemberState) restore(entry *monitor.EntryHandle) {
 	}
 	s.restored = true
 	s.failures = failures
+	s.transientFailures, s.recovering = entry.CircuitState()
 	s.blacklisted = blacklisted
 	s.blacklistedUntil = until
 	if blacklisted {
@@ -207,61 +256,79 @@ func (s *sharedMemberState) scheduleReleaseLocked(until time.Time) {
 	})
 }
 
-// recordFailure records a failure and decides whether to blacklist the node.
-//
-// Transient errors (rate-limit 429, timeouts, connection resets) do NOT count
-// toward the permanent threshold; instead they impose a short cooldown so the
-// node is briefly skipped and then retried automatically. Permanent errors
-// (handshake/cert/protocol failures, 404, etc.) accumulate toward the threshold
-// and trigger the full blacklist duration once it is reached.
-//
-// Returns: (current permanent-failure count, blacklisted, blacklist-until, transient).
-func (s *sharedMemberState) recordFailure(cause error, threshold int, duration time.Duration) (int, bool, time.Time, bool) {
+// recordFailure closes a half-open circuit immediately. Failures from dials
+// started before the current circuit epoch are still recorded as observations,
+// but cannot repeatedly grow the backoff or change recovery state.
+func (s *sharedMemberState) recordFailure(cause error, threshold int, duration time.Duration, lease *memberLease) (int, bool, time.Time, bool) {
 	transient := isTransientError(cause)
-
 	s.mu.Lock()
-	var count int
-	var persistedFailures int
-	triggered := false
-	var until time.Time
-	if transient {
-		// Short cooldown only; do not accumulate toward the 24h blacklist.
-		count = s.failures
-		until = time.Now().Add(transientCooldown)
-		s.blacklisted = true
-		s.blacklistedUntil = until
-		s.scheduleReleaseLocked(until)
-	} else {
-		s.failures++
-		count = s.failures
-		if s.failures >= threshold {
-			triggered = true
-			until = time.Now().Add(duration)
-			s.failures = 0
-			s.blacklisted = true
-			s.blacklistedUntil = until
-			s.scheduleReleaseLocked(until)
+	defer s.mu.Unlock()
+	s.finishPendingLocked(lease)
+	current := lease == nil || lease.epoch == s.epoch
+	count, triggered := s.failures, false
+	until := s.blacklistedUntil
+	if current {
+		if transient {
+			s.transientFailures++
+			until = time.Now().Add(cooldownFor(s.transientFailures, rand.Float64()))
+			if s.blacklistedUntil.After(until) {
+				until = s.blacklistedUntil
+			}
+			s.openCircuitLocked(until)
+		} else {
+			s.failures++
+			count = s.failures
+			if s.failures >= threshold || (lease != nil && lease.trial) {
+				triggered = true
+				until = time.Now().Add(duration)
+				if s.blacklistedUntil.After(until) {
+					until = s.blacklistedUntil
+				}
+				s.failures = 0
+				s.openCircuitLocked(until)
+			}
 		}
 	}
-	persistedFailures = s.failures
-	s.mu.Unlock()
-
 	if entry := s.entry.Load(); entry != nil {
-		entry.RecordFailure(cause, persistedFailures)
-		if triggered || transient {
-			entry.Blacklist(until)
+		entry.RecordFailure(cause, s.failures)
+		entry.SetCircuitState(s.transientFailures, s.recovering, s.failures)
+		if s.blacklisted {
+			entry.Blacklist(s.blacklistedUntil)
 		}
 	}
 	return count, triggered, until, transient
 }
 
-func (s *sharedMemberState) recordSuccess() {
-	s.mu.Lock()
-	s.failures = 0
-	s.mu.Unlock()
+func (s *sharedMemberState) openCircuitLocked(until time.Time) {
+	s.epoch++
+	s.blacklisted, s.recovering = true, true
+	s.recoverySuccesses = 0
+	s.blacklistedUntil = until
+	s.scheduleReleaseLocked(until)
+}
 
+func (s *sharedMemberState) recordSuccess(latency time.Duration, lease *memberLease) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.finishPendingLocked(lease)
+	if lease == nil || lease.epoch == s.epoch {
+		s.failures = 0
+		if lease != nil && lease.trial && !s.blacklisted {
+			s.recoverySuccesses++
+			if s.transientFailures > 0 {
+				s.transientFailures--
+			}
+			if s.recoverySuccesses >= recoverySuccessTarget {
+				s.recovering = false
+				s.transientFailures = 0
+			}
+		} else if !s.recovering && !s.blacklisted {
+			s.transientFailures = 0
+		}
+	}
 	if entry := s.entry.Load(); entry != nil {
-		entry.RecordSuccess()
+		entry.RecordSuccess(latency)
+		entry.SetCircuitState(s.transientFailures, s.recovering, s.failures)
 	}
 }
 
@@ -276,21 +343,23 @@ func (s *sharedMemberState) isBlacklisted(now time.Time) bool {
 			s.releaseTimer = nil
 		}
 		s.blacklisted = false
+		s.recovering = true
+		s.recoverySuccesses = 0
 		s.activationPending = false
 		s.blacklistedUntil = time.Time{}
 		s.failures = 0
 		releaseProbe = s.releaseProbe
 	}
 	blacklisted := s.blacklisted
-	s.mu.Unlock()
-
 	if expired {
 		if entry := s.entry.Load(); entry != nil {
 			entry.ClearBlacklist()
+			entry.SetCircuitState(s.transientFailures, true, s.failures)
 		}
-		if releaseProbe != nil {
-			releaseProbe()
-		}
+	}
+	s.mu.Unlock()
+	if expired && releaseProbe != nil {
+		releaseProbe()
 	}
 	return blacklisted
 }
@@ -319,20 +388,21 @@ func (s *sharedMemberState) forceRelease() {
 		s.releaseTimer.Stop()
 		s.releaseTimer = nil
 	}
-	s.failures = 0
-	s.blacklisted = false
-	s.activationPending = false
+	s.epoch++
+	s.failures, s.transientFailures, s.recoverySuccesses = 0, 0, 0
+	s.blacklisted, s.activationPending = false, false
+	s.recovering = wasBlacklisted || s.recovering
 	s.blacklistedUntil = time.Time{}
 	releaseProbe := s.releaseProbe
-	s.mu.Unlock()
-
-	if wasBlacklisted {
-		if entry := s.entry.Load(); entry != nil {
+	if entry := s.entry.Load(); entry != nil {
+		if wasBlacklisted {
 			entry.ClearBlacklist()
 		}
-		if releaseProbe != nil {
-			releaseProbe()
-		}
+		entry.SetCircuitState(0, s.recovering, 0)
+	}
+	s.mu.Unlock()
+	if wasBlacklisted && releaseProbe != nil {
+		releaseProbe()
 	}
 }
 
@@ -366,11 +436,12 @@ func (s *SharedStateStore) blacklist(tag string, duration time.Duration) {
 	if state, ok := s.lookup(tag); ok {
 		until := time.Now().Add(duration)
 		state.mu.Lock()
-		state.blacklisted = true
 		state.activationPending = false
-		state.blacklistedUntil = until
 		state.failures = 0
-		state.scheduleReleaseLocked(until)
+		state.openCircuitLocked(until)
+		if entry := state.entry.Load(); entry != nil {
+			entry.SetCircuitState(state.transientFailures, true, state.failures)
+		}
 		state.mu.Unlock()
 	}
 }

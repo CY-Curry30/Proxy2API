@@ -444,6 +444,22 @@ func (r *Runtime) setExcludedNodes(excluded []string) {
 	}
 }
 
+// excludedNodesSnapshot returns the project's current excluded_nodes. A running
+// project answers from memory; a stopped one is read from disk.
+func (r *Runtime) excludedNodesSnapshot() ([]string, error) {
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+	if cfg != nil {
+		return append([]string(nil), cfg.ExcludedNodes...), nil
+	}
+	loaded, err := config.LoadSettingsReadOnly(r.configPath)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), loaded.ExcludedNodes...), nil
+}
+
 func (r *Runtime) MonitorManager() *monitor.Manager {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

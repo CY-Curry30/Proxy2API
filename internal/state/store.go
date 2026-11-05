@@ -59,6 +59,14 @@ type NodeRecord struct {
 	Country          string          `json:"country,omitempty"`
 	FailureCount     int             `json:"failure_count"`
 	SuccessCount     int64           `json:"success_count"`
+	RecentMask       uint64          `json:"recent_mask,omitempty"`
+	RecentCount      uint8           `json:"recent_count,omitempty"`
+	RecentLastAt     time.Time       `json:"recent_last_at,omitempty"`
+	RecentTimes      []time.Time     `json:"recent_times,omitempty"`
+	DialLatencyEWMA  time.Duration   `json:"dial_latency_ewma,omitempty"`
+	LastDialAt       time.Time       `json:"last_dial_at,omitempty"`
+	CircuitFailures  int             `json:"circuit_failures,omitempty"`
+	Recovering       bool            `json:"recovering,omitempty"`
 	ConsecutiveFails int             `json:"consecutive_failures"`
 	Blacklisted      bool            `json:"blacklisted"`
 	BlacklistedUntil time.Time       `json:"blacklisted_until,omitempty"`
@@ -429,6 +437,14 @@ func mergeNodeRuntime(target *NodeRecord, existing NodeRecord) {
 	target.Country = existing.Country
 	target.FailureCount = existing.FailureCount
 	target.SuccessCount = existing.SuccessCount
+	target.RecentMask = existing.RecentMask
+	target.RecentCount = existing.RecentCount
+	target.RecentLastAt = existing.RecentLastAt
+	target.RecentTimes = append([]time.Time(nil), existing.RecentTimes...)
+	target.DialLatencyEWMA = existing.DialLatencyEWMA
+	target.LastDialAt = existing.LastDialAt
+	target.CircuitFailures = existing.CircuitFailures
+	target.Recovering = existing.Recovering
 	target.ConsecutiveFails = existing.ConsecutiveFails
 	target.Blacklisted = existing.Blacklisted
 	target.BlacklistedUntil = existing.BlacklistedUntil

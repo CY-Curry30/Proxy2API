@@ -1527,6 +1527,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	// 之前只返回 SnapshotFiltered(true)，导致 dashboard 的拉黑/异常计数恒为 0，
 	// 且拉黑节点不出现在表格里、无法解封。
 	allNodes := s.mgr.SnapshotVisible()
+	s.annotateSuccessMetrics(allNodes, time.Now())
 	totalNodes := len(allNodes)
 
 	sweepActive, sweepDone, sweepTotal, sweepOK, sweepFail := s.mgr.ProbeSweepProgress()
@@ -1710,31 +1711,39 @@ func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snapshots := s.mgr.SnapshotVisible()
+	s.annotateSuccessMetrics(snapshots, time.Now())
 	var totalCalls, totalSuccess int64
 	debugNodes := make([]map[string]any, 0, len(snapshots))
 	for _, snap := range snapshots {
 		totalCalls += snap.SuccessCount + int64(snap.FailureCount)
 		totalSuccess += snap.SuccessCount
 		debugNodes = append(debugNodes, map[string]any{
-			"tag":                snap.Tag,
-			"name":               snap.Name,
-			"mode":               snap.Mode,
-			"port":               snap.Port,
-			"ip":                 snap.IP,
-			"region":             snap.Region,
-			"country":            snap.Country,
-			"failure_count":      snap.FailureCount,
-			"success_count":      snap.SuccessCount,
-			"active_connections": snap.ActiveConnections,
-			"last_latency_ms":    snap.LastLatencyMs,
-			"last_probed_at":     snap.LastProbedAt,
-			"last_success":       snap.LastSuccess,
-			"last_failure":       snap.LastFailure,
-			"last_error":         snap.LastError,
-			"last_trace_at":      snap.LastTraceAt,
-			"last_trace_error":   snap.LastTraceError,
-			"blacklisted":        snap.Blacklisted,
-			"timeline":           snap.Timeline,
+			"tag":                  snap.Tag,
+			"name":                 snap.Name,
+			"mode":                 snap.Mode,
+			"port":                 snap.Port,
+			"ip":                   snap.IP,
+			"region":               snap.Region,
+			"country":              snap.Country,
+			"failure_count":        snap.FailureCount,
+			"success_count":        snap.SuccessCount,
+			"recent_success_count": snap.RecentSuccessCount,
+			"recent_attempts":      snap.RecentAttempts,
+			"recent_last_at":       snap.RecentLastAt,
+			"success_metrics":      snap.SuccessMetrics,
+			"dial_latency_ms":      snap.DialLatencyMS,
+			"max_connections":      snap.MaxConnections,
+			"recovering":           snap.Recovering,
+			"active_connections":   snap.ActiveConnections,
+			"last_latency_ms":      snap.LastLatencyMs,
+			"last_probed_at":       snap.LastProbedAt,
+			"last_success":         snap.LastSuccess,
+			"last_failure":         snap.LastFailure,
+			"last_error":           snap.LastError,
+			"last_trace_at":        snap.LastTraceAt,
+			"last_trace_error":     snap.LastTraceError,
+			"blacklisted":          snap.Blacklisted,
+			"timeline":             snap.Timeline,
 		})
 	}
 	var successRate float64
@@ -4619,6 +4628,40 @@ func (s *Server) nodeProjectMembership(selected []string, requireSelection bool)
 	return include, exclude, nil
 }
 
+// findConfigNodeByName resolves one node from the active scope's effective
+// node list. It returns ErrNodeNotFound when the name is unknown.
+func (s *Server) findConfigNodeByName(ctx context.Context, name string) (*config.NodeConfig, error) {
+	nodes, err := s.nodeMgr.ListConfigNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range nodes {
+		if nodes[index].Name == name {
+			return &nodes[index], nil
+		}
+	}
+	return nil, ErrNodeNotFound
+}
+
+// isSharedConfigNode reports whether the node lives in the shared catalog.
+// Project-local nodes have no project availability scope because other
+// projects never inherit them.
+func (s *Server) isSharedConfigNode(node config.NodeConfig) bool {
+	cfg := s.sharedSourceConfig()
+	if cfg == nil {
+		return false
+	}
+	lock := s.sharedSourceLock()
+	lock.RLock()
+	defer lock.RUnlock()
+	for _, shared := range cfg.Nodes {
+		if shared.StateID() == node.StateID() {
+			return true
+		}
+	}
+	return false
+}
+
 // handleConfigNodes handles listing, creation, and batch deletion of config nodes.
 func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureNodeManager(w) {
@@ -4805,6 +4848,27 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.Method {
+	case http.MethodGet:
+		target, err := s.findConfigNodeByName(r.Context(), nodeName)
+		if err != nil {
+			s.respondNodeError(w, err)
+			return
+		}
+		shared := s.projects != nil && s.isSharedConfigNode(*target)
+		projectIDs := []string{}
+		if shared && s.projects != nil {
+			projectIDs, err = s.projects.NodeProjectIDs(target.StateID())
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				writeJSON(w, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		writeJSON(w, map[string]any{
+			"node":        target,
+			"project_ids": projectIDs,
+			"shared":      shared,
+		})
 	case http.MethodPut:
 		if !s.ensureSharedSourceOwner(w) {
 			return
@@ -4824,12 +4888,47 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"error": "请求格式错误"})
 			return
 		}
+		// Scope is optional on update for backward compatibility; the WebUI
+		// always sends it for shared nodes.
+		applyMembership := len(payload.ProjectIDs) > 0 && s.projects != nil
+		var nodeInclude, nodeExclude []string
+		if applyMembership {
+			var membershipErr error
+			nodeInclude, nodeExclude, membershipErr = s.nodeProjectMembership(payload.ProjectIDs, false)
+			if membershipErr != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]any{"error": membershipErr.Error()})
+				return
+			}
+		}
+		previous, _ := s.findConfigNodeByName(r.Context(), nodeName)
+		// Membership has to be decided before the update: a URI change replaces
+		// the node's stable identity in the shared catalog.
+		previousShared := previous != nil && s.isSharedConfigNode(*previous)
 		node, err := s.nodeMgr.UpdateNode(r.Context(), nodeName, payload.toConfig())
 		if err != nil {
 			s.respondNodeError(w, err)
 			return
 		}
 		response := map[string]any{"node": node}
+		if applyMembership && (previous == nil || previousShared) {
+			if err := s.projects.ApplySharedNodeMembership(node.StateID(), nodeInclude, nodeExclude); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				writeJSON(w, map[string]any{
+					"error": "节点已更新，但项目可用范围保存失败: " + err.Error(),
+					"node":  node,
+				})
+				return
+			}
+			// A URI change derives a new stable identity; drop the exclusions
+			// recorded for the old one so they cannot resurface later.
+			if previous != nil && previous.StateID() != node.StateID() {
+				if err := s.projects.PruneSharedNodeMemberships([]string{previous.StateID()}); err != nil {
+					s.logger.Printf("清理旧节点关联失败 node=%s: %v", previous.Name, err)
+					response["scope_warning"] = "旧节点关联清理失败: " + err.Error()
+				}
+			}
+		}
 		s.reloadAfterNodeChange(r.Context(), response, "节点已更新并重载生效")
 		writeJSON(w, response)
 	case http.MethodDelete:
@@ -4935,8 +5034,9 @@ func (s *Server) handleNodeImport(w http.ResponseWriter, r *http.Request) {
 	)
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportBodySize)
 	var req struct {
-		Content  string `json:"content"`
-		Filename string `json:"filename,omitempty"`
+		Content    string   `json:"content"`
+		Filename   string   `json:"filename,omitempty"`
+		ProjectIDs []string `json:"project_ids,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -4947,6 +5047,20 @@ func (s *Server) handleNodeImport(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		writeJSON(w, map[string]any{"error": "导入文件不能超过 10 MB"})
 		return
+	}
+
+	// The WebUI always sends project_ids when projects exist; global scope keeps
+	// the hard requirement of at least one project.
+	applyMembership := len(req.ProjectIDs) > 0 && s.projects != nil
+	var nodeInclude, nodeExclude []string
+	if len(req.ProjectIDs) > 0 || globalScope {
+		var membershipErr error
+		nodeInclude, nodeExclude, membershipErr = s.nodeProjectMembership(req.ProjectIDs, globalScope)
+		if membershipErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": membershipErr.Error()})
+			return
+		}
 	}
 
 	nodes, err := config.ParseNodeImportContent(req.Content)
@@ -4960,7 +5074,26 @@ func (s *Server) handleNodeImport(w http.ResponseWriter, r *http.Request) {
 		s.respondNodeError(w, err)
 		return
 	}
-	if !globalScope {
+	if len(added) > 0 && applyMembership {
+		nodeIDs := make([]string, 0, len(added))
+		for _, node := range added {
+			nodeIDs = append(nodeIDs, node.StateID())
+		}
+		if err := s.projects.ApplySharedNodeMembershipMany(nodeIDs, nodeInclude, nodeExclude); err != nil {
+			names := make([]string, 0, len(added))
+			for _, node := range added {
+				names = append(names, node.Name)
+			}
+			_, deleteErr := s.nodeMgr.DeleteNodes(r.Context(), names)
+			message := "导入的节点已回滚，项目可用范围保存失败: " + err.Error()
+			if deleteErr != nil {
+				message = fmt.Sprintf("%s（回滚 %d 个新节点失败: %v）", message, len(names), deleteErr)
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]any{"error": message})
+			return
+		}
+	} else if !globalScope {
 		for _, node := range added {
 			if err := s.setCurrentProjectNodeIncluded(node, true); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)

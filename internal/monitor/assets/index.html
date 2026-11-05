@@ -392,6 +392,15 @@
        逐行堆叠（窄屏时行高从 58px 涨到 167px），也会把其它列压到只剩一个字宽。
        保持一行后表格会按自身最小宽度在 .table-container 内横向滚动。 */
     .node-actions { white-space: nowrap; }
+    .success-metric { min-width: 156px; display: grid; gap: 5px; }
+    .success-metric-main { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+    .success-metric-value { font-family: var(--font-mono); font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .success-metric-meta { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+    .success-metric-bar { height: 3px; border-radius: 2px; background: var(--border); overflow: hidden; }
+    .success-metric-bar > span { display: block; height: 100%; border-radius: inherit; }
+    .success-metric-flag { font-size: 10px; padding: 1px 5px; border-radius: 4px; color: var(--warning); background: var(--warning-bg); }
+    .success-metric-score { color: var(--primary); }
+    .success-metric-note { padding: 10px 16px; color: var(--text-muted); font-size: 12px; line-height: 1.6; border-bottom: 1px solid var(--border); }
 
     /* Truncate long names/URIs so the table layout stays intact */
     .cell-trunc {
@@ -523,6 +532,12 @@
     
     .form-group { display: flex; flex-direction: column; gap: 6px; }
     .form-section-title { color: var(--text-main); font-size: 13px; font-weight: 600; padding-top: 4px; border-top: 1px solid var(--border-light); }
+    .node-project-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding-top: 4px; border-top: 1px solid var(--border-light);
+    }
+    .node-project-header .form-section-title { padding-top: 0; border-top: none; }
+    .node-project-actions { display: flex; gap: 8px; flex-shrink: 0; }
     .form-section-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     @media (max-width: 560px) { .form-section-grid { grid-template-columns: 1fr; } }
     .port-availability {
@@ -982,8 +997,10 @@
                 <option value="default">默认排序</option>
                 <option value="asc">延迟从低到高</option>
                 <option value="desc">延迟从高到低</option>
-                <option value="success_desc">成功率从高到低</option>
-                <option value="success_asc">成功率从低到高</option>
+                <option value="success_desc">拨号成功率从高到低</option>
+                <option value="success_asc">拨号成功率从低到高</option>
+                <option value="score_desc">调度分从高到低</option>
+                <option value="score_asc">调度分从低到高</option>
               </select>
               <select id="nodeRegionFilter" class="setting-input table-tool" onchange="filterByRegion(this.value)" title="区域筛选">
                 <option value="all">全部区域</option>
@@ -995,6 +1012,7 @@
               <input id="nodeSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索名称、标签、端口或出口 IP" title="支持名称 / 标签 / 端口 / 地区 / 出口 IP 的模糊匹配，IP 可用 * 通配（如 104.28.*）" oninput="applyNodeFilters(true)" />
             </div>
           </div>
+          <div class="success-metric-note">成功率统计连接建立结果，不包含 HTTP 状态或业务结果。调度分仅在最高成功率模式显示，综合样本量与记录时效；实际选点还会考虑连接数、探索和重试。</div>
           <div class="table-container">
             <table>
               <thead>
@@ -1005,7 +1023,7 @@
                   <th>端口</th>
                   <th>延迟</th>
                   <th>连接</th>
-                  <th>成功率</th>
+                  <th title="按实际拨号结果统计；调度分另计样本量、平滑及记录时效">拨号成功率</th>
                   <th>探测时间</th>
                   <th>操作</th>
                 </tr>
@@ -1171,16 +1189,17 @@
       <div id="debugTab" class="tab-content">
         <div class="overview-grid">
           <div class="stat-panel">
-            <div class="stat-title">总请求次数</div>
+            <div class="stat-title">累计拨号次数</div>
             <div class="stat-value" id="debugTotalCalls">0</div>
           </div>
           <div class="stat-panel">
-            <div class="stat-title">请求成功次数</div>
+            <div class="stat-title">累计拨号成功次数</div>
             <div class="stat-value" style="color: var(--success);" id="debugTotalSuccess">0</div>
           </div>
           <div class="stat-panel">
-            <div class="stat-title">全局请求成功率</div>
-            <div class="stat-value" style="color: var(--primary);" id="debugSuccessRate">0%</div>
+            <div class="stat-title">累计拨号成功率</div>
+            <div class="stat-value" style="color: var(--primary);" id="debugSuccessRate">—</div>
+            <div class="stat-sub" style="color: var(--text-muted);">当前项目 · 不含连接后的业务响应</div>
           </div>
           <div class="stat-panel">
             <div class="stat-title">上传流量</div>
@@ -1201,11 +1220,11 @@
 
         <div class="charts-grid">
           <div class="chart-panel">
-            <div class="chart-title">全局质量分数 (Overall Health Score)</div>
+            <div class="chart-title">累计拨号成功率</div>
             <div class="chart-container" id="successRateChart"></div>
           </div>
           <div class="chart-panel">
-            <div class="chart-title">稳定性掉线排行 (Top Unstable Nodes)</div>
+            <div class="chart-title">累计拨号失败次数排行</div>
             <div class="chart-container" id="failureChart"></div>
           </div>
         </div>
@@ -1216,18 +1235,21 @@
             <div class="table-tools">
               <input id="debugNodeSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称、标签、IP 或端口" oninput="resetTablePage('debugNodes');renderDebugNodes()" />
               <select id="debugSuccessSort" class="setting-input table-tool" onchange="resetTablePage('debugNodes');renderDebugNodes()">
-                <option value="desc">请求成功率从高到低</option>
-                <option value="asc">请求成功率从低到高</option>
+                <option value="desc">拨号成功率从高到低</option>
+                <option value="asc">拨号成功率从低到高</option>
+                <option value="score_desc">调度分从高到低</option>
+                <option value="score_asc">调度分从低到高</option>
               </select>
             </div>
           </div>
+          <div class="success-metric-note">成功率统计连接建立结果，不包含 HTTP 状态或业务结果。调度分仅在最高成功率模式显示，综合样本量与记录时效；实际选点还会考虑连接数、探索和重试。</div>
           <div class="table-container">
             <table>
               <thead>
                 <tr>
                   <th>节点</th>
-                  <th>成功率</th>
-                  <th>成功/失败</th>
+                  <th title="按实际拨号结果统计；调度分另计样本量、平滑及记录时效">拨号成功率</th>
+                  <th>累计成功 / 失败</th>
                   <th>连接</th>
                   <th>时间线</th>
                 </tr>
@@ -1394,24 +1416,38 @@
         <button type="button" class="node-mode-btn active" id="nodeModeSingleBtn" onclick="setNodeModalMode('single')">单个节点</button>
         <button type="button" class="node-mode-btn" id="nodeModeImportBtn" onclick="setNodeModalMode('import')">批量导入</button>
       </div>
-      <form id="nodeSingleForm" onsubmit="handleNodeSubmit(event)">
+      <form id="nodeForm" onsubmit="handleNodeFormSubmit(event)">
         <div class="modal-body">
-          <div class="form-group">
-            <label>节点名称 Name</label>
-            <input type="text" id="nodeName" placeholder="HK-01" />
+          <div id="nodeSingleFields">
+            <div class="form-group">
+              <label>节点名称 Name</label>
+              <input type="text" id="nodeName" placeholder="HK-01" />
+            </div>
+            <div class="form-group">
+              <label>节点 URI</label>
+              <textarea id="nodeUri" class="node-uri-input" required placeholder="vless://... 或 anytls://..."></textarea>
+            </div>
           </div>
-          <div class="form-group">
-            <label>节点 URI</label>
-            <textarea id="nodeUri" class="node-uri-input" required placeholder="vless://... 或 anytls://..."></textarea>
+          <div id="nodeImportFields" style="display:none;">
+            <div class="form-group">
+              <label>YAML / TXT 文件</label>
+              <input type="file" id="nodeImportFile" class="node-import-file" accept=".yaml,.yml,.txt,text/plain,application/yaml,application/x-yaml" onchange="handleNodeImportFile(event)" />
+            </div>
+            <div class="form-group">
+              <label>节点配置内容</label>
+              <textarea id="nodeImportContent" class="node-import-textarea" required disabled placeholder="粘贴 Clash YAML、nodes YAML、Base64 内容，或一行一个节点 URI"></textarea>
+            </div>
           </div>
           <input type="hidden" id="nodeEditName" />
           <div id="nodeProjectSection" style="display:none;">
-            <div class="form-section-title">项目可用范围</div>
-            <div style="display:flex; gap:8px; margin-bottom:8px;">
-              <button type="button" class="btn btn-sm" onclick="selectAllNodeProjects()">全选</button>
-              <button type="button" class="btn btn-sm" onclick="clearAllNodeProjects()">全不选</button>
+            <div class="node-project-header">
+              <div class="form-section-title">项目可用范围</div>
+              <div class="node-project-actions">
+                <button type="button" class="btn btn-sm" onclick="selectAllNodeProjects()">全选</button>
+                <button type="button" class="btn btn-sm" onclick="clearAllNodeProjects()">全不选</button>
+              </div>
             </div>
-            <div class="checkbox-grid" id="nodeProjectCheckboxes" style="max-height:200px; overflow-y:auto; border:1px solid var(--border); padding:8px; border-radius:4px;">
+            <div class="checkbox-grid" id="nodeProjectCheckboxes" style="margin-top:8px; max-height:200px; overflow-y:auto; border:1px solid var(--border); padding:8px; border-radius:4px;">
               <!-- Populated dynamically -->
             </div>
             <em id="nodeProjectHint" style="font-size:11px;color:var(--text-muted); display:block; margin-top:8px;"></em>
@@ -1420,22 +1456,6 @@
         <div class="modal-footer">
           <button type="button" class="btn" onclick="document.getElementById('nodeModalOverlay').classList.remove('show')">取消</button>
           <button type="submit" class="btn btn-primary" id="nodeSubmitBtn">保存</button>
-        </div>
-      </form>
-      <form id="nodeImportForm" onsubmit="handleNodeImportSubmit(event)" style="display:none;">
-        <div class="modal-body">
-          <div class="form-group">
-            <label>YAML / TXT 文件</label>
-            <input type="file" id="nodeImportFile" class="node-import-file" accept=".yaml,.yml,.txt,text/plain,application/yaml,application/x-yaml" onchange="handleNodeImportFile(event)" />
-          </div>
-          <div class="form-group">
-            <label>节点配置内容</label>
-            <textarea id="nodeImportContent" class="node-import-textarea" required placeholder="粘贴 Clash YAML、nodes YAML、Base64 内容，或一行一个节点 URI"></textarea>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn" onclick="document.getElementById('nodeModalOverlay').classList.remove('show')">取消</button>
-          <button type="submit" class="btn btn-primary">导入并重载</button>
         </div>
       </form>
     </div>
@@ -1804,6 +1824,11 @@
     // 'all' | '__non_subscription__' | <订阅显示名>。与节点定义列表的订阅筛选保持一致。
     let currentNodeSourceFilter = 'all';
     let isEditMode = false;
+    // 编辑节点时从服务端读取的当前可用项目；editingNodeShared 表示节点属于共享目录，
+    // 只有共享节点才谈得上“项目可用范围”。
+    let editingNodeProjectIDs = null;
+    let editingNodeShared = false;
+    let nodeModalToken = 0;
     let configNodes = [];
     let visibleConfigNodeNames = [];
     let selectedConfigNodeNames = new Set();
@@ -2617,6 +2642,9 @@
 	  renderConfigNodes();
 	  renderSubscriptions();
 	  document.getElementById('debugNodesTableBody').replaceChildren();
+      document.getElementById('debugTotalCalls').textContent = '0';
+      document.getElementById('debugTotalSuccess').textContent = '0';
+      document.getElementById('debugSuccessRate').textContent = '—';
 	  document.getElementById('debugTotalUpload').textContent = '0 B';
 	  document.getElementById('debugTotalDownload').textContent = '0 B';
 	  document.getElementById('debugTotalTraffic').textContent = '0 B';
@@ -4085,16 +4113,8 @@
           if (!Number.isFinite(bLatency)) return -1;
           return sort === 'asc' ? aLatency - bLatency : bLatency - aLatency;
         });
-      } else if (sort === 'success_desc' || sort === 'success_asc') {
-        // 没有请求记录的节点（成功率为 -1）无论升序降序都排在最后。
-        nodes = nodes.slice().sort((a, b) => {
-          const aRate = nodeSuccessRate(a);
-          const bRate = nodeSuccessRate(b);
-          if (aRate < 0 && bRate < 0) return 0;
-          if (aRate < 0) return 1;
-          if (bRate < 0) return -1;
-          return sort === 'success_asc' ? aRate - bRate : bRate - aRate;
-        });
+      } else if (sort.startsWith('success_') || sort.startsWith('score_')) {
+        nodes = nodes.slice().sort((a, b) => compareNodeSuccess(a, b, sort));
       }
       renderNodes(nodes);
     }
@@ -4115,8 +4135,6 @@
         const measuredMs = Number.isFinite(n.last_latency_ms) ? n.last_latency_ms : -1;
         const currentHealthy = n.initial_check_done && n.available && !n.blacklisted;
         const ms = measuredMs;
-        const calls = (n.success_count || 0) + (n.failure_count || 0);
-        const successRate = calls > 0 ? ((n.success_count || 0) / calls * 100) : null;
         const entryPortBadges = (entryExitPortsByTag.get(n.tag) || [])
           .map(port => `<span class="entry-port-badge" title="入口 ${escapeHtml(port)} 当前出口">${escapeHtml(port)}</span>`)
           .join('');
@@ -4186,7 +4204,7 @@
             </div>
           </td>
           <td class="tt-mono">${n.active_connections||0}</td>
-          <td class="tt-mono" style="color:${successRate === null ? 'var(--text-muted)' : (successRate >= 90 ? 'var(--success)' : (successRate >= 70 ? 'var(--warning)' : 'var(--error)'))}" title="请求成功 ${n.success_count||0} / 请求失败 ${n.failure_count||0}">${successRate === null ? '-' : successRate.toFixed(1)+'%'}</td>
+          <td>${renderNodeSuccess(n)}</td>
           <td class="tt-mono" style="white-space:nowrap" title="${escapeHtml(formatDateTime(n.last_probed_at))}">${escapeHtml(formatDateTime(n.last_probed_at))}</td>
           <td class="node-actions">
             <button class="btn btn-sm" onclick="probeNode('${escapeAttrJs(n.tag)}')">探测</button>
@@ -5438,12 +5456,21 @@
       }
     }
 
+    function nodeModalImportMode() {
+      return Boolean(document.getElementById('nodeModeImportBtn')?.classList.contains('active'));
+    }
+
     function setNodeModalMode(mode) {
       const isImport = mode === 'import';
-      document.getElementById('nodeSingleForm').style.display = isImport ? 'none' : 'block';
-      document.getElementById('nodeImportForm').style.display = isImport ? 'block' : 'none';
+      document.getElementById('nodeSingleFields').style.display = isImport ? 'none' : 'block';
+      document.getElementById('nodeImportFields').style.display = isImport ? 'block' : 'none';
+      // 隐藏字段仍会参与原生表单校验，用 disabled 让非当前模式的必填项退出校验。
+      document.getElementById('nodeUri').disabled = isImport;
+      document.getElementById('nodeImportContent').disabled = !isImport;
       document.getElementById('nodeModeSingleBtn').classList.toggle('active', !isImport);
       document.getElementById('nodeModeImportBtn').classList.toggle('active', isImport);
+      const submitBtn = document.getElementById('nodeSubmitBtn');
+      if (submitBtn) submitBtn.textContent = isImport ? '导入并重载' : '保存';
       updateNodeProjectSection();
     }
 
@@ -5454,15 +5481,24 @@
     function updateNodeProjectSection() {
       const section = document.getElementById('nodeProjectSection');
       if (!section) return;
-      const singleMode = !document.getElementById('nodeModeImportBtn')?.classList.contains('active');
-      const show = !isEditMode && singleMode;
+      // 共享节点才谈得上项目范围：编辑项目本地节点时隐藏该区域。
+      const show = isEditMode ? editingNodeShared : true;
       section.style.display = show ? 'block' : 'none';
-      if (show) renderNodeProjectPicker();
+      if (!show) return;
+      let selected;
+      if (isEditMode) {
+        selected = editingNodeProjectIDs;
+      } else {
+        // 切换“单个节点/批量导入”时保留用户已勾选的项目；首次打开才使用默认值。
+        const hasGrid = document.querySelectorAll('#nodeProjectCheckboxes input[type="checkbox"]').length > 0;
+        selected = hasGrid ? selectedNodeProjectIDs() : undefined;
+      }
+      renderNodeProjectPicker(selected);
     }
 
-    // 手动添加节点时选择哪些项目可以使用它。全局视图下默认不选（必须手动选），
-    // 项目视图下默认选中当前项目，同时允许追加其他项目。
-    function renderNodeProjectPicker() {
+    // 选择哪些项目可以使用该节点。全局视图默认不选（必须手动选），项目视图默认
+    // 选中当前项目；编辑节点时传入服务端返回的现有范围。
+    function renderNodeProjectPicker(selectedIDs) {
       const grid = document.getElementById('nodeProjectCheckboxes');
       if (!grid) return;
       const projects = nodeProjectPickerProjects();
@@ -5471,10 +5507,12 @@
         updateNodeProjectSummary();
         return;
       }
+      const defaults = currentProjectID ? [currentProjectID] : [];
+      const chosen = new Set((Array.isArray(selectedIDs) ? selectedIDs : defaults).map(value => String(value)));
       grid.innerHTML = projects.map((project, index) => {
         const id = `nodeproj-${index}`;
         const name = project.name || project.id;
-        const checked = project.id === currentProjectID;
+        const checked = chosen.has(String(project.id));
         const suffix = project.id === currentProjectID ? '（当前项目）' : '';
         return `<div class="checkbox-row" title="${escapeHtml(project.id)}">
           <input type="checkbox" class="node-project-checkbox" id="${id}" value="${escapeHtml(project.id)}" onchange="updateNodeProjectSummary()" ${checked ? 'checked' : ''} />
@@ -5494,10 +5532,13 @@
         return;
       }
       const selected = selectedNodeProjectIDs().length;
-      const scopeHint = currentProjectID
-        ? '默认选中当前项目，可追加其他项目'
-        : '全局视图下必须至少选择一个项目';
-      hint.textContent = `已选 ${selected} / ${projects.length} 个项目 · ${scopeHint}；未勾选的项目不会使用该节点。`;
+      const scopeHint = isEditMode
+        ? '保存后未勾选的项目将不再使用该节点'
+        : (currentProjectID
+          ? '默认选中当前项目，可追加其他项目'
+          : '全局视图下必须至少选择一个项目');
+      const tail = isEditMode ? '。' : '；未勾选的项目不会使用该节点。';
+      hint.textContent = `已选 ${selected} / ${projects.length} 个项目 · ${scopeHint}${tail}`;
     }
 
     function selectedNodeProjectIDs() {
@@ -5521,7 +5562,10 @@
     }
 
     function showAddNodeModal() {
+      nodeModalToken++;
       isEditMode=false;
+      editingNodeProjectIDs = null;
+      editingNodeShared = false;
       document.getElementById('nodeModalTitle').textContent='添加节点';
       document.getElementById('nodeModeSwitch').style.display='flex';
       document.getElementById('nodeName').value='';
@@ -5529,33 +5573,68 @@
       document.getElementById('nodeEditName').value='';
       document.getElementById('nodeImportFile').value='';
       document.getElementById('nodeImportContent').value='';
+      document.getElementById('nodeProjectCheckboxes').innerHTML='';
       setNodeModalMode('single');
-      renderNodeProjectPicker();
       if (!projectsCache.length) {
         loadProjects()
           .then(() => {
-            if (document.getElementById('nodeModalOverlay').classList.contains('show') && !isEditMode) renderNodeProjectPicker();
+            if (document.getElementById('nodeModalOverlay').classList.contains('show') && !isEditMode) {
+              updateNodeProjectSection();
+            }
           })
           .catch(() => {});
       }
       document.getElementById('nodeModalOverlay').classList.add('show');
     }
-    function showEditNodeModal(name) { 
-      const n = configNodes.find(x=>x.name===name); if(!n) return;
-      isEditMode=true; document.getElementById('nodeModalTitle').textContent='编辑节点';
-      document.getElementById('nodeModeSwitch').style.display='none'; setNodeModalMode('single');
-      document.getElementById('nodeName').value=n.name; document.getElementById('nodeUri').value=n.uri; document.getElementById('nodeEditName').value=n.name;
+
+    // 编辑前先读取节点当前可用的项目，避免用默认值覆盖已有范围。
+    async function showEditNodeModal(name) {
+      const n = configNodes.find(x => x.name === name);
+      if (!n) return;
+      const token = ++nodeModalToken;
+      let projectIDs = [];
+      let shared = false;
+      try {
+        const response = await fetch(globalScopePath('/api/nodes/config/' + encodeURIComponent(name)));
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '加载节点项目范围失败');
+        shared = Boolean(data.shared);
+        projectIDs = Array.isArray(data.project_ids) ? data.project_ids : [];
+      } catch (error) {
+        if (token === nodeModalToken) showToast(error.message || '加载节点项目范围失败', 'error');
+        return;
+      }
+      if (token !== nodeModalToken) return;
+      isEditMode = true;
+      editingNodeShared = shared;
+      editingNodeProjectIDs = projectIDs;
+      document.getElementById('nodeProjectCheckboxes').innerHTML = '';
+      document.getElementById('nodeModalTitle').textContent = '编辑节点';
+      document.getElementById('nodeModeSwitch').style.display = 'none';
+      document.getElementById('nodeName').value = n.name;
+      document.getElementById('nodeUri').value = n.uri;
+      document.getElementById('nodeEditName').value = n.name;
+      setNodeModalMode('single');
       document.getElementById('nodeModalOverlay').classList.add('show');
     }
+
+    function handleNodeFormSubmit(event) {
+      return nodeModalImportMode() ? handleNodeImportSubmit(event) : handleNodeSubmit(event);
+    }
+
     async function handleNodeSubmit(e) {
       e.preventDefault();
-      const projectIDs = isEditMode ? [] : selectedNodeProjectIDs();
-      if (!isEditMode && nodeProjectPickerProjects().length && projectIDs.length === 0) {
+      const projects = nodeProjectPickerProjects();
+      // 编辑项目本地节点时不涉及共享范围；共享节点与新增节点都必须至少选一个项目。
+      const scopeEditable = !isEditMode || editingNodeShared;
+      const requiresProject = projects.length > 0 && scopeEditable;
+      const projectIDs = requiresProject ? selectedNodeProjectIDs() : [];
+      if (requiresProject && projectIDs.length === 0) {
         showToast('请至少选择一个项目', 'error');
         return;
       }
       const p = { name: document.getElementById('nodeName').value, uri: document.getElementById('nodeUri').value };
-      if (!isEditMode) p.project_ids = projectIDs;
+      if (requiresProject) p.project_ids = projectIDs;
       try {
         const editName = document.getElementById('nodeEditName').value;
         const url = globalScopePath(isEditMode ? '/api/nodes/config/'+encodeURIComponent(editName) : '/api/nodes/config');
@@ -5565,6 +5644,7 @@
 		if(r.ok) {
 		  document.getElementById('nodeModalOverlay').classList.remove('show');
 		  if(d.reload_error) showToast(`节点已保存，但自动重载失败：${d.reload_error}`, 'error');
+		  else if(d.scope_warning) showToast(`节点已保存，但${d.scope_warning}`, 'error');
 		  else showToast(d.message || '节点已保存并生效');
 		  await loadConfigNodes();
 		  refresh();
@@ -5698,10 +5778,11 @@
         const d = await res.json();
         document.getElementById('debugTotalCalls').textContent = d.total_calls||0;
         document.getElementById('debugTotalSuccess').textContent = d.total_success||0;
-        document.getElementById('debugSuccessRate').textContent = (d.success_rate||0).toFixed(1)+'%';
+        const cumulativeRate = d.total_calls > 0 ? Number(d.success_rate) : null;
+        document.getElementById('debugSuccessRate').textContent = cumulativeRate === null ? '—' : cumulativeRate.toFixed(1) + '%';
         window._debugNodes = d.nodes || [];
         renderDebugNodes();
-        updateDebugCharts(d.success_rate || 0);
+        updateDebugCharts(cumulativeRate);
         connectDebugTraffic();
 
       } catch(e){}
@@ -5725,12 +5806,20 @@
       const content = document.getElementById('nodeImportContent').value.trim();
       const file = document.getElementById('nodeImportFile').files[0];
       if (!content) { showToast('请输入或选择节点配置', 'error'); return; }
+      const projects = nodeProjectPickerProjects();
+      const projectIDs = selectedNodeProjectIDs();
+      if (projects.length && projectIDs.length === 0) {
+        showToast('请至少选择一个项目', 'error');
+        return;
+      }
+      const payload = {content, filename: file ? file.name : ''};
+      if (projects.length) payload.project_ids = projectIDs;
       showFullscreenLoading('导入节点中...', '正在解析配置并重载节点池');
       try {
         const response = await fetch(globalScopePath('/api/nodes/import'), {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({content, filename: file ? file.name : ''})
+          body: JSON.stringify(payload)
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || '导入失败');
@@ -5750,9 +5839,70 @@
       }
     }
 
+    // Use server metrics so custom windows, legacy mode and scheduling share one basis.
+    function nodeRecentStats(node) {
+      const metrics = node.success_metrics;
+      const count = value => Math.max(0, Math.trunc(Number(value) || 0));
+      const attempts = count(metrics ? metrics.attempts : node.recent_attempts);
+      const successes = Math.min(count(metrics ? metrics.successes : node.recent_success_count), attempts);
+      return { attempts, successes, failures: attempts - successes, basis: metrics?.basis || 'recent' };
+    }
+
     function nodeSuccessRate(node) {
-      const calls = (node.success_count || 0) + (node.failure_count || 0);
-      return calls > 0 ? (node.success_count || 0) / calls * 100 : -1;
+      const stats = nodeRecentStats(node);
+      return stats.attempts > 0 ? stats.successes / stats.attempts * 100 : -1;
+    }
+
+    function nodeSchedulerScore(node) {
+      const value = node.success_metrics?.scheduler_score;
+      return typeof value === 'number' && Number.isFinite(value) ? value : null;
+    }
+
+    function compareNodeSuccess(a, b, direction) {
+      const byScore = direction.startsWith('score_');
+      const metric = node => byScore ? nodeSchedulerScore(node) : (nodeSuccessRate(node) < 0 ? null : nodeSuccessRate(node));
+      const aValue = metric(a), bValue = metric(b);
+      // Missing observations or scores always follow measured nodes, in either direction.
+      if (aValue === null && bValue !== null) return 1;
+      if (bValue === null && aValue !== null) return -1;
+      if (aValue !== null && bValue !== null && aValue !== bValue) {
+        return direction.endsWith('asc') ? aValue - bValue : bValue - aValue;
+      }
+      return nodeRecentStats(b).attempts - nodeRecentStats(a).attempts
+        || String(a.tag || '').localeCompare(String(b.tag || ''));
+    }
+
+    function renderNodeSuccess(node) {
+      const stats = nodeRecentStats(node);
+      const metrics = node.success_metrics;
+      const rate = nodeSuccessRate(node);
+      const score = nodeSchedulerScore(node);
+      const color = rate < 0 ? 'var(--text-muted)' : rate >= 90 ? 'var(--success)' : rate >= 70 ? 'var(--warning)' : 'var(--error)';
+      const label = stats.basis === 'cumulative' ? '累计' : '近期';
+      const fewSamples = stats.attempts > 0 && stats.attempts < 8;
+      const flags = [fewSamples ? '样本少' : '', metrics?.stale ? '较久未更新' : ''].filter(Boolean);
+      const details = [
+        '统计代理连接建立结果，不包含连接后的 HTTP 状态或业务结果。',
+        stats.attempts ? `${label} ${stats.attempts} 次拨号：成功 ${stats.successes} / 失败 ${stats.failures}` : '暂无拨号记录，尚不能判断成功率。',
+        stats.basis === 'recent' ? `窗口上限：${metrics?.window_size || 64} 次拨号。` : '当前配置采用累计成功率。',
+        fewSamples ? '不足 8 次拨号，样本较少。' : '',
+        metrics?.stale ? `至少 30 分钟没有新拨号结果；历史记录按时间连续降权，有效样本数约 ${Number(metrics.effective_attempts).toFixed(1)}。` : '',
+        score !== null ? `调度分 ${score.toFixed(2)}：算法得分 × 100，不代表实际成功率。` : '',
+        metrics?.scheduling_enabled ? '调度分按当前可用节点计算；连接数、探索、协议及重试可能影响最终选点。' : '当前入口未使用最高成功率调度。',
+        node.recovering && !node.blacklisted ? '节点恢复中，最多 1 条连接；3 次成功后恢复常规容量。' : '',
+        node.max_connections > 0 ? `连接占用：${node.active_connections || 0} / ${node.max_connections}（包含正在拨号）。` : '',
+        node.dial_latency_ms > 0 ? `最近成功拨号平均耗时：${Number(node.dial_latency_ms).toFixed(0)} ms。` : '',
+        node.recent_last_at && new Date(node.recent_last_at).getFullYear() > 1 ? `最近拨号：${formatDateTime(node.recent_last_at)}` : ''
+      ].filter(Boolean).join('\n');
+      const scoreLine = metrics?.scheduling_enabled
+        ? (score !== null ? `<span class="success-metric-score">调度分 ${score.toFixed(1)}</span>` : metrics.eligible ? '调度分 — · 待积累样本' : '暂不参与调度')
+        : '';
+      return `<div class="success-metric" title="${escapeHtml(details)}" aria-label="${escapeHtml(details)}">
+        <div class="success-metric-main"><span class="success-metric-value" style="color:${color}">${rate < 0 ? '—' : rate.toFixed(1) + '%'}</span>${flags.map(flag => `<span class="success-metric-flag">${flag}</span>`).join('')}</div>
+        <div class="success-metric-bar" aria-hidden="true"><span style="width:${Math.max(0, rate)}%;background:${color}"></span></div>
+        <div class="success-metric-meta">${stats.attempts ? `${label} ${stats.successes} / ${stats.attempts} 次成功` : '暂无拨号记录'}</div>
+        ${scoreLine ? `<div class="success-metric-meta">${scoreLine}</div>` : ''}
+      </div>`;
     }
 
     function renderDebugNodes() {
@@ -5765,26 +5915,17 @@
           || [n.name, n.tag, n.port, n.region, n.country].some(value => String(value || '').toLowerCase().includes(query))
           || matchExitIP(n.ip, query))
         .slice()
-        .sort((a, b) => {
-          const aRate = nodeSuccessRate(a);
-          const bRate = nodeSuccessRate(b);
-          if (aRate < 0 && bRate < 0) return 0;
-          if (aRate < 0) return 1;
-          if (bRate < 0) return -1;
-          return direction === 'asc' ? aRate - bRate : bRate - aRate;
-        });
+        .sort((a, b) => compareNodeSuccess(a, b, direction));
       const paging = paginateTableItems('debugNodes', filteredNodes);
       const nodes = paging.items;
       tb.innerHTML = nodes.map(n => {
-        const rate = nodeSuccessRate(n);
-        const rateText = rate < 0 ? '-' : rate.toFixed(1) + '%';
         const tl = (n.timeline||[]).map(t => `<div class="tl-dot ${t.success?'success':'error'}" title="${t.success ? t.latency_ms+'ms' : escapeHtml(t.error || '失败')}"></div>`).join('');
         return `<tr>
           <td><strong class="cell-trunc" style="display:inline-block;vertical-align:bottom" title="${escapeHtml(n.name)}">${escapeHtml(n.name)}</strong><br><span class="cell-trunc" style="display:inline-block;vertical-align:bottom;font-size:11px;color:var(--text-muted)" title="${escapeHtml(n.tag)}">${escapeHtml(n.tag)}</span></td>
           <td class="tt-mono">${escapeHtml(formatRegion(n))}</td>
           <td class="tt-mono">${escapeHtml(n.ip || '-')}</td>
-          <td class="tt-mono" style="color:${rate < 0 ? 'var(--text-muted)' : (rate >= 90 ? 'var(--success)' : (rate >= 70 ? 'var(--warning)' : 'var(--error)'))}">${rateText}</td>
-          <td class="tt-mono"><span style="color:var(--success)">${n.success_count||0}</span> / <span style="color:var(--error)">${n.failure_count||0}</span></td>
+          <td>${renderNodeSuccess(n)}</td>
+          <td class="tt-mono" title="累计拨号结果"><span style="color:var(--success)">${Number(n.success_count) || 0}</span> / <span style="color:var(--error)">${Number(n.failure_count) || 0}</span></td>
           <td class="tt-mono">${n.active_connections||0}</td>
           <td><div class="timeline">${tl||'-'}</div></td>
         </tr>`;
@@ -5796,17 +5937,14 @@
       if(!successRateChartInst) successRateChartInst = initEchart('successRateChart');
       if(!failureChartInst) failureChartInst = initEchart('failureChart');
 
-      // Global Success Rate Gauge
+      // The gauge and summary card both show cumulative dial outcomes.
       let rate = globalRate;
-      if (typeof rate === 'undefined' || rate === null || isNaN(rate)) {
-         if (window._debugNodes && window._debugNodes.length > 0) {
-           let suc = 0, fail = 0;
-           window._debugNodes.forEach(n => { suc += (n.success_count||0); fail += (n.failure_count||0); });
-           rate = (suc+fail) > 0 ? (suc / (suc+fail)) * 100 : 0;
-         } else {
-           rate = 0;
-         }
+      if (typeof rate === 'undefined') {
+        let successes = 0, failures = 0;
+        (window._debugNodes || []).forEach(n => { successes += Number(n.success_count) || 0; failures += Number(n.failure_count) || 0; });
+        rate = successes + failures > 0 ? successes / (successes + failures) * 100 : null;
       }
+      const hasData = typeof rate === 'number' && Number.isFinite(rate);
 
       successRateChartInst && successRateChartInst.setOption({
         backgroundColor: 'transparent',
@@ -5816,13 +5954,13 @@
           center: ['50%', '75%'], radius: '90%',
           min: 0, max: 100, splitNumber: 10,
           axisLine: { lineStyle: { width: 12, color: [ [0.7, '#ef4444'], [0.9, '#f59e0b'], [1, '#10b981'] ] } },
-          pointer: { icon: 'path://M12.8,0.7l12,40.1H0.7L12.8,0.7z', length: '12%', width: 10, offsetCenter: [0, '-60%'], itemStyle: { color: 'auto' } },
+          pointer: { show: hasData, icon: 'path://M12.8,0.7l12,40.1H0.7L12.8,0.7z', length: '12%', width: 10, offsetCenter: [0, '-60%'], itemStyle: { color: 'auto' } },
           axisTick: { length: 12, lineStyle: { color: 'auto', width: 2 } },
           splitLine: { length: 20, lineStyle: { color: 'auto', width: 3 } },
           axisLabel: { color: getCssVar('--text-muted'), fontSize: 10, distance: -50 },
           title: { offsetCenter: [0, '-20%'], fontSize: 14, color: getCssVar('--text-muted') },
-          detail: { fontSize: 36, offsetCenter: [0, '0%'], valueAnimation: true, formatter: function (value) { return Math.round(value) + '%'; }, color: 'auto' },
-          data: [{ value: rate, name: 'Success Rate' }]
+          detail: { fontSize: 36, offsetCenter: [0, '0%'], valueAnimation: true, formatter: function (value) { return hasData ? value.toFixed(1) + '%' : '—'; }, color: 'auto' },
+          data: [{ value: hasData ? rate : 0, name: hasData ? '累计拨号成功率' : '暂无拨号记录' }]
         }]
       });
 

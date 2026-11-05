@@ -121,6 +121,27 @@ type PoolConfig struct {
 	// For pools with multiple members, each retry picks a different member when possible.
 	// For single-member pools (e.g. per-node multi-port pools), retries dial the same member.
 	RetryAttempts int `yaml:"retry_attempts,omitempty"`
+	// SuccessWindow is the number of recent dial attempts the "success" mode
+	// scores. 0 = default 64 (max 64); -1 = legacy cumulative counters.
+	SuccessWindow int `yaml:"success_window,omitempty"`
+	// SuccessPriorStrength is the pseudo-count that pulls a small sample toward
+	// the pool mean, so one lucky dial cannot outrank hundreds of good ones.
+	// 0 = default 8; -1 = no smoothing.
+	SuccessPriorStrength int `yaml:"success_prior_strength,omitempty"`
+	// SuccessExploreEvery diverts one dial out of N to the node whose window is
+	// the stalest; cold and recovered nodes have a bounded warm-up budget.
+	// 0 = default 50; -1 = never explore.
+	SuccessExploreEvery int `yaml:"success_explore_every,omitempty"`
+	// SuccessHotspotBand is the score band, in probability points, inside which
+	// load and dial latency decide, with fair rotation for equivalent nodes.
+	// 0 = default 0.03; -1 = always pick the single best node.
+	SuccessHotspotBand float64 `yaml:"success_hotspot_band,omitempty"`
+	// SuccessHalfLife controls continuous decay of each dial observation.
+	SuccessHalfLife time.Duration `yaml:"success_half_life,omitempty"`
+	// MaxConnectionsPerNode defaults to 128; -1 removes the hard limit.
+	MaxConnectionsPerNode int `yaml:"max_connections_per_node,omitempty"`
+	// NodeCapacityOverrides maps stable node IDs to connection limits.
+	NodeCapacityOverrides map[string]int `yaml:"node_capacity_overrides,omitempty"`
 }
 
 // RetryEnabledOrDefault reports whether retry is enabled (default true).
