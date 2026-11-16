@@ -386,6 +386,7 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 			return nil, err
 		}
 		member := lease.member
+		traffic := member.entry.TrafficCounter()
 		started := time.Now()
 		conn, dialErr := member.outbound.DialContext(ctx, network, destination)
 		if dialErr != nil {
@@ -416,7 +417,7 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 			p.logger.Info("通过 ", member.tag, " 拨号成功，共尝试 ", attempt, " 次")
 		}
 		p.recordSuccess(member, time.Since(started), lease)
-		return &trackedConn{Conn: conn, release: lease.release}, nil
+		return &trackedConn{Conn: conn, release: lease.release, traffic: traffic}, nil
 	}
 	if lastErr == nil {
 		lastErr = E.New("没有可用的健康代理")
@@ -443,6 +444,7 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 			return nil, err
 		}
 		member := lease.member
+		traffic := member.entry.TrafficCounter()
 		started := time.Now()
 		conn, listenErr := member.outbound.ListenPacket(ctx, destination)
 		if listenErr != nil {
@@ -470,7 +472,7 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 			p.logger.Info("通过 ", member.tag, " 监听数据包成功，共尝试 ", attempt, " 次")
 		}
 		p.recordSuccess(member, time.Since(started), lease)
-		return &trackedPacketConn{PacketConn: conn, release: lease.release}, nil
+		return &trackedPacketConn{PacketConn: conn, release: lease.release, traffic: traffic}, nil
 	}
 	if lastErr == nil {
 		lastErr = E.New("没有可用的健康代理")
@@ -1521,30 +1523,6 @@ func (p *poolOutbound) makeBlacklistByTagFunc(tag string) func(time.Duration) {
 	return func(duration time.Duration) {
 		p.sharedStates.blacklist(tag, duration)
 	}
-}
-
-type trackedConn struct {
-	net.Conn
-	once    sync.Once
-	release func()
-}
-
-func (c *trackedConn) Close() error {
-	err := c.Conn.Close()
-	c.once.Do(c.release)
-	return err
-}
-
-type trackedPacketConn struct {
-	net.PacketConn
-	once    sync.Once
-	release func()
-}
-
-func (c *trackedPacketConn) Close() error {
-	err := c.PacketConn.Close()
-	c.once.Do(c.release)
-	return err
 }
 
 func (p *poolOutbound) getCandidateBuffer() []*memberState {

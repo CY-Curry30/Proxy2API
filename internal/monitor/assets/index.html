@@ -26,6 +26,11 @@
       --warning-bg: rgba(245, 158, 11, 0.1);
       --error: #ef4444;
       --error-bg: rgba(239, 68, 68, 0.1);
+      --latency-green: #22c55e;
+      --latency-blue: #3b82f6;
+      --latency-yellow: #facc15;
+      --latency-orange: #fb923c;
+      --latency-red: #ef4444;
       --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       --font-mono: "JetBrains Mono", "Fira Code", Consolas, monospace;
       --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -42,6 +47,11 @@
       --text-muted: #64748b;
       --primary: #2563eb;
       --primary-hover: #1d4ed8;
+      --latency-green: #15803d;
+      --latency-blue: #2563eb;
+      --latency-yellow: #ca8a04;
+      --latency-orange: #ea580c;
+      --latency-red: #dc2626;
       --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
       --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
     }
@@ -388,10 +398,33 @@
     }
     tr:hover { background: rgba(100,100,100,0.02); }
 
-    /* 操作列按钮保持一行。节点表列很多，允许换行会让「探测/Trace/指定/拉黑/小黑屋」
-       逐行堆叠（窄屏时行高从 58px 涨到 167px），也会把其它列压到只剩一个字宽。
-       保持一行后表格会按自身最小宽度在 .table-container 内横向滚动。 */
-    .node-actions { white-space: nowrap; }
+    .node-actions, .node-actions-header {
+      position: sticky; right: 0; z-index: 1; width: 1%; padding: 12px;
+      white-space: nowrap; background: var(--bg-panel);
+      box-shadow: -6px 0 10px -8px rgba(0, 0, 0, 0.35);
+    }
+    .node-actions-header { z-index: 2; background: color-mix(in srgb, var(--bg-panel) 95%, var(--text-muted)); }
+    tr:hover .node-actions { background: color-mix(in srgb, var(--bg-panel) 96%, var(--bg-hover)); }
+    .node-action-buttons { display: flex; align-items: center; gap: 6px; }
+    .node-action-buttons .btn { min-height: 28px; justify-content: center; }
+    .node-more-trigger[aria-expanded="true"] { border-color: var(--primary); color: var(--primary); }
+    .node-more-trigger:focus-visible, .node-actions-menu button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .node-actions-menu {
+      position: fixed; z-index: 900; width: 208px; max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 16px); overflow-y: auto; padding: 6px;
+      background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
+      box-shadow: var(--shadow-md);
+    }
+    .node-actions-menu[hidden] { display: none; }
+    .node-actions-menu-title { padding: 6px 10px 8px; color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-actions-menu button {
+      display: block; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; border-radius: 5px;
+      text-align: left; font: inherit; color: var(--text-main); background: transparent; cursor: pointer;
+    }
+    .node-actions-menu button:hover:not(:disabled), .node-actions-menu button:focus-visible { background: var(--bg-hover); }
+    .node-actions-menu button:disabled { opacity: 0.45; cursor: not-allowed; }
+    #blacklistPresets .btn[aria-pressed="true"] { color: var(--primary); border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, var(--bg-panel)); }
+    #blacklistDurationInput[readonly] { color: var(--warning); }
     .success-metric { min-width: 156px; display: grid; gap: 5px; }
     .success-metric-main { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
     .success-metric-value { font-family: var(--font-mono); font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -602,7 +635,9 @@
       color: var(--text-muted); font-size: 12px;
     }
     .table-pagination[hidden] { display: none; }
+    .table-pagination-info { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; }
     .table-pagination-info strong { color: var(--text-main); font-weight: 600; }
+    .table-page-input { width: 76px; min-height: 30px; padding: 4px 8px; text-align: center; }
     .table-pagination-controls { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
     .table-pagination-controls .btn { min-width: 30px; }
     .table-pagination-page.active { background: var(--primary); border-color: var(--primary); color: #fff; }
@@ -645,9 +680,12 @@
     .toast.error { border-color: var(--error); }
     @keyframes slideInX { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
-    /* Latency Bars */
-    .lat-bar { width: 40px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; display: inline-block; vertical-align: middle; margin-left: 8px; }
-    .lat-fill { height: 100%; border-radius: 2px; }
+    .node-latency { font-weight: 600; white-space: nowrap; }
+    .node-traffic, .subscription-traffic { width: 120px; min-width: 120px; max-width: 120px; }
+    .traffic-usage { white-space: nowrap; }
+    .traffic-usage-total { font-weight: 600; }
+    .traffic-usage-detail { margin-top: 3px; color: var(--text-muted); font-size: 11px; }
+    .traffic-usage-compact { display: block; width: 88px; overflow: hidden; text-overflow: ellipsis; }
     
     .timeline { display: flex; gap: 2px; }
     .tl-dot { width: 6px; height: 16px; border-radius: 2px; }
@@ -979,10 +1017,8 @@
               <div id="batchActionsButtons" style="display:none; gap:8px; align-items:center; padding-left: 12px; border-left: 1px solid var(--border);">
                 <span style="color: var(--text-muted); font-size: 12px;">已选 <strong id="selectedCount" style="color: var(--primary);">0</strong></span>
                 <button class="btn btn-sm btn-primary" onclick="batchProbeNodes()" title="批量探测选中节点">🔍 探测</button>
-                <button class="btn btn-sm btn-success" id="batchReleaseBtn" onclick="batchReleaseNodes()" title="批量解封选中节点">✅ 解封</button>
+                <button class="btn btn-sm btn-success" id="batchReleaseBtn" onclick="batchReleaseNodes()" title="解除选中节点的定时或永久拉黑">✅ 解封</button>
                 <button class="btn btn-sm" id="batchBlacklistBtn" onclick="batchBlacklistNodes()" style="background: var(--error); color: white;" title="批量拉黑选中节点">🚫 拉黑</button>
-                <button class="btn btn-sm" id="batchQuarantineBtn" onclick="batchQuarantineNodes()" style="background: var(--warning); color: #000;" title="批量关进小黑屋（手动，不参与调度）">🚪 小黑屋</button>
-                <button class="btn btn-sm" id="batchUnquarantineBtn" onclick="batchReleaseQuarantineNodes()" title="批量释放出小黑屋">🔓 出小黑屋</button>
                 <button class="btn btn-sm" onclick="clearNodeSelection()" title="取消选择">✖</button>
               </div>
               <select id="nodeStatusFilter" class="setting-input table-tool" onchange="applyNodeFilters(true)" title="状态筛选">
@@ -997,6 +1033,8 @@
                 <option value="default">默认排序</option>
                 <option value="asc">延迟从低到高</option>
                 <option value="desc">延迟从高到低</option>
+                <option value="usage_desc">使用流量从高到低</option>
+                <option value="usage_asc">使用流量从低到高</option>
                 <option value="success_desc">拨号成功率从高到低</option>
                 <option value="success_asc">拨号成功率从低到高</option>
                 <option value="score_desc">调度分从高到低</option>
@@ -1022,10 +1060,10 @@
                   <th>节点</th>
                   <th>端口</th>
                   <th>延迟</th>
-                  <th>连接</th>
+                  <th class="node-traffic" title="本程序累计使用的节点流量；悬停总量查看上传与下载明细">流量</th>
                   <th title="按实际拨号结果统计；调度分另计样本量、平滑及记录时效">拨号成功率</th>
                   <th>探测时间</th>
-                  <th>操作</th>
+                  <th class="node-actions-header">操作</th>
                 </tr>
               </thead>
               <tbody id="nodesTableBody">
@@ -1160,8 +1198,10 @@
               <option value="expires_desc">到期时间降序</option>
               <option value="refresh_asc">最后更新升序</option>
               <option value="refresh_desc">最后更新降序</option>
-              <option value="traffic_asc">已用流量升序</option>
-              <option value="traffic_desc">已用流量降序</option>
+              <option value="traffic_asc">节点流量升序</option>
+              <option value="traffic_desc">节点流量降序</option>
+              <option value="usage_asc">使用流量升序</option>
+              <option value="usage_desc">使用流量降序</option>
             </select>
             <!-- 批量操作按钮组 -->
             <div id="subscriptionBatchButtons" style="display:none; gap:8px; align-items:center; padding-left: 12px; border-left: 1px solid var(--border);">
@@ -1176,7 +1216,7 @@
           </div>
           <div class="table-container">
             <table>
-              <thead><tr><th style="width:40px;"><input type="checkbox" id="subscriptionSelectAll" onchange="toggleAllSubscriptions(this.checked)" title="全选本页 / 取消本页" /></th><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点数</th><th>流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
+              <thead><tr><th style="width:40px;"><input type="checkbox" id="subscriptionSelectAll" onchange="toggleAllSubscriptions(this.checked)" title="全选本页 / 取消本页" /></th><th>状态</th><th>订阅</th><th id="subscriptionProjectsHeader" style="display:none;">使用项目</th><th>节点数</th><th title="订阅返回的已用流量 / 总额度">节点流量</th><th class="subscription-traffic" id="subscriptionUsageHeader" title="本程序使用该订阅累计产生的流量">使用流量</th><th>到期时间</th><th>最后更新</th><th>操作</th></tr></thead>
               <tbody id="subscriptionsTableBody"></tbody>
             </table>
             <div id="subscriptionsEmptyState" class="table-empty-state">暂无订阅</div>
@@ -1264,8 +1304,11 @@
       <!-- Settings Tab -->
       <div id="settingsTab" class="tab-content">
         <div class="settings-page">
-          <div style="font-size: 20px; font-weight: 700; margin-bottom: 24px; color: var(--text-main);">系统设置</div>
           <form onsubmit="handleSettingsSave(event)">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:24px;">
+              <div style="font-size:20px; font-weight:700; color:var(--text-main);">系统设置</div>
+              <button type="submit" class="btn btn-primary" style="padding:10px 32px; font-size:14px; flex-shrink:0;">保存配置</button>
+            </div>
 
             <div class="panel" style="margin-bottom: 16px;">
               <div class="panel-header"><div class="panel-title">管理面板 (Management)</div></div>
@@ -1364,10 +1407,18 @@
               </div>
             </div>
 
-            <div style="display: flex; justify-content: flex-end; gap: 12px; padding: 8px 0 24px;">
-              <button type="submit" class="btn btn-primary" style="padding: 10px 32px; font-size: 14px;">保存配置</button>
-            </div>
           </form>
+
+          <div class="panel" style="margin-bottom:16px;">
+            <div class="panel-header">
+              <div class="panel-title">流量历史</div>
+              <button class="btn btn-danger" id="clearTrafficHistoryBtn" type="button" onclick="clearTrafficHistory()">删除流量历史数据</button>
+            </div>
+            <div style="padding:16px; color:var(--text-muted); font-size:12px; line-height:1.7;">
+              清空所有项目（含已停止项目）的日／月流量、节点累计流量和订阅使用流量，删除后从零重新累计。
+              <div>“节点流量”由订阅返回，不受本地历史清空影响。</div>
+            </div>
+          </div>
 
           <div class="panel" style="margin-bottom:16px;">
             <div class="panel-header console-log-panel-header">
@@ -1386,6 +1437,9 @@
 
     </div>
   </main>
+
+  <div id="nodeActionsMenu" class="node-actions-menu" role="menu" aria-label="节点更多操作" hidden
+    onclick="runNodeMenuAction(event)" onkeydown="handleNodeMenuKeydown(event)"></div>
 
   <!-- Modals -->
   <!-- Auth Modal -->
@@ -1515,7 +1569,7 @@
     </div>
   </div>
 
-  <!-- 拉黑节点模态框：拉黑时长可修改，默认取项目配置的 pool.blacklist_duration -->
+  <!-- 定时拉黑默认使用项目时长；永久拉黑使用项目小黑屋状态。 -->
   <div class="modal-overlay" id="blacklistModalOverlay">
     <div class="modal">
       <div class="modal-header" id="blacklistModalTitle">拉黑节点</div>
@@ -1524,15 +1578,17 @@
         <div class="form-group">
           <label for="blacklistDurationInput">拉黑时长</label>
           <input type="text" id="blacklistDurationInput" class="setting-input" placeholder="30m" autocomplete="off"
+                 aria-describedby="blacklistDurationHint" oninput="updateBlacklistPresetSelection()"
                  onkeydown="if(event.key==='Enter'){event.preventDefault();submitBlacklist();}else if(event.key==='Escape'){event.preventDefault();closeBlacklistModal();}" />
           <em style="font-size:11px;color:var(--text-muted);" id="blacklistDurationHint"></em>
         </div>
-        <div style="display:flex; flex-wrap:wrap; gap:6px;">
-          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('30m')">30 分钟</button>
-          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('1h')">1 小时</button>
-          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('6h')">6 小时</button>
-          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('24h')">24 小时</button>
-          <button type="button" class="btn btn-sm" onclick="setBlacklistPreset('168h')">7 天</button>
+        <div id="blacklistPresets" style="display:flex; flex-wrap:wrap; gap:6px;">
+          <button type="button" class="btn btn-sm" data-duration="30m" aria-pressed="false" onclick="setBlacklistPreset('30m')">30 分钟</button>
+          <button type="button" class="btn btn-sm" data-duration="1h" aria-pressed="false" onclick="setBlacklistPreset('1h')">1 小时</button>
+          <button type="button" class="btn btn-sm" data-duration="6h" aria-pressed="false" onclick="setBlacklistPreset('6h')">6 小时</button>
+          <button type="button" class="btn btn-sm" data-duration="24h" aria-pressed="false" onclick="setBlacklistPreset('24h')">24 小时</button>
+          <button type="button" class="btn btn-sm" data-duration="168h" aria-pressed="false" onclick="setBlacklistPreset('168h')">7 天</button>
+          <button type="button" class="btn btn-sm" data-duration="permanent" aria-pressed="false" onclick="setBlacklistPreset('permanent')">永久</button>
         </div>
       </div>
       <div class="modal-footer">
@@ -1833,6 +1889,8 @@
     let visibleConfigNodeNames = [];
     let selectedConfigNodeNames = new Set();
     let subscriptionsCache = [];
+    let subscriptionLoadToken = 0;
+    let nodeRefreshToken = 0;
     let stickyNodeTag = '';
     let stickyEnabled = false;
     let entryExitPortsByTag = new Map();
@@ -1913,6 +1971,14 @@
       rerenderTable(key);
     }
 
+    function submitTablePage(event, key) {
+      event.preventDefault();
+      const input = event.currentTarget.elements.page;
+      if (!input.reportValidity()) return;
+      input.blur();
+      gotoTablePage(key, input.value);
+    }
+
     function changeTablePageSize(key, value) {
       const state = tablePageStateFor(key);
       state.size = normalizeTablePageSize(value);
@@ -1945,6 +2011,9 @@
         return;
       }
       container.hidden = false;
+      const currentInput = container.querySelector('.table-page-input');
+      const editingInput = currentInput && document.activeElement === currentInput
+        && Number(currentInput.dataset.page) === paging.page ? currentInput : null;
       const pages = tablePageNumbers(paging.page, paging.totalPages);
       let pageHTML = '';
       let previous = 0;
@@ -1957,7 +2026,12 @@
         `<option value="${size}" ${size === paging.size ? 'selected' : ''}>${size}</option>`
       ).join('');
       container.innerHTML = `
-        <div class="table-pagination-info">共 <strong>${paging.total}</strong> 条 · 第 <strong>${paging.page}</strong> / ${paging.totalPages} 页（${paging.start}-${paging.end}）</div>
+        <form class="table-pagination-info" onsubmit="submitTablePage(event, '${key}')">
+          <span>共 <strong>${paging.total}</strong> 条 · 第</span>
+          <input class="setting-input table-page-input" type="number" name="page" min="1" max="${paging.totalPages}" step="1" required inputmode="numeric" value="${paging.page}" data-page="${paging.page}" aria-label="跳转页码" title="输入页码，按回车或点击跳转" />
+          <span>/ ${paging.totalPages} 页（${paging.start}-${paging.end}）</span>
+          <button type="submit" class="btn btn-sm">跳转</button>
+        </form>
         <div class="table-pagination-controls">
           <button type="button" class="btn btn-sm" title="首页" ${paging.page <= 1 ? 'disabled' : ''} onclick="gotoTablePage('${key}', 1)">«</button>
           <button type="button" class="btn btn-sm" title="上一页" ${paging.page <= 1 ? 'disabled' : ''} onclick="gotoTablePage('${key}', ${paging.page - 1})">‹</button>
@@ -1969,6 +2043,12 @@
           <select class="setting-input" aria-label="每页条数" onchange="changeTablePageSize('${key}', this.value)">${sizeOptions}</select>
           条
         </label>`;
+      // 保留自动刷新时正在输入的页码和焦点。
+      if (editingInput) {
+        editingInput.max = String(paging.totalPages);
+        container.querySelector('.table-page-input').replaceWith(editingInput);
+        editingInput.focus({preventScroll: true});
+      }
     }
 
     function showFullscreenLoading(text, subtext) {
@@ -2600,6 +2680,10 @@
     }
 
     function resetProjectView() {
+      closeNodeActionsMenu();
+      closeBlacklistModal();
+      subscriptionLoadToken++;
+      nodeRefreshToken++;
       resetAllTablePages();
       allNodesCache = [];
       selectedNodeTags.clear();
@@ -3162,6 +3246,7 @@
     }
 
     function switchTab(name) {
+      closeNodeActionsMenu();
       document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
       document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
       document.getElementById(`${name}Tab`).classList.add('active');
@@ -3196,7 +3281,12 @@
     function startAutoRefresh() {
       stopAutoRefresh();
       autoRefreshInterval = setInterval(()=> {
-        if(!document.hidden && document.getElementById('dashboardTab').classList.contains('active')) refresh();
+        if (document.hidden) return;
+        if (document.getElementById('dashboardTab').classList.contains('active')) refresh();
+        else if (document.getElementById('subscriptionsTab').classList.contains('active')
+            && (!currentProjectID || currentProject()?.status === 'running')) {
+          loadCurrentProjectSubscriptions().catch(error => console.warn('刷新订阅使用流量失败', error));
+        }
       }, dashboardRefreshMs);
     }
     // applyDashboardRefreshMs clamps and adopts a new period, restarting the
@@ -3209,16 +3299,25 @@
     }
     function stopAutoRefresh() { clearInterval(autoRefreshInterval); autoRefreshInterval = null; }
 
-    function getQualityWidth(ms) {
-      if(ms < 0) return 0; if(ms > 1000) return 100;
-      return (ms/1000)*100;
+    function getLatencyColor(ms) {
+      if (!Number.isFinite(ms) || ms <= 0) return 'var(--text-muted)';
+      if (ms <= 1000) return 'var(--latency-green)';
+      if (ms < 2000) return 'var(--latency-blue)';
+      if (ms < 5000) return 'var(--latency-yellow)';
+      if (ms < 8000) return 'var(--latency-orange)';
+      return 'var(--latency-red)';
     }
-    function getQualityColor(ms) {
-      if(ms < 0) return 'transparent';
-      if(ms < 100) return 'var(--success)';
-      if(ms < 200) return 'var(--primary)';
-      if(ms < 500) return 'var(--warning)';
-      return 'var(--error)';
+
+    function renderNodeLatency(node) {
+      const ms = node.last_latency_ms;
+      if (Number.isFinite(ms) && ms > 0) {
+        return `<span class="tt-mono node-latency" style="color:${getLatencyColor(ms)}">${ms}ms</span>`;
+      }
+      // -1 也用于未测试或被状态隐藏的读数，只有实际超时才显示为 -1。
+      const timedOut = node.initial_check_done && !node.available && !(node.last_probe_latency > 0)
+        && /timeout|timed\s*out|deadline\s+exceeded|超时/i.test(node.last_error || '');
+      const title = timedOut ? `探测超时：${node.last_error}` : '暂无有效延迟数据';
+      return `<span class="tt-mono node-latency" style="color:${timedOut ? 'var(--latency-red)' : 'var(--text-muted)'}" title="${escapeHtml(title)}">${timedOut ? '-1' : '-'}</span>`;
     }
     function formatTime(ts) {
       if(!ts || ts==='0001-01-01T00:00:00Z') return '-';
@@ -3271,11 +3370,14 @@
     }
 
     async function refresh() {
+      const scope = currentProjectID;
+      const token = ++nodeRefreshToken;
       try {
         const res = await fetch(globalScopePath('/api/nodes'));
         if (res.status === 401) { document.getElementById('loginOverlay').classList.add('show'); stopAutoRefresh(); return; }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
+        if (scope !== currentProjectID || token !== nodeRefreshToken) return;
         allNodesCache = data.nodes || [];
         pruneSelectedNodeTags();
         stickyNodeTag = data.sticky_node || '';
@@ -3911,6 +4013,34 @@
       return parseFloat((bytes / Math.pow(k, safeI)).toFixed(dm)) + ' ' + sizes[safeI];
     }
 
+    function trafficUsageTotal(usage) {
+      if (!usage || !Number.isFinite(usage.upload_bytes) || !Number.isFinite(usage.download_bytes)
+          || usage.upload_bytes < 0 || usage.download_bytes < 0) return null;
+      return usage.upload_bytes + usage.download_bytes;
+    }
+
+    function renderTrafficUsage(usage, compact = false) {
+      const total = trafficUsageTotal(usage);
+      if (total === null) return `<span class="tt-mono${compact ? ' traffic-usage traffic-usage-compact' : ''}" style="color:var(--text-muted)" title="使用流量暂不可用">-</span>`;
+      const scope = currentProjectID ? '当前项目' : '所有项目合计（含已停止项目）';
+      if (compact) {
+        const detail = `${scope}累计使用流量\n总量：${formatBytes(total)}\n↑ 上传：${formatBytes(usage.upload_bytes)}\n↓ 下载：${formatBytes(usage.download_bytes)}`;
+        return `<span class="tt-mono traffic-usage traffic-usage-total traffic-usage-compact" title="${escapeHtml(detail)}">${formatBytes(total)}</span>`;
+      }
+      return `<div class="tt-mono traffic-usage" title="${escapeHtml(scope)}累计使用流量；↑ 上传，↓ 下载">
+        <div class="traffic-usage-total">${formatBytes(total)}</div>
+        <div class="traffic-usage-detail">↑ ${formatBytes(usage.upload_bytes)} · ↓ ${formatBytes(usage.download_bytes)}</div>
+      </div>`;
+    }
+
+    function compareTrafficUsage(left, right, direction) {
+      const a = trafficUsageTotal(left), b = trafficUsageTotal(right);
+      if (a === null && b === null) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return direction * (a - b);
+    }
+
     function connectTrafficSSE() {
       const project = currentProject();
       if (!currentProjectID || !project || project.status !== 'running' || trafficSource) return;
@@ -4113,17 +4243,127 @@
           if (!Number.isFinite(bLatency)) return -1;
           return sort === 'asc' ? aLatency - bLatency : bLatency - aLatency;
         });
+      } else if (sort.startsWith('usage_')) {
+        const direction = sort.endsWith('_asc') ? 1 : -1;
+        nodes = nodes.slice().sort((a, b) => compareTrafficUsage(a.usage, b.usage, direction));
       } else if (sort.startsWith('success_') || sort.startsWith('score_')) {
         nodes = nodes.slice().sort((a, b) => compareNodeSuccess(a, b, sort));
       }
       renderNodes(nodes);
     }
 
+    let nodeActionsContext = null;
+
+    function nodeMenuActions(node) {
+      const actions = [{id: 'trace', label: 'Trace · 出口信息', title: '重新获取出口 IP / 地区', run: () => traceNode(node.tag)}];
+      if (isSharedCatalogMode()) return actions;
+      const healthy = node.initial_check_done && node.available && !node.blacklisted && !node.quarantined;
+      const fixed = stickyNodeTag === node.tag;
+      actions.push({
+        id: fixed ? 'unpin' : 'pin', label: fixed ? '取消指定出口' : '指定为粘性出口',
+        disabled: !fixed && (!healthy || !stickyEnabled),
+        title: fixed ? '恢复自动选择出口' : !stickyEnabled ? '请先启用粘性代理' : !healthy ? '节点当前不可用于调度' : '指定为粘性代理出口',
+        run: () => setStickyNode(fixed ? '' : node.tag)
+      });
+      return actions;
+    }
+
+    function closeNodeActionsMenu(restoreFocus = false) {
+      const trigger = nodeActionsContext?.trigger;
+      document.getElementById('nodeActionsMenu').hidden = true;
+      trigger?.setAttribute('aria-expanded', 'false');
+      nodeActionsContext = null;
+      if (restoreFocus && trigger?.isConnected) trigger.focus({preventScroll: true});
+    }
+
+    function syncNodeActionsMenu() {
+      if (!nodeActionsContext) return;
+      const {tag, projectID} = nodeActionsContext;
+      const trigger = Array.from(document.querySelectorAll('#nodesTableBody .node-more-trigger')).find(button => button.dataset.tag === tag);
+      const node = allNodesCache.find(item => item.tag === tag);
+      if (projectID !== currentProjectID || !node || !trigger?.getClientRects().length) {
+        closeNodeActionsMenu();
+        return;
+      }
+      nodeActionsContext.trigger = trigger;
+      trigger.setAttribute('aria-expanded', 'true');
+      const menu = document.getElementById('nodeActionsMenu');
+      const hadFocus = menu.contains(document.activeElement);
+      const focusedAction = hadFocus ? document.activeElement.dataset.nodeAction : '';
+      const name = node.name || node.tag;
+      const content = `<div class="node-actions-menu-title" title="${escapeHtml(name)}">${escapeHtml(name)}</div>`
+        + nodeMenuActions(node).map(action => `<button type="button" role="menuitem" data-node-action="${action.id}"
+            title="${escapeHtml(action.title || action.label)}" ${action.disabled ? 'disabled' : ''}>${action.label}</button>`).join('');
+      // The menu lives outside the scrolling table and survives its automatic refresh.
+      if (nodeActionsContext.content !== content) {
+        nodeActionsContext.content = content;
+        menu.innerHTML = content;
+        if (hadFocus) {
+          const buttons = Array.from(menu.querySelectorAll('button:not(:disabled)'));
+          (buttons.find(button => button.dataset.nodeAction === focusedAction) || buttons[0])?.focus({preventScroll: true});
+        }
+      }
+      menu.setAttribute('aria-label', `${name}的更多操作`);
+      const rect = trigger.getBoundingClientRect();
+      const width = document.documentElement.clientWidth, height = window.innerHeight;
+      const below = rect.bottom + 6;
+      const top = below + menu.offsetHeight <= height - 8 ? below : rect.top - menu.offsetHeight - 6;
+      menu.style.left = `${Math.max(8, Math.min(rect.right - menu.offsetWidth, width - menu.offsetWidth - 8))}px`;
+      menu.style.top = `${Math.max(8, Math.min(top, height - menu.offsetHeight - 8))}px`;
+    }
+
+    function toggleNodeActionsMenu(trigger) {
+      const tag = trigger.dataset.tag;
+      if (nodeActionsContext?.tag === tag && nodeActionsContext.projectID === currentProjectID) {
+        closeNodeActionsMenu(true);
+        return;
+      }
+      closeNodeActionsMenu();
+      nodeActionsContext = {tag, projectID: currentProjectID, trigger};
+      const menu = document.getElementById('nodeActionsMenu');
+      menu.hidden = false;
+      syncNodeActionsMenu();
+      menu.querySelector('button:not(:disabled)')?.focus({preventScroll: true});
+    }
+
+    function runNodeMenuAction(event) {
+      const button = event.target.closest('button[data-node-action]');
+      if (!button || button.disabled || !nodeActionsContext) return;
+      const {tag, projectID} = nodeActionsContext;
+      const node = allNodesCache.find(item => item.tag === tag);
+      const action = projectID === currentProjectID && node
+        ? nodeMenuActions(node).find(item => item.id === button.dataset.nodeAction) : null;
+      closeNodeActionsMenu(true);
+      if (action && !action.disabled) action.run();
+    }
+
+    function handleNodeMenuKeydown(event) {
+      if (event.key === 'Escape') { event.preventDefault(); closeNodeActionsMenu(true); return; }
+      if (event.key === 'Tab') { closeNodeActionsMenu(true); return; }
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const buttons = Array.from(event.currentTarget.querySelectorAll('button:not(:disabled)'));
+      const current = buttons.indexOf(document.activeElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+        : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    }
+
+    document.addEventListener('pointerdown', event => {
+      if (nodeActionsContext && !document.getElementById('nodeActionsMenu').contains(event.target)
+          && !nodeActionsContext.trigger.contains(event.target)) closeNodeActionsMenu();
+    });
+    document.addEventListener('scroll', event => {
+      if (nodeActionsContext && !document.getElementById('nodeActionsMenu').contains(event.target)) closeNodeActionsMenu();
+    }, true);
+    window.addEventListener('resize', () => closeNodeActionsMenu());
+
     function renderNodes(nodes) {
       const tbody = document.getElementById('nodesTableBody');
       const paging = paginateTableItems('dashboardNodes', nodes);
       const visible = paging.items;
       if (!nodes.length) {
+        closeNodeActionsMenu();
         tbody.innerHTML = '';
         document.getElementById('emptyState').style.display='block';
         renderTablePager('nodesPagination', 'dashboardNodes', paging);
@@ -4132,9 +4372,6 @@
       }
       document.getElementById('emptyState').style.display='none';
       tbody.innerHTML = visible.map(n => {
-        const measuredMs = Number.isFinite(n.last_latency_ms) ? n.last_latency_ms : -1;
-        const currentHealthy = n.initial_check_done && n.available && !n.blacklisted;
-        const ms = measuredMs;
         const entryPortBadges = (entryExitPortsByTag.get(n.tag) || [])
           .map(port => `<span class="entry-port-badge" title="入口 ${escapeHtml(port)} 当前出口">${escapeHtml(port)}</span>`)
           .join('');
@@ -4142,7 +4379,7 @@
         if (n.quarantined) {
           badge = 'badge-warning';
           statusText = '小黑屋';
-          statusTitle = '已手动关进小黑屋，不参与调度；只能手动释放';
+          statusTitle = '已永久拉黑，不参与调度；点击“解封”恢复';
           if (n.last_error) statusTitle += `\n最近探测：${n.last_error}`;
         } else if (n.blacklisted) {
           badge = 'badge-error';
@@ -4197,33 +4434,26 @@
             <div class="cell-trunc" style="font-size: 11px; color: var(--text-muted)" title="${escapeHtml(n.tag)}">${escapeHtml(n.tag)}</div>
           </td>
           <td class="tt-mono">${n.port || '-'}</td>
-          <td>
-            <div style="display:flex; align-items:center;">
-              <span class="tt-mono" style="width:40px">${ms>=0 ? ms+'ms' : '-'}</span>
-              <div class="lat-bar"><div class="lat-fill" style="width:${getQualityWidth(ms)}%; background:${getQualityColor(ms)}"></div></div>
-            </div>
-          </td>
-          <td class="tt-mono">${n.active_connections||0}</td>
+          <td>${renderNodeLatency(n)}</td>
+          <td class="node-traffic">${renderTrafficUsage(n.usage, true)}</td>
           <td>${renderNodeSuccess(n)}</td>
           <td class="tt-mono" style="white-space:nowrap" title="${escapeHtml(formatDateTime(n.last_probed_at))}">${escapeHtml(formatDateTime(n.last_probed_at))}</td>
           <td class="node-actions">
-            <button class="btn btn-sm" onclick="probeNode('${escapeAttrJs(n.tag)}')">探测</button>
-            <button class="btn btn-sm" onclick="traceNode('${escapeAttrJs(n.tag)}')" title="只重新获取出口 IP / 地区，不改动状态与延迟">Trace</button>
-            ${stickyNodeTag === n.tag
-              ? `<button class="btn btn-sm btn-primary" onclick="setStickyNode('')">取消指定</button>`
-              : `<button class="btn btn-sm" onclick="setStickyNode('${escapeAttrJs(n.tag)}')" ${currentHealthy && stickyEnabled ? '' : 'disabled'} title="${stickyEnabled ? '指定为粘性代理出口' : '请先启用粘性代理'}">指定</button>`}
-            ${n.blacklisted ? `<button class="btn btn-sm btn-primary" onclick="releaseNode('${escapeAttrJs(n.tag)}')">解封</button>` : `<button class="btn btn-sm btn-danger" onclick="blacklistNode('${escapeAttrJs(n.tag)}')">拉黑</button>`}
-            ${n.quarantined
-              ? `<button class="btn btn-sm btn-success" onclick="releaseQuarantineNode('${escapeAttrJs(n.tag)}')" title="手动释放出小黑屋">出小黑屋</button>`
-              : `<button class="btn btn-sm" style="background: var(--warning); color: #000;" onclick="quarantineNode('${escapeAttrJs(n.tag)}')" title="手动关进小黑屋，不参与调度">小黑屋</button>`}
+            <div class="node-action-buttons">
+              <button type="button" class="btn btn-sm" onclick="probeNode('${escapeAttrJs(n.tag)}')">探测</button>
+              ${isSharedCatalogMode() ? '' : (n.blacklisted || n.quarantined)
+                ? `<button type="button" class="btn btn-sm btn-primary" onclick="releaseNode('${escapeAttrJs(n.tag)}')" title="解除定时或永久拉黑">解封</button>`
+                : `<button type="button" class="btn btn-sm btn-danger" onclick="blacklistNode('${escapeAttrJs(n.tag)}')">拉黑</button>`}
+              <button type="button" class="btn btn-sm node-more-trigger" data-tag="${escapeHtml(n.tag)}"
+                aria-haspopup="menu" aria-expanded="false" aria-controls="nodeActionsMenu" aria-label="${escapeHtml(nodeDisplayName)}的更多操作"
+                onclick="toggleNodeActionsMenu(this)">更多 <span aria-hidden="true">▾</span></button>
+            </div>
           </td>
         </tr>`;
       }).join('');
-      if (isSharedCatalogMode()) {
-        tbody.querySelectorAll('button[onclick^="setStickyNode"], button[onclick^="releaseNode"], button[onclick^="blacklistNode"], button[onclick^="quarantineNode"], button[onclick^="releaseQuarantineNode"]').forEach(button => button.remove());
-      }
       renderBatchSelectionState();
       renderTablePager('nodesPagination', 'dashboardNodes', paging);
+      syncNodeActionsMenu();
     }
 
     async function probeNode(tag) {
@@ -4295,18 +4525,25 @@
     async function releaseNode(tag) {
       try {
         const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/release', {method:'POST'});
-        showToast('已解封'); refresh();
-      } catch(e) { }
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || data.error) throw new Error(data.error || '解封失败');
+        showToast('已解封');
+      } catch (error) {
+        showToast(error.message || '解封失败', 'error');
+      } finally {
+        refresh();
+      }
     }
 
     // Resolve configured pool.blacklist_duration (cache → /api/settings → 30m fallback).
     async function getBlacklistDuration() {
       if (cachedBlacklistDuration) return cachedBlacklistDuration;
+      const projectID = currentProjectID;
       try {
         const r = await fetch('/api/settings');
         const d = await r.json();
         const dur = ((d.pool && d.pool.blacklist_duration) || '30m').trim();
-        cachedBlacklistDuration = dur;
+        if (projectID === currentProjectID) cachedBlacklistDuration = dur;
         return dur;
       } catch (e) {
         return '30m';
@@ -4331,12 +4568,19 @@
 
     // 待拉黑节点：由单个 / 批量入口写入，拉黑时长在模态框中确认（默认取项目配置值）。
     let pendingBlacklistTags = [];
+    let pendingBlacklistProjectID = '';
+    let pendingBlacklistPermanent = false;
+    let blacklistModalToken = 0;
 
     // 打开拉黑模态框。单个节点传 [tag]，批量传选中的 tags。
     async function openBlacklistModal(tags) {
       const list = (Array.isArray(tags) ? tags : [tags]).filter(Boolean);
-      if (list.length === 0) return;
+      if (list.length === 0 || !currentProjectID) return;
+      closeBlacklistModal();
+      const token = ++blacklistModalToken;
+      const projectID = currentProjectID;
       pendingBlacklistTags = list;
+      pendingBlacklistProjectID = projectID;
 
       const title = document.getElementById('blacklistModalTitle');
       const desc = document.getElementById('blacklistModalDesc');
@@ -4348,27 +4592,48 @@
         desc.textContent = `即将拉黑选中的 ${list.length} 个节点。`;
       }
 
-      // 默认值 = 项目配置的 pool.blacklist_duration（项目页取项目设置，全局页取默认项目）。
+      // 每次打开都回到项目默认时长，永久仅由本次选择生效。
       const def = await getBlacklistDuration();
+      if (token !== blacklistModalToken || projectID !== currentProjectID) return;
       const input = document.getElementById('blacklistDurationInput');
       const hint = document.getElementById('blacklistDurationHint');
-      input.value = def;
-      hint.textContent = `默认使用项目配置的拉黑时长：${formatDurationLabel(def)}（可修改，支持 30m / 1h / 1h30m / 24h 等格式）`;
+      hint.dataset.defaultText = `默认使用项目配置的拉黑时长：${formatDurationLabel(def)}（可修改，支持 30m / 1h / 1h30m / 24h 等格式）`;
+      setBlacklistPreset(def, false);
 
       document.getElementById('blacklistModalOverlay').classList.add('show');
-      setTimeout(() => { input.focus(); input.select(); }, 0);
+      input.focus();
+      input.select();
     }
 
     function closeBlacklistModal() {
+      blacklistModalToken++;
       pendingBlacklistTags = [];
+      pendingBlacklistProjectID = '';
+      pendingBlacklistPermanent = false;
       document.getElementById('blacklistModalOverlay').classList.remove('show');
     }
 
-    function setBlacklistPreset(dur) {
+    function setBlacklistPreset(dur, focus = true) {
       const input = document.getElementById('blacklistDurationInput');
       if (!input) return;
-      input.value = dur;
-      input.focus();
+      pendingBlacklistPermanent = dur === 'permanent';
+      input.readOnly = pendingBlacklistPermanent;
+      input.value = pendingBlacklistPermanent ? '永久' : dur;
+      updateBlacklistPresetSelection();
+      if (focus) input.focus();
+    }
+
+    function updateBlacklistPresetSelection() {
+      const input = document.getElementById('blacklistDurationInput');
+      const selected = pendingBlacklistPermanent ? 'permanent' : input.value.trim();
+      document.querySelectorAll('#blacklistPresets [data-duration]').forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.duration === selected));
+      });
+      const hint = document.getElementById('blacklistDurationHint');
+      hint.textContent = pendingBlacklistPermanent
+        ? '永久拉黑会将节点关进小黑屋，不自动到期，重启后仍保留。点击节点的“解封”即可恢复。'
+        : hint.dataset.defaultText || '';
+      document.getElementById('blacklistSubmitBtn').textContent = pendingBlacklistPermanent ? '确定永久拉黑' : '确定拉黑';
     }
 
     // 校验 Go time.Duration 风格字符串（如 "30m"、"1h30m"、"1.5h"）。
@@ -4381,71 +4646,58 @@
     async function submitBlacklist() {
       const tags = pendingBlacklistTags.slice();
       if (tags.length === 0) return;
+      const btn = document.getElementById('blacklistSubmitBtn');
+      if (btn.disabled) return;
+      if (!currentProjectID || pendingBlacklistProjectID !== currentProjectID) {
+        closeBlacklistModal();
+        showToast('项目已切换，请重新选择要拉黑的节点', 'error');
+        return;
+      }
 
       const input = document.getElementById('blacklistDurationInput');
       const duration = String(input.value || '').trim();
-      if (!isValidDurationString(duration)) {
+      const permanent = pendingBlacklistPermanent;
+      if (!permanent && !isValidDurationString(duration)) {
         showToast('拉黑时长格式无效，示例：30m、1h、24h', 'error');
         input.focus();
         return;
       }
 
-      const btn = document.getElementById('blacklistSubmitBtn');
-      if (btn) btn.disabled = true;
+      const token = blacklistModalToken;
+      const action = permanent ? 'quarantine' : 'blacklist';
+      btn.disabled = true;
       try {
         if (tags.length === 1) {
-          const r = await fetch('/api/nodes/'+encodeURIComponent(tags[0])+'/blacklist', {
+          const r = await fetch('/api/nodes/'+encodeURIComponent(tags[0])+'/'+action, {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({duration})
+            ...(permanent ? {} : {headers: {'Content-Type': 'application/json'}, body: JSON.stringify({duration})})
           });
           const d = await r.json().catch(() => ({}));
           if (!r.ok || d.error) throw new Error(d.error || '拉黑失败');
-          showToast('已拉黑 ' + formatDurationLabel(d.duration || duration));
+          showToast(permanent ? '已永久拉黑，可点击“解封”恢复' : '已拉黑 ' + formatDurationLabel(d.duration || duration));
         } else {
           const r = await fetch('/api/nodes/batch', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({action: 'blacklist', tags, duration})
+            body: JSON.stringify({action, tags, ...(permanent ? {} : {duration})})
           });
           const d = await r.json().catch(() => ({}));
           if (!r.ok || d.error) throw new Error(d.error || '批量拉黑失败');
-          showToast(d.message || '批量拉黑完成');
-          clearNodeSelection();
+          const failed = Number(d.failed) || 0;
+          showToast(d.message || (permanent ? '批量永久拉黑完成' : '批量拉黑完成'), failed > 0 ? 'error' : 'success');
+          if (token === blacklistModalToken) clearNodeSelection();
         }
-        closeBlacklistModal();
+        if (token === blacklistModalToken) closeBlacklistModal();
         refresh();
       } catch (e) {
         showToast(e.message || '拉黑失败', 'error');
       } finally {
-        if (btn) btn.disabled = false;
+        btn.disabled = false;
       }
     }
 
     async function blacklistNode(tag) {
       await openBlacklistModal([tag]);
-    }
-
-    // 小黑屋：与拉黑完全独立的手动状态，只存在于当前项目，且不会自动解除。
-    async function quarantineNode(tag) {
-      if (!confirm('确定把该节点关进小黑屋？\n关入后该节点不参与调度，只能手动释放。')) return;
-      try {
-        const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/quarantine', {method:'POST'});
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok || d.error) { showToast(d.error || '关入小黑屋失败', 'error'); return; }
-        showToast('已关进小黑屋，需手动释放');
-        refresh();
-      } catch (e) { showToast('关入小黑屋失败', 'error'); }
-    }
-
-    async function releaseQuarantineNode(tag) {
-      try {
-        const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/unquarantine', {method:'POST'});
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok || d.error) { showToast(d.error || '释放失败', 'error'); return; }
-        showToast('已释放出小黑屋');
-        refresh();
-      } catch (e) { showToast('释放失败', 'error'); }
     }
 
     // Probe All
@@ -4873,6 +5125,7 @@
     }
 
     function clearCurrentProjectSubscriptions() {
+      subscriptionLoadToken++;
       subscriptionsCache = [];
       selectedSubscriptionURLs.clear();
       document.getElementById('subscriptionTotalCount').textContent = '0';
@@ -4884,8 +5137,11 @@
     }
 
     async function loadCurrentProjectSubscriptions() {
+      const scope = currentProjectID;
+      const token = ++subscriptionLoadToken;
       const response = await fetch(globalScopePath('/api/subscriptions'));
       const data = await response.json();
+      if (scope !== currentProjectID || token !== subscriptionLoadToken) return;
       if (!response.ok) throw new Error(data.error || '加载失败');
       applyCurrentSubscriptionPayload(data);
     }
@@ -4924,6 +5180,10 @@
       const globalView = !currentProjectID;
       const projectsHeader = document.getElementById('subscriptionProjectsHeader');
       if (projectsHeader) projectsHeader.style.display = globalView ? '' : 'none';
+      const usageHeader = document.getElementById('subscriptionUsageHeader');
+      if (usageHeader) usageHeader.title = globalView
+        ? '所有项目使用该订阅累计产生的流量，包含已停止项目'
+        : '当前项目使用该订阅累计产生的流量';
       const items = subscriptionsCache
         .map((item, index) => ({item, index}))
         .filter(({item}) => {
@@ -4938,6 +5198,9 @@
         items.sort((a, b) => {
           if (field === 'traffic') {
             return direction * ((Number(a.item.used_bytes) || 0) - (Number(b.item.used_bytes) || 0)) || a.index - b.index;
+          }
+          if (field === 'usage') {
+            return compareTrafficUsage(a.item.usage, b.item.usage, direction) || a.index - b.index;
           }
           const key = field === 'expires' ? 'expires_at' : 'last_refresh';
           const aValue = subscriptionSortTime(a.item[key]);
@@ -4991,6 +5254,7 @@
           ${globalView ? `<td><div class="cell-trunc" style="max-width:220px" title="${escapeHtml(usedByText)}">${escapeHtml(usedByText)}</div></td>` : ''}
           <td class="tt-mono">${renderSubscriptionNodeCount(item)}</td>
           <td><div class="tt-mono">${traffic}</div><div style="font-size:11px;color:var(--text-muted)">${remaining}</div></td>
+          <td class="subscription-traffic">${renderTrafficUsage(item.usage, true)}</td>
           <td class="tt-mono">${item.expires_at > 0 ? formatDateTime(item.expires_at) : '-'}</td>
           <td class="tt-mono">${formatDateTime(item.last_refresh)}</td>
           <td>
@@ -5990,6 +6254,60 @@
     }
 
     // Settings
+    function resetTrafficHistoryView() {
+      nodeRefreshToken++;
+      subscriptionLoadToken++;
+      const emptyUsage = () => ({upload_bytes: 0, download_bytes: 0, total_bytes: 0});
+      allNodesCache.forEach(node => { node.usage = emptyUsage(); });
+      subscriptionsCache.forEach(item => { item.usage = emptyUsage(); });
+      applyNodeFilters();
+      renderSubscriptions();
+      if (trafficSource) { trafficSource.close(); trafficSource = null; }
+      trafficDataUp = [];
+      trafficDataDown = [];
+      trafficTime = [];
+      lastTrafficRenderAt = 0;
+      projectTrafficData = null;
+      trafficChartInst && trafficChartInst.clear();
+      trafficCalendarChartInst && trafficCalendarChartInst.clear();
+      disconnectDebugTraffic();
+      debugTrafficUpTotal = 0;
+      debugTrafficDownTotal = 0;
+      document.getElementById('debugTotalUpload').textContent = '0 B';
+      document.getElementById('debugTotalDownload').textContent = '0 B';
+      document.getElementById('debugTotalTraffic').textContent = '0 B';
+    }
+
+    async function clearTrafficHistory() {
+      const button = document.getElementById('clearTrafficHistoryBtn');
+      if (button.disabled) return;
+      if (!confirm('确定删除所有项目的流量历史数据？\n\n将清空日／月流量、节点累计流量和订阅使用流量，包括已停止项目。此操作无法撤销，后续流量将从零重新累计。')) return;
+      button.disabled = true;
+      button.textContent = '正在清空...';
+      try {
+        const response = await nativeFetch('/api/system/traffic/history', {method: 'DELETE'});
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || '清空流量历史失败');
+        resetTrafficHistoryView();
+        showToast(data.message || '所有项目的流量历史已清空');
+      } catch (error) {
+        showToast(error.message || '清空流量历史失败', 'error');
+      } finally {
+        // Also refresh after a partial failure so cleared projects are not
+        // represented by the previous one-hour calendar cache.
+        trafficCalendarLoadToken++;
+        trafficCalendarPayload = null;
+        trafficCalendarLastLoadedAt = 0;
+        trafficCalendarLastScope = '';
+        const results = await Promise.allSettled([refresh(), loadCurrentProjectSubscriptions(), loadTrafficCalendar(true)]);
+        results.forEach(result => { if (result.status === 'rejected') console.warn('刷新流量统计失败', result.reason); });
+        if (document.getElementById('dashboardTab').classList.contains('active')) updateDashboardCharts();
+        if (document.getElementById('debugTab').classList.contains('active')) connectDebugTraffic();
+        button.disabled = false;
+        button.textContent = '删除流量历史数据';
+      }
+    }
+
     async function loadSettingsPage() {
       try {
         const response = await nativeFetch('/api/system/settings');
@@ -6345,11 +6663,6 @@
       const blacklistButton = document.getElementById('batchBlacklistBtn');
       if (releaseButton) releaseButton.style.display = allowRuntimeMutation ? '' : 'none';
       if (blacklistButton) blacklistButton.style.display = allowRuntimeMutation ? '' : 'none';
-      // 小黑屋只存在于具体项目，全局目录下不提供入口。
-      const quarantineButton = document.getElementById('batchQuarantineBtn');
-      const unquarantineButton = document.getElementById('batchUnquarantineBtn');
-      if (quarantineButton) quarantineButton.style.display = allowRuntimeMutation ? '' : 'none';
-      if (unquarantineButton) unquarantineButton.style.display = allowRuntimeMutation ? '' : 'none';
     }
 
     function toggleAllNodes(checked) {
@@ -6454,7 +6767,7 @@
       }
 
       const tags = Array.from(selectedNodeTags);
-      const confirmed = confirm(`确定要解封选中的 ${tags.length} 个节点吗？`);
+      const confirmed = confirm(`确定要解封选中的 ${tags.length} 个节点吗？\n将解除这些节点的定时和永久拉黑限制。`);
       if (!confirmed) return;
 
       showToast('开始批量解封...');
@@ -6468,7 +6781,7 @@
 
         const result = await response.json();
 
-        if (!response.ok) {
+        if (!response.ok || result.error) {
           throw new Error(result.error || '批量解封失败');
         }
 
@@ -6487,50 +6800,6 @@
         return;
       }
       await openBlacklistModal(Array.from(selectedNodeTags));
-    }
-
-    // 批量小黑屋操作：与批量拉黑/解封完全独立的两套动作。
-    async function batchSetQuarantine(quarantined) {
-      if (selectedNodeTags.size === 0) {
-        showToast(quarantined ? '请先选择要关进小黑屋的节点' : '请先选择要释放出小黑屋的节点', 'error');
-        return;
-      }
-      const tags = Array.from(selectedNodeTags);
-      const prompt = quarantined
-        ? `确定把选中的 ${tags.length} 个节点关进小黑屋吗？\n关入后这些节点不参与调度，只能手动释放。`
-        : `确定把选中的 ${tags.length} 个节点释放出小黑屋吗？`;
-      if (!confirm(prompt)) return;
-
-      showToast(quarantined ? '开始关进小黑屋...' : '开始释放...');
-
-      try {
-        const response = await fetch('/api/nodes/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: quarantined ? 'quarantine' : 'unquarantine', tags })
-        });
-
-        const result = await response.json();
-
-        if (!response.ok) {
-          throw new Error(result.error || '批量操作失败');
-        }
-
-        const failed = Number(result.failed) || 0;
-        showToast(result.message || '批量操作完成', failed > 0 ? 'error' : 'success');
-        clearNodeSelection();
-        await refresh();
-      } catch (error) {
-        showToast(error.message, 'error');
-      }
-    }
-
-    function batchQuarantineNodes() {
-      return batchSetQuarantine(true);
-    }
-
-    function batchReleaseQuarantineNodes() {
-      return batchSetQuarantine(false);
     }
 
     // ========== 订阅批量操作功能 ==========

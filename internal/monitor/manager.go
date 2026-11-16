@@ -145,6 +145,7 @@ type EntryHandle struct {
 
 type entry struct {
 	info              NodeInfo
+	usage             *state.UsageCounter
 	ip                string
 	region            string
 	country           string
@@ -208,6 +209,7 @@ type Manager struct {
 	cancel             context.CancelFunc
 	logger             Logger
 	stateStore         *state.Store
+	usage              *state.UsageTracker
 	restoredNodes      map[string]state.NodeRecord
 	recoveredCount     atomic.Int32
 	asyncMu            sync.Mutex
@@ -350,8 +352,10 @@ func NewManager(cfg Config) (*Manager, error) {
 		probeSubscriptions: make(map[string]func()),
 		stateStore:         cfg.StateStore,
 		restoredNodes:      make(map[string]state.NodeRecord),
+		usage:              state.NewUsageTracker(nil),
 	}
 	if cfg.StateStore != nil {
+		m.usage = cfg.StateStore.UsageTracker()
 		restored, err := cfg.StateStore.LoadNodes()
 		if err != nil {
 			cancel()
@@ -844,6 +848,11 @@ func parsePort(value string) uint16 {
 // Register ensures a node is tracked and returns its entry.
 func (m *Manager) Register(info NodeInfo) *EntryHandle {
 	m.mu.Lock()
+	subscriptionURL := ""
+	if info.Source == "subscription" {
+		subscriptionURL = info.SubscriptionURL
+	}
+	usage := m.usage.Counter(info.ID, subscriptionURL)
 	e, ok := m.nodes[info.Tag]
 	if !ok {
 		e = &entry{
@@ -852,6 +861,7 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 			quarantined: info.Quarantined,
 			timeline:    make([]TimelineEvent, 0, maxTimelineSize),
 			store:       m.stateStore,
+			usage:       usage,
 		}
 		if restored, found := m.restoredNodes[info.ID]; found {
 			e.restore(restored)
@@ -861,6 +871,7 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 	} else {
 		e.mu.Lock()
 		e.info = info
+		e.usage = usage
 		e.suppressed = info.Suppressed
 		e.store = m.stateStore
 		// e.quarantined is deliberately NOT re-derived from info here.
@@ -1852,6 +1863,20 @@ func (h *EntryHandle) RestoredPoolState() (consecutive int, blacklisted bool, un
 	h.ref.mu.RLock()
 	defer h.ref.mu.RUnlock()
 	return h.ref.consecutiveFails, h.ref.blacklist, h.ref.until
+}
+
+// TrafficCounter captures the attribution for a new proxy connection.
+func (h *EntryHandle) TrafficCounter() *state.UsageCounter {
+	if h == nil || h.ref == nil {
+		return nil
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return h.ref.usage
+}
+
+func (m *Manager) TrafficUsage() state.UsageTotals {
+	return m.usage.Totals()
 }
 
 // IncActive increments the active connection counter.

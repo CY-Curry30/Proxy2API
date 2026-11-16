@@ -17,12 +17,13 @@ import (
 type BackupSnapshot struct {
 	Nodes        []NodeRecord       `json:"nodes,omitempty"`
 	Traffic      []TrafficDay       `json:"traffic,omitempty"`
+	Usage        []NodeUsageRecord  `json:"usage,omitempty"`
 	Subscription *SubscriptionState `json:"subscription,omitempty"`
 }
 
 // Empty reports whether the snapshot carries nothing worth importing.
 func (s BackupSnapshot) Empty() bool {
-	return len(s.Nodes) == 0 && len(s.Traffic) == 0 && s.Subscription == nil
+	return len(s.Nodes) == 0 && len(s.Traffic) == 0 && len(s.Usage) == 0 && s.Subscription == nil
 }
 
 // ExportSnapshot reads every record from a live store, including the writes
@@ -33,6 +34,7 @@ func (s *Store) ExportSnapshot() (BackupSnapshot, error) {
 	if s == nil {
 		return snapshot, nil
 	}
+	snapshot.Usage = s.usage.Records()
 	nodes, err := s.LoadNodes()
 	if err != nil {
 		return snapshot, err
@@ -122,6 +124,11 @@ func LoadBackupSnapshot(configPath string) (BackupSnapshot, error) {
 	}
 	defer db.Close()
 	err = db.View(func(tx *bolt.Tx) error {
+		var err error
+		snapshot.Usage, err = loadNodeUsage(tx)
+		if err != nil {
+			return err
+		}
 		if bucket := tx.Bucket(bucketNodes); bucket != nil {
 			if err := bucket.ForEach(func(key, value []byte) error {
 				var record NodeRecord
@@ -253,6 +260,9 @@ func ImportBackup(configPath string, snapshot BackupSnapshot) error {
 			if err := trafficBucket.Put([]byte(day.Date), data); err != nil {
 				return err
 			}
+		}
+		if err := importNodeUsage(tx, snapshot.Usage); err != nil {
+			return err
 		}
 		if snapshot.Subscription == nil {
 			return nil

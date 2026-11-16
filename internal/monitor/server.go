@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"Proxy2API/internal/config"
+	"Proxy2API/internal/state"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -215,7 +216,10 @@ type SubscriptionInfo struct {
 	UsedBytes       int64    `json:"used_bytes"`
 	TotalBytes      int64    `json:"total_bytes"`
 	RemainingBytes  int64    `json:"remaining_bytes"`
-	ExpiresAt       int64    `json:"expires_at"`
+	// Usage is local proxy traffic in the current project/global scope. The
+	// provider's upload/download/used/total fields above remain quota metadata.
+	Usage     *state.TrafficUsage `json:"usage"`
+	ExpiresAt int64               `json:"expires_at"`
 	// BlockReason is non-empty while the traffic/expiry rule forbids enabling
 	// this subscription, even if the visible status was replaced by a transient
 	// refresh error. The panel uses it to keep the enable toggle disabled.
@@ -293,7 +297,6 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 		logBuffer:        SharedLogBuffer,
 		sessions:         make(map[string]*Session),
 		sessionTTL:       24 * time.Hour,
-		trafficHistory:   cfg.StateStore,
 		probeAllInFlight: &atomic.Bool{},
 		probeCancel:      &probeCancelState{},
 		projectProbeGate: make(map[string]*atomic.Bool),
@@ -301,6 +304,9 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 		projectConfigMap: make(map[string]*sync.RWMutex),
 		systemUsage:      systemSampler,
 		tasks:            NewTaskManager(0),
+	}
+	if cfg.StateStore != nil {
+		s.trafficHistory = cfg.StateStore
 	}
 
 	// Start session cleanup goroutine
@@ -318,6 +324,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/projects/", s.withAuth(s.handleProjectRoute))
 	mux.HandleFunc("/api/dashboard/global", s.withAuth(s.handleGlobalDashboard))
 	mux.HandleFunc("/api/system/settings", s.withAuth(s.handleSystemSettings))
+	mux.HandleFunc("/api/system/traffic/history", s.withAuth(s.handleClearTrafficHistory))
 	mux.HandleFunc("/api/system/proxy/test", s.withAuth(s.handleSystemProxyTest))
 	mux.HandleFunc("/api/system/ports", s.withAuth(s.handleSystemPorts))
 	mux.HandleFunc("/api/settings", s.withAuth(s.withDefaultProject((*Server).handleSettings)))
@@ -752,6 +759,55 @@ func (s *Server) setCurrentProjectQuarantine(tags []string, quarantined bool) (m
 		}
 	}
 	return failures, nil
+}
+
+// releaseNodes is the explicit user action for both timed and permanent bans.
+// Persist removal of permanent bans before clearing runtime restrictions; an
+// automatic blacklist expiry must continue to leave quarantine untouched.
+func (s *Server) releaseNodes(tags []string) map[string]string {
+	failures := make(map[string]string)
+	quarantineTags := make([]string, 0)
+	for _, tag := range tags {
+		if s.mgr == nil {
+			failures[tag] = "节点运行时未就绪"
+			continue
+		}
+		entry, err := s.mgr.entry(tag)
+		if err != nil {
+			failures[tag] = err.Error()
+			continue
+		}
+		entry.mu.RLock()
+		id, quarantined := entry.info.ID, entry.quarantined
+		entry.mu.RUnlock()
+		if s.hasProjectScope() {
+			s.cfgMu.RLock()
+			quarantined = quarantined || (s.cfgSrc != nil && s.cfgSrc.NodeQuarantined(id))
+			s.cfgMu.RUnlock()
+		}
+		if quarantined {
+			quarantineTags = append(quarantineTags, tag)
+		}
+	}
+	if len(quarantineTags) > 0 {
+		quarantineFailures, err := s.setCurrentProjectQuarantine(quarantineTags, false)
+		for _, tag := range quarantineTags {
+			if err != nil {
+				failures[tag] = err.Error()
+			} else if reason, failed := quarantineFailures[tag]; failed {
+				failures[tag] = reason
+			}
+		}
+	}
+	for _, tag := range tags {
+		if _, failed := failures[tag]; failed {
+			continue
+		}
+		if err := s.mgr.Release(tag); err != nil {
+			failures[tag] = err.Error()
+		}
+	}
+	return failures
 }
 
 func (s *Server) reloadCurrentProjectSources(ctx context.Context) error {
@@ -1529,13 +1585,21 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	allNodes := s.mgr.SnapshotVisible()
 	s.annotateSuccessMetrics(allNodes, time.Now())
 	totalNodes := len(allNodes)
+	nodeViews := s.snapshotNodeViews(allNodes)
+	usage, usageErr := s.trafficUsage()
+	if usageErr == nil {
+		for i := range nodeViews {
+			value := usage.Nodes[nodeViews[i].ID]
+			nodeViews[i].Usage = &value
+		}
+	}
 
 	sweepActive, sweepDone, sweepTotal, sweepOK, sweepFail := s.mgr.ProbeSweepProgress()
 	s.cfgMu.RLock()
 	stickyEnabled := s.cfgSrc != nil && s.cfgSrc.Sticky.Enabled
 	s.cfgMu.RUnlock()
 	payload := map[string]any{
-		"nodes":          s.snapshotNodeViews(allNodes),
+		"nodes":          nodeViews,
 		"total_nodes":    totalNodes,
 		"sticky_node":    s.mgr.StickyNode(),
 		"sticky_enabled": stickyEnabled,
@@ -1547,6 +1611,9 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 			"available": sweepOK,
 			"failed":    sweepFail,
 		},
+	}
+	if usageErr != nil {
+		payload["usage_error"] = usageErr.Error()
 	}
 	writeJSON(w, payload)
 }
@@ -1865,12 +1932,12 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 		}, (*Server).handleNodeAction) {
 			return
 		}
-		if err := s.mgr.Release(tag); err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			writeJSON(w, map[string]any{"error": err.Error()})
+		if reason, failed := s.releaseNodes([]string{tag})[tag]; failed {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": reason})
 			return
 		}
-		writeJSON(w, map[string]any{"tag": tag, "message": "已解除拉黑"})
+		writeJSON(w, map[string]any{"tag": tag, "message": "已解封"})
 	case "blacklist":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -2393,7 +2460,7 @@ func (s *Server) handleBatchProbe(w http.ResponseWriter, r *http.Request, tags [
 	flusher.Flush()
 }
 
-// handleBatchRelease releases multiple nodes from blacklist
+// handleBatchRelease clears both timed and permanent bans for selected nodes.
 func (s *Server) handleBatchRelease(w http.ResponseWriter, r *http.Request, tags []string) {
 	if s.enqueueAsyncMutation(w, r, TaskSpec{
 		Kind:              "node.batch.release",
@@ -2410,12 +2477,11 @@ func (s *Server) handleBatchRelease(w http.ResponseWriter, r *http.Request, tags
 
 	successCount := 0
 	failedCount := 0
-	errors := make(map[string]string)
+	failures := s.releaseNodes(tags)
 
 	for _, tag := range tags {
-		if err := s.mgr.Release(tag); err != nil {
+		if _, failed := failures[tag]; failed {
 			failedCount++
-			errors[tag] = err.Error()
 		} else {
 			successCount++
 		}
@@ -2428,8 +2494,8 @@ func (s *Server) handleBatchRelease(w http.ResponseWriter, r *http.Request, tags
 		"total":   len(tags),
 	}
 
-	if len(errors) > 0 {
-		response["errors"] = errors
+	if len(failures) > 0 {
+		response["errors"] = failures
 	}
 
 	writeJSON(w, response)
@@ -2497,9 +2563,9 @@ func (s *Server) handleBatchBlacklist(w http.ResponseWriter, r *http.Request, ta
 	writeJSON(w, response)
 }
 
-// handleBatchQuarantine moves multiple nodes in or out of the current project's
-// manual quarantine ("小黑屋"). It is intentionally independent from the batch
-// blacklist/release actions so the two features can never influence each other.
+// handleBatchQuarantine changes only the current project's permanent ban state.
+// The legacy unquarantine action remains available; the unified release action
+// clears both permanent and timed bans.
 func (s *Server) handleBatchQuarantine(w http.ResponseWriter, r *http.Request, tags []string, quarantined bool) {
 	action := "quarantine"
 	verb := "关进小黑屋"
@@ -4037,7 +4103,17 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 		globalItems = append(globalItems, item)
 	}
 	sharedLock.RUnlock()
-	return map[string]any{
+	traffic, trafficErr := s.trafficUsage()
+	for _, list := range [][]SubscriptionInfo{items, globalItems} {
+		for i := range list {
+			list[i].Usage = nil
+			if trafficErr == nil {
+				value := traffic.Subscriptions[strings.TrimSpace(list[i].URL)]
+				list[i].Usage = &value
+			}
+		}
+	}
+	payload := map[string]any{
 		"items":         items,
 		"global_items":  globalItems,
 		"enabled":       enabled,
@@ -4054,6 +4130,10 @@ func (s *Server) subscriptionManagementPayload() map[string]any {
 		"last_fetch_proxy":  status.LastFetchProxy,
 		"last_fetch_failed": status.LastFetchFailed,
 	}
+	if trafficErr != nil {
+		payload["usage_error"] = trafficErr.Error()
+	}
+	return payload
 }
 
 // handleSubscriptions provides CRUD for individual URLs while preserving the
@@ -4519,7 +4599,8 @@ func (s *Server) configNodeStatusFor(node config.NodeConfig, index map[string]co
 
 type snapshotNodeView struct {
 	Snapshot
-	SubscriptionName string `json:"subscription_name,omitempty"`
+	Usage            *state.TrafficUsage `json:"usage"`
+	SubscriptionName string              `json:"subscription_name,omitempty"`
 	// Source is re-exposed here because NodeInfo hides it from JSON with
 	// `json:"-"`. The dashboard node list needs it to filter nodes by origin
 	// (subscription / nodes_file / inline), and a field declared on this struct

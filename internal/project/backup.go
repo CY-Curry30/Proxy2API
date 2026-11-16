@@ -217,6 +217,7 @@ func (r *Registry) exportProject(id string, workspace *config.Workspace, runtime
 	} else {
 		project.NodeStates = snapshot.Nodes
 		project.Traffic = snapshot.Traffic
+		project.Usage = snapshot.Usage
 		project.Subscription = snapshot.Subscription
 	}
 	return project, effective, nil
@@ -656,6 +657,7 @@ func importBackupProjectState(configPath string, project monitor.BackupProject, 
 	snapshot := state.BackupSnapshot{
 		Nodes:        project.NodeStates,
 		Traffic:      project.Traffic,
+		Usage:        project.Usage,
 		Subscription: project.Subscription,
 	}
 	if snapshot.Empty() {

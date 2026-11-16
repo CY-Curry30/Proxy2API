@@ -135,19 +135,22 @@ func collectTrafficStream(ctx context.Context, trafficAPI string, store *state.S
 
 	decoder := json.NewDecoder(response.Body)
 	var previous time.Time
+	var previousGeneration uint64
 	for {
 		var sample trafficSample
 		if err := decoder.Decode(&sample); err != nil {
 			return err
 		}
 		now := time.Now()
-		if !previous.IsZero() {
+		generation := store.TrafficGeneration()
+		if !previous.IsZero() && generation == previousGeneration {
 			elapsed := now.Sub(previous).Seconds()
 			if elapsed > 0 && elapsed < 10 {
-				store.AddTraffic(now, trafficBytesForInterval(sample.UploadRate, elapsed), trafficBytesForInterval(sample.DownloadRate, elapsed))
+				store.AddTrafficForGeneration(now, trafficBytesForInterval(sample.UploadRate, elapsed), trafficBytesForInterval(sample.DownloadRate, elapsed), generation)
 			}
 		}
 		previous = now
+		previousGeneration = generation
 	}
 }
 

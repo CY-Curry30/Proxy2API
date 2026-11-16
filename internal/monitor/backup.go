@@ -79,6 +79,7 @@ type BackupProject struct {
 	SubscriptionCache string                   `json:"subscription_cache,omitempty"`
 	NodeStates        []state.NodeRecord       `json:"node_states,omitempty"`
 	Traffic           []state.TrafficDay       `json:"traffic,omitempty"`
+	Usage             []state.NodeUsageRecord  `json:"usage,omitempty"`
 	Subscription      *state.SubscriptionState `json:"subscription,omitempty"`
 }
 

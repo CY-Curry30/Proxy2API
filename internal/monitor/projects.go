@@ -182,6 +182,7 @@ type ProjectHealthSummary struct {
 
 type TrafficHistory interface {
 	LoadTrafficMonth(month string) (state.TrafficMonth, error)
+	LoadTrafficUsage() (state.UsageTotals, error)
 }
 
 type SystemSettings struct {
@@ -260,6 +261,7 @@ type ProjectController interface {
 	NodeProjectIDs(nodeID string) ([]string, error)
 	SystemSettings() SystemSettings
 	UpdateSystemSettings(ctx context.Context, settings SystemSettings) error
+	ClearTrafficHistory(ctx context.Context) error
 	// ExportBackup collects one project (all=false) or the whole workspace
 	// (all=true) into a portable backup document.
 	ExportBackup(ctx context.Context, projectID string, all bool) (BackupBundle, error)

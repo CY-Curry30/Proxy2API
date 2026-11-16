@@ -161,6 +161,7 @@ type Store struct {
 	pendingNodes   map[string]NodeRecord
 	pendingSub     *SubscriptionState
 	pendingTraffic map[string]TrafficDay
+	usage          *UsageTracker
 	wake           chan struct{}
 	stop           chan struct{}
 	done           chan struct{}
@@ -194,7 +195,12 @@ func Open(configPath string) (*Store, error) {
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
 	}
+	s.usage = NewUsageTracker(s.signal)
 	if err := s.initialize(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.loadUsage(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -273,6 +279,9 @@ func (s *Store) initialize() error {
 			return err
 		}
 		if _, err = tx.CreateBucketIfNotExists(bucketTraffic); err != nil {
+			return err
+		}
+		if _, err = tx.CreateBucketIfNotExists(bucketNodeUsage); err != nil {
 			return err
 		}
 		if existing := meta.Get(keyVersion); existing != nil {
@@ -478,6 +487,15 @@ func (s *Store) LoadSubscriptionState() (SubscriptionState, bool, error) {
 
 // AddTraffic queues one measured traffic interval for the local calendar day.
 func (s *Store) AddTraffic(at time.Time, uploadBytes, downloadBytes int64) {
+	if s == nil {
+		return
+	}
+	s.AddTrafficForGeneration(at, uploadBytes, downloadBytes, s.TrafficGeneration())
+}
+
+// AddTrafficForGeneration drops a collector sample if history was cleared
+// while that sample was being measured or waiting to enter the store.
+func (s *Store) AddTrafficForGeneration(at time.Time, uploadBytes, downloadBytes int64, generation uint64) {
 	if s == nil || (uploadBytes <= 0 && downloadBytes <= 0) {
 		return
 	}
@@ -492,6 +510,10 @@ func (s *Store) AddTraffic(at time.Time, uploadBytes, downloadBytes int64) {
 	}
 	date := at.In(time.Local).Format("2006-01-02")
 	s.mu.Lock()
+	if generation != s.TrafficGeneration() {
+		s.mu.Unlock()
+		return
+	}
 	record := s.pendingTraffic[date]
 	record.Date = date
 	record.UploadBytes += uploadBytes
@@ -771,7 +793,8 @@ func (s *Store) Flush() error {
 	traffic := s.pendingTraffic
 	s.pendingTraffic = make(map[string]TrafficDay)
 	s.mu.Unlock()
-	if len(nodes) == 0 && subscription == nil && len(traffic) == 0 {
+	usage := s.pendingUsage()
+	if len(nodes) == 0 && subscription == nil && len(traffic) == 0 && len(usage) == 0 {
 		return nil
 	}
 	err := s.db.Update(func(tx *bolt.Tx) error {
@@ -810,6 +833,16 @@ func (s *Store) Flush() error {
 				}
 			}
 		}
+		usageBucket := tx.Bucket(bucketNodeUsage)
+		for _, write := range usage {
+			data, err := json.Marshal(write.record)
+			if err != nil {
+				return err
+			}
+			if err := usageBucket.Put([]byte(write.record.key()), data); err != nil {
+				return err
+			}
+		}
 		trafficBucket := tx.Bucket(bucketTraffic)
 		for date, increment := range traffic {
 			current := TrafficDay{Date: date}
@@ -835,7 +868,11 @@ func (s *Store) Flush() error {
 		}
 		return nil
 	})
-	if err != nil {
+	if err == nil {
+		for _, write := range usage {
+			write.counter.flushed = write.record.TrafficUsage
+		}
+	} else {
 		s.mu.Lock()
 		for id, record := range nodes {
 			if current, ok := s.pendingNodes[id]; !ok || current.UpdatedAt.Before(record.UpdatedAt) {
