@@ -642,6 +642,7 @@
     .table-pagination-controls .btn { min-width: 30px; }
     .table-pagination-page.active { background: var(--primary); border-color: var(--primary); color: #fff; }
     .table-pagination-ellipsis { padding: 0 2px; color: var(--text-muted); }
+    .table-page-jump { display: flex; align-items: center; gap: 6px; margin: 0 0 0 8px; white-space: nowrap; }
     .table-page-size { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
     .table-page-size .setting-input { width: auto; min-width: 68px; min-height: 30px; padding: 4px 8px; }
     .project-schedule-table { min-width: 900px; }
@@ -2026,18 +2027,20 @@
         `<option value="${size}" ${size === paging.size ? 'selected' : ''}>${size}</option>`
       ).join('');
       container.innerHTML = `
-        <form class="table-pagination-info" onsubmit="submitTablePage(event, '${key}')">
-          <span>共 <strong>${paging.total}</strong> 条 · 第</span>
-          <input class="setting-input table-page-input" type="number" name="page" min="1" max="${paging.totalPages}" step="1" required inputmode="numeric" value="${paging.page}" data-page="${paging.page}" aria-label="跳转页码" title="输入页码，按回车或点击跳转" />
-          <span>/ ${paging.totalPages} 页（${paging.start}-${paging.end}）</span>
-          <button type="submit" class="btn btn-sm">跳转</button>
-        </form>
+        <div class="table-pagination-info">
+          <span>共 <strong>${paging.total}</strong> 条 · 第 <strong>${paging.page}</strong> / ${paging.totalPages} 页（${paging.start}-${paging.end}）</span>
+        </div>
         <div class="table-pagination-controls">
           <button type="button" class="btn btn-sm" title="首页" ${paging.page <= 1 ? 'disabled' : ''} onclick="gotoTablePage('${key}', 1)">«</button>
           <button type="button" class="btn btn-sm" title="上一页" ${paging.page <= 1 ? 'disabled' : ''} onclick="gotoTablePage('${key}', ${paging.page - 1})">‹</button>
           ${pageHTML}
           <button type="button" class="btn btn-sm" title="下一页" ${paging.page >= paging.totalPages ? 'disabled' : ''} onclick="gotoTablePage('${key}', ${paging.page + 1})">›</button>
           <button type="button" class="btn btn-sm" title="末页" ${paging.page >= paging.totalPages ? 'disabled' : ''} onclick="gotoTablePage('${key}', ${paging.totalPages})">»</button>
+          <form class="table-page-jump" onsubmit="submitTablePage(event, '${key}')">
+            <span>跳至</span>
+            <input class="setting-input table-page-input" type="number" name="page" min="1" max="${paging.totalPages}" step="1" required inputmode="numeric" value="${paging.page}" data-page="${paging.page}" aria-label="跳转页码" title="输入页码，按 Enter 跳转" />
+            <span>页</span>
+          </form>
         </div>
         <label class="table-page-size">每页
           <select class="setting-input" aria-label="每页条数" onchange="changeTablePageSize('${key}', this.value)">${sizeOptions}</select>
