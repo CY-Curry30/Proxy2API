@@ -1034,8 +1034,8 @@
                 <option value="default">默认排序</option>
                 <option value="asc">延迟从低到高</option>
                 <option value="desc">延迟从高到低</option>
-                <option value="usage_desc">使用流量从高到低</option>
-                <option value="usage_asc">使用流量从低到高</option>
+                <option value="usage_desc">节点流量从高到低</option>
+                <option value="usage_asc">节点流量从低到高</option>
                 <option value="success_desc">拨号成功率从高到低</option>
                 <option value="success_asc">拨号成功率从低到高</option>
                 <option value="score_desc">调度分从高到低</option>
@@ -1131,12 +1131,12 @@
               <option value="quarantined">小黑屋</option>
               <option value="unknown">未探测</option>
             </select>
-            <input id="configNodeSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称或 URL" aria-label="搜索节点名称或 URL" oninput="resetTablePage('configNodes');renderConfigNodes()" />
             <select id="configNodeNameSort" class="setting-input table-tool" onchange="resetTablePage('configNodes');renderConfigNodes()" title="名称排序">
               <option value="default">默认排序</option>
               <option value="asc">名称升序</option>
               <option value="desc">名称降序</option>
             </select>
+            <input id="configNodeSearch" class="setting-input table-tool table-search" type="search" placeholder="搜索节点名称或 URL" aria-label="搜索节点名称或 URL" oninput="resetTablePage('configNodes');renderConfigNodes()" />
           </div>
           <div class="table-container">
             <table>
@@ -1192,7 +1192,6 @@
               <option value="error">更新失败</option>
               <option value="pending">待更新</option>
             </select>
-            <input id="subscriptionSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索订阅名称或 URL" oninput="resetTablePage('subscriptions');renderSubscriptions()" />
             <select id="subscriptionSort" class="setting-input table-tool" onchange="resetTablePage('subscriptions');renderSubscriptions()" title="订阅排序">
               <option value="default">默认排序</option>
               <option value="expires_asc">到期时间升序</option>
@@ -1204,6 +1203,7 @@
               <option value="usage_asc">使用流量升序</option>
               <option value="usage_desc">使用流量降序</option>
             </select>
+            <input id="subscriptionSearchInput" class="setting-input table-tool table-search" type="search" placeholder="搜索订阅名称或 URL" oninput="resetTablePage('subscriptions');renderSubscriptions()" />
             <!-- 批量操作按钮组 -->
             <div id="subscriptionBatchButtons" style="display:none; gap:8px; align-items:center; padding-left: 12px; border-left: 1px solid var(--border);">
               <span style="color: var(--text-muted); font-size: 12px;">已选 <strong id="subscriptionSelectedCount" style="color: var(--primary);">0</strong></span>
