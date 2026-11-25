@@ -144,15 +144,10 @@ cooldown:
 # 且会写入 projects.yaml 的 cooldown 字段，重启后仍然有效。
 
 # ───────────────────────────────────────────────────────────────
-# DNS 配置（用于节点域名解析，尤其是 VMess）
+# DNS 解析沿用系统 DNS 与 hosts 设置
 # ───────────────────────────────────────────────────────────────
-dns:
-  server: 223.5.5.5         # DNS 服务器地址
-  fallback_servers:          # DNS 解析失败时的备用服务器（主 DNS 为国内 DNS 时自动添加）
-    - 8.8.8.8               # Google DNS
-    - 1.1.1.1               # Cloudflare DNS
-  port: 53                  # DNS 端口
-  strategy: prefer_ipv4     # as_is / prefer_ipv4 / prefer_ipv6 / ipv4_only / ipv6_only
+# 程序自动生成 sing-box 1.14 的 local DNS 服务器及默认域名解析器，
+# 项目配置中无需填写核心 DNS 选项。自定义解析请修改运行主机的 DNS 设置。
 
 # ───────────────────────────────────────────────────────────────
 # 订阅自动刷新配置（可选）

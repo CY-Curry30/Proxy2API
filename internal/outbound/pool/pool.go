@@ -116,13 +116,13 @@ type memberState struct {
 
 type poolOutbound struct {
 	outbound.Adapter
-	ctx               context.Context
 	logger            singlog.ContextLogger
 	manager           adapter.OutboundManager
 	options           Options
 	mode              string
 	members           []*memberState
 	mu                sync.Mutex
+	started           atomic.Bool
 	rrCounter         atomic.Uint32
 	rng               *rand.Rand
 	rngMu             sync.Mutex // protects rng for random mode
@@ -140,6 +140,10 @@ type poolOutbound struct {
 	lastUsedMu        sync.RWMutex // protects lastUsedMember
 }
 
+var _ adapter.Lifecycle = (*poolOutbound)(nil)
+
+var errPoolNotRunning = errors.New("节点池尚未启动或已关闭")
+
 func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger, tag string, options Options) (adapter.Outbound, error) {
 	if len(options.Members) == 0 {
 		return nil, E.New("节点池至少需要一个成员")
@@ -154,7 +158,6 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 	memberCount := len(normalized.Members)
 	p := &poolOutbound{
 		Adapter:      outbound.NewAdapter(Type, tag, []string{N.NetworkTCP, N.NetworkUDP}, normalized.Members),
-		ctx:          ctx,
 		logger:       logger,
 		manager:      manager,
 		options:      normalized,
@@ -171,62 +174,6 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 	}
 	if p.sticky {
 		p.stickyMap = make(map[string]string)
-	}
-
-	// Register nodes immediately if monitor is available
-	if monitorMgr != nil {
-		if memberCount > 1 {
-			logger.Info("正在向监控器注册 ", memberCount, " 个节点")
-		}
-		registeredCount := 0
-		for _, memberTag := range normalized.Members {
-			// Acquire shared state for this tag (creates if not exists)
-			state := p.sharedStates.acquire(memberTag)
-
-			meta := normalized.Metadata[memberTag]
-			info := monitor.NodeInfo{
-				ID:              meta.ID,
-				Order:           meta.Order,
-				Tag:             memberTag,
-				Name:            meta.Name,
-				URI:             meta.URI,
-				Mode:            meta.Mode,
-				ListenAddress:   meta.ListenAddress,
-				Port:            meta.Port,
-				SubscriptionURL: meta.SubscriptionURL,
-				Source:          meta.Source,
-				Username:        meta.Username,
-				Password:        meta.Password,
-				Suppressed:      meta.Suppressed,
-				Quarantined:     meta.Quarantined,
-				MaxConnections:  normalizedCapacity(meta.MaxConnections),
-			}
-			state.configureCapacity(meta.MaxConnections)
-			entry := monitorMgr.Register(info)
-			if entry != nil {
-				// Attach entry to shared state so all pool instances share it
-				state.attachEntry(entry)
-				state.setReleaseProbe(p.makeReleaseProbeFunc(memberTag))
-				registeredCount++
-				// Set probe, release, and blacklist functions immediately
-				entry.SetRelease(p.makeReleaseByTagFunc(memberTag))
-				entry.SetBlacklistFn(p.makeBlacklistByTagFunc(memberTag))
-				if probeFn := p.makeProbeByTagFunc(memberTag); probeFn != nil {
-					entry.SetProbe(probeFn)
-				}
-				if traceFn := p.makeTraceByTagFunc(memberTag); traceFn != nil {
-					entry.SetTraceProbe(traceFn)
-				}
-				state.restore(entry)
-			} else {
-				logger.Warn("注册节点失败: ", memberTag)
-			}
-		}
-		if memberCount > 1 {
-			logger.Info("已向监控器注册 ", registeredCount, " 个节点")
-		}
-	} else {
-		logger.Warn("监控管理器为空，已跳过节点注册")
 	}
 
 	return p, nil
@@ -280,21 +227,29 @@ func normalizeOptions(options Options) Options {
 	return options
 }
 
-func (p *poolOutbound) Start(stage adapter.StartStage) error {
-	if stage != adapter.StartStateStart {
+func (p *poolOutbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage == adapter.StartStateInitialize {
+		scope.Add(func() error {
+			p.started.Store(false)
+			return nil
+		})
+		return nil
+	}
+	if stage != adapter.StartStateStart && stage != adapter.StartStateStarted {
 		return nil
 	}
 	p.mu.Lock()
-	err := p.initializeMembersLocked()
-	p.mu.Unlock()
-	if err != nil {
+	defer p.mu.Unlock()
+	if err := p.initializeMembersLocked(); err != nil {
 		return err
 	}
-	// Initial health checks are driven centrally by the monitor's probeAllNodes
-	// (StartPeriodicHealthCheck on boot, ProbeAllNow on reload), bounded by the
-	// configured probe concurrency. A per-pool startup probe re-probed the same
-	// nodes and, with one pool per node, required a process-wide semaphore to
-	// avoid fd exhaustion; routing all probing through the monitor removes both.
+	if stage == adapter.StartStateStarted {
+		// DNS transports and member outbounds must finish startup before manual,
+		// periodic or cross-project probes can dial through them.
+		p.started.Store(true)
+		p.registerMembersLocked()
+	}
+	// Health checks remain centrally scheduled by the monitor.
 	return nil
 }
 
@@ -322,49 +277,54 @@ func (p *poolOutbound) initializeMembersLocked() error {
 			entry:    state.entryHandle(),
 		}
 
-		// Connect to existing monitor entry if available
-		if p.monitor != nil {
-			meta := p.options.Metadata[tag]
-			info := monitor.NodeInfo{
-				ID:              meta.ID,
-				Order:           meta.Order,
-				Tag:             tag,
-				Name:            meta.Name,
-				URI:             meta.URI,
-				Mode:            meta.Mode,
-				ListenAddress:   meta.ListenAddress,
-				Port:            meta.Port,
-				SubscriptionURL: meta.SubscriptionURL,
-				Source:          meta.Source,
-				Username:        meta.Username,
-				Password:        meta.Password,
-				Suppressed:      meta.Suppressed,
-				Quarantined:     meta.Quarantined,
-				MaxConnections:  normalizedCapacity(meta.MaxConnections),
-			}
-			state.configureCapacity(meta.MaxConnections)
-			entry := p.monitor.Register(info)
-			if entry != nil {
-				state.attachEntry(entry)
-				state.setReleaseProbe(p.makeReleaseProbeFunc(member.tag))
-				member.entry = entry
-				entry.SetRelease(p.makeReleaseFunc(member))
-				entry.SetBlacklistFn(p.makeBlacklistByTagFunc(member.tag))
-				if probe := p.makeProbeFunc(member); probe != nil {
-					entry.SetProbe(probe)
-				}
-				if traceFn := p.makeTraceFunc(member); traceFn != nil {
-					entry.SetTraceProbe(traceFn)
-				}
-				state.restore(entry)
-			}
-		}
 		members = append(members, member)
 	}
 	p.members = members
 	p.logger.Info("节点池初始化完成，共 ", len(members), " 个成员")
 
 	return nil
+}
+
+// registerMembersLocked publishes monitoring callbacks only at the final
+// startup stage. Lazy member lookup must never register a half-built box.
+func (p *poolOutbound) registerMembersLocked() {
+	if p.monitor == nil {
+		p.logger.Warn("监控管理器为空，已跳过节点注册")
+		return
+	}
+	for _, member := range p.members {
+		meta := p.options.Metadata[member.tag]
+		info := monitor.NodeInfo{
+			ID:              meta.ID,
+			Order:           meta.Order,
+			Tag:             member.tag,
+			Name:            meta.Name,
+			URI:             meta.URI,
+			Mode:            meta.Mode,
+			ListenAddress:   meta.ListenAddress,
+			Port:            meta.Port,
+			SubscriptionURL: meta.SubscriptionURL,
+			Source:          meta.Source,
+			Username:        meta.Username,
+			Password:        meta.Password,
+			Suppressed:      meta.Suppressed,
+			Quarantined:     meta.Quarantined,
+			MaxConnections:  normalizedCapacity(meta.MaxConnections),
+		}
+		entry := p.monitor.Register(info)
+		if entry == nil {
+			p.logger.Warn("注册节点失败: ", member.tag)
+			continue
+		}
+		member.shared.attachEntry(entry)
+		member.shared.setReleaseProbe(p.makeReleaseProbeFunc(member.tag))
+		member.entry = entry
+		entry.SetRelease(p.makeReleaseFunc(member))
+		entry.SetBlacklistFn(p.makeBlacklistByTagFunc(member.tag))
+		entry.SetProbe(p.makeProbeFunc(member))
+		entry.SetTraceProbe(p.makeTraceFunc(member))
+		member.shared.restore(entry)
+	}
 }
 
 func (p *poolOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -524,6 +484,9 @@ func clientAborted(ctx context.Context, err error) bool {
 // acquireMember serializes selection plus reservation across all listeners in a
 // project. Network I/O happens after releasing this lock.
 func (p *poolOutbound) acquireMember(network string, tried map[string]bool, stickyKey string) (*memberLease, error) {
+	if !p.started.Load() {
+		return nil, errPoolNotRunning
+	}
 	p.sharedStates.selectionMu.Lock()
 	defer p.sharedStates.selectionMu.Unlock()
 	now := time.Now()
@@ -1420,27 +1383,12 @@ func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Conte
 		return nil
 	}
 	return func(ctx context.Context, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
+		if !p.started.Load() {
+			return monitor.ProbeResult{}, errPoolNotRunning
+		}
 		destination, host, path, useTLS, tlsInsecure, ok := p.monitor.DestinationForProbe()
 		if !ok {
 			return monitor.ProbeResult{}, E.New("未配置探测目标")
-		}
-		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure, report)
-	}
-}
-
-// makeProbeByTagFunc creates a probe function that works before member initialization
-func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
-	if p.monitor == nil {
-		return nil
-	}
-	return func(ctx context.Context, report func(monitor.ProbeResult)) (monitor.ProbeResult, error) {
-		destination, host, path, useTLS, tlsInsecure, ok := p.monitor.DestinationForProbe()
-		if !ok {
-			return monitor.ProbeResult{}, E.New("未配置探测目标")
-		}
-		member, err := p.memberForTag(tag)
-		if err != nil {
-			return monitor.ProbeResult{}, err
 		}
 		return p.probeMember(ctx, member, destination, host, path, useTLS, tlsInsecure, report)
 	}
@@ -1453,6 +1401,9 @@ func (p *poolOutbound) makeTraceFunc(member *memberState) func(ctx context.Conte
 		return nil
 	}
 	return func(ctx context.Context) (monitor.ProbeResult, error) {
+		if !p.started.Load() {
+			return monitor.ProbeResult{}, errPoolNotRunning
+		}
 		_, _, _, _, tlsInsecure, ok := p.monitor.DestinationForProbe()
 		if !ok {
 			return monitor.ProbeResult{}, E.New("未配置探测目标")
@@ -1461,52 +1412,6 @@ func (p *poolOutbound) makeTraceFunc(member *memberState) func(ctx context.Conte
 		locationCtx, cancel := context.WithTimeout(ctx, time.Duration(probeTraceMaxAttempts)*attemptTimeout)
 		defer cancel()
 		return p.probeLocation(locationCtx, member, tlsInsecure, attemptTimeout)
-	}
-}
-
-// makeTraceByTagFunc is makeTraceFunc for callers that only know the tag.
-func (p *poolOutbound) makeTraceByTagFunc(tag string) func(ctx context.Context) (monitor.ProbeResult, error) {
-	if p.monitor == nil {
-		return nil
-	}
-	return func(ctx context.Context) (monitor.ProbeResult, error) {
-		_, _, _, _, tlsInsecure, ok := p.monitor.DestinationForProbe()
-		if !ok {
-			return monitor.ProbeResult{}, E.New("未配置探测目标")
-		}
-		member, err := p.memberForTag(tag)
-		if err != nil {
-			return monitor.ProbeResult{}, err
-		}
-		attemptTimeout := p.monitor.ProbeAttemptTimeout()
-		locationCtx, cancel := context.WithTimeout(ctx, time.Duration(probeTraceMaxAttempts)*attemptTimeout)
-		defer cancel()
-		return p.probeLocation(locationCtx, member, tlsInsecure, attemptTimeout)
-	}
-}
-
-// memberForTag resolves a pool member, initializing the member list on demand so
-// probe functions registered before Start still work.
-func (p *poolOutbound) memberForTag(tag string) (*memberState, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.members) == 0 {
-		if err := p.initializeMembersLocked(); err != nil {
-			return nil, err
-		}
-	}
-	for _, m := range p.members {
-		if m.tag == tag {
-			return m, nil
-		}
-	}
-	return nil, E.New("节点池成员不存在: ", tag)
-}
-
-// makeReleaseByTagFunc creates a release function that works before member initialization
-func (p *poolOutbound) makeReleaseByTagFunc(tag string) func() {
-	return func() {
-		p.sharedStates.release(tag)
 	}
 }
 

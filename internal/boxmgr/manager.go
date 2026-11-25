@@ -566,8 +566,9 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		endpointRegistry := include.EndpointRegistry()
 		dnsRegistry := include.DNSTransportRegistry()
 		serviceRegistry := include.ServiceRegistry()
+		certificateRegistry := include.CertificateProviderRegistry()
 
-		boxCtx := box.Context(ctx, inboundRegistry, outboundRegistry, endpointRegistry, dnsRegistry, serviceRegistry)
+		boxCtx := box.Context(ctx, inboundRegistry, outboundRegistry, endpointRegistry, dnsRegistry, serviceRegistry, certificateRegistry)
 		boxCtx = monitor.ContextWith(boxCtx, m.monitorMgr)
 		boxCtx = pool.ContextWithSharedStateStore(boxCtx, m.poolState)
 

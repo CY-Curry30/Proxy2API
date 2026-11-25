@@ -876,12 +876,11 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 		e.store = m.stateStore
 		// e.quarantined is deliberately NOT re-derived from info here.
 		//
-		// Pool metadata is a build-time snapshot of the project config, and in
-		// multi-port/hybrid mode the per-node pools are initialized lazily —
-		// long after an operator may have moved a node in or out of the black
-		// room through the API. Re-applying that stale value would silently undo
-		// a manual decision, which is exactly what a manual-only feature must
-		// never do. Config-driven changes still reach the runtime because every
+		// Pool metadata is a build-time snapshot of the project config, and
+		// multiple listeners register the same node separately during startup.
+		// Re-applying that stale value could undo an operator's decision to move
+		// the node in or out of the black room through the API. Config-driven
+		// changes still reach the runtime because every
 		// reload clears the entries (ClearNodes) before re-registering them, and
 		// a stopped project builds its entries from a freshly loaded config.
 		e.persistLocked(false)

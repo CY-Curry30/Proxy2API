@@ -264,8 +264,19 @@ func Build(cfg *config.Config) (option.Options, error) {
 		}
 	}
 
+	// Keep the existing system DNS behavior while making the resolver explicit
+	// for sing-box 1.14's domain dialers and new DNS server format.
+	route.DefaultDomainResolver = &option.DomainResolveOptions{Server: "local"}
 	opts := option.Options{
-		Log:       &option.LogOptions{Level: strings.ToLower(cfg.LogLevel)},
+		Log: &option.LogOptions{Level: strings.ToLower(cfg.LogLevel)},
+		DNS: &option.DNSOptions{
+			RawDNSOptions: option.RawDNSOptions{
+				Servers: []option.DNSServerOptions{{
+					Type: C.DNSTypeLocal, Tag: "local", Options: &option.LocalDNSServerOptions{},
+				}},
+				Final: "local",
+			},
+		},
 		Inbounds:  inbounds,
 		Outbounds: outbounds,
 		Route:     &route,

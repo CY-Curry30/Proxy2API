@@ -24,7 +24,7 @@ Proxy2API 是一个基于 sing-box 的代理池管理工具。
   - 节点配置增删改查 + 重载
   - 共享订阅定义管理；订阅状态、刷新时间和周期按项目独立保存
   - 系统设置页内的**实时日志控制台**
-- 新增可配置 DNS 解析器（对 VMess 域名节点非常关键）。
+- 节点域名解析使用系统 DNS，并显式配置核心的默认域名解析器。
 - **可配置日志轮转**，支持大小限制、备份数量和压缩。
 
 ## 多项目隔离
@@ -136,29 +136,11 @@ sticky:
   fixed_node: "" # 可选；留空时选择最低延迟节点
 ```
 
-## DNS 配置说明
+## DNS 解析说明
 
-`dns` 会同时影响 sing-box DNS 客户端和 VMess 域名拨号解析：
+节点域名解析沿用系统 DNS 与 hosts 设置。程序为 sing-box 1.14 显式生成 `local` 类型的 DNS 服务器，并将其指定为默认域名解析器；现有项目配置无需新增核心 DNS 字段。
 
-```yaml
-dns:
-  server: 223.5.5.5
-  fallback_servers:    # 备用 DNS 服务器（主 DNS 解析失败时使用）
-    - 8.8.8.8
-    - 1.1.1.1
-  port: 53
-  strategy: prefer_ipv4
-```
-
-`strategy` 可选值：
-
-- `as_is`
-- `prefer_ipv4`
-- `prefer_ipv6`
-- `ipv4_only`
-- `ipv6_only`
-
-如果日志中出现 `lookup <domain>: empty result`，请优先检查该 DNS 配置是否可达且策略合理。
+如果日志中出现 `lookup <domain>: empty result`，请检查运行主机的 DNS 配置及该节点域名是否可正常解析。
 
 ## 运行模式
 
@@ -379,9 +361,15 @@ docker run --user $(id -u):$(id -g) \
 
 ## 开发验证
 
+需要 Go 1.25.5 或更新版本，核心依赖为 sing-box v1.14.4。
+
 ```bash
 go test ./...
+go test -tags "with_utls,with_quic,with_clash_api" ./...
+go build -tags "with_utls,with_quic,with_clash_api" -o Proxy2API.exe .
 ```
+
+`with_utls`、`with_quic` 和 `with_clash_api` 保留 TLS 指纹、Hysteria/TUIC 等 QUIC 协议和流量 API 支持。启动参数保持为 `-config config.yaml`。
 
 ## Star History
 
